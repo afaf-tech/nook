@@ -122,3 +122,14 @@ implementations:
 - **Chip weight.** The design gives chips a 600 weight; egui's bundled proportional family has one
   weight, so chips read by colour, size and a pill radius instead. Bundling a bold family is the
   upgrade path if the weight ever has to carry meaning.
+- **Painted activity glyphs.** The rail's five icons are hand-drawn into a `Rect` from the design's
+  own SVG paths (`ui::icons`), so there is no icon font and no asset bundler; the ceiling is that each
+  new glyph is code, and a second icon family with different stroke rules would need a real icon
+  source. `ponytail:` the sampler handles the three-segment cubics the design uses and nothing else.
+- **Rail semantics.** The rail speaks the app's verbs, not the mockup's marketing copy: a report is a
+  chart built from a query result, and there is no "new report" verb, so Reports selects an existing
+  report tab and is disabled when none is open. Fake workspaces would have needed a state the engine
+  does not have.
+- **Bar bands.** `theme::bar_frame` contributes no stroke and no margin, and every panel is built with
+  `show_separator_line(false)`, so a bar's height is its token plus the hairline painted inside it.
+  The ceiling is that any future panel must paint its own edges to be visible.
