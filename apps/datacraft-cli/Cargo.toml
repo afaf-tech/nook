@@ -1,0 +1,17 @@
+[package]
+name = "datacraft-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "datacraft-cli"
+path = "src/main.rs"
+
+[dependencies]
+datacraft-core = { workspace = true }
+datacraft-model = { workspace = true }
+datacraft-drivers = { workspace = true }
+datacraft-engine = { workspace = true }
+datacraft-mcp = { workspace = true }
+serde_json = { workspace = true }

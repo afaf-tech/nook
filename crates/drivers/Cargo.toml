@@ -1,0 +1,16 @@
+[package]
+name = "datacraft-drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+datacraft-core = { workspace = true }
+datacraft-model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true, features = ["column_decltype"] }
+postgres = { workspace = true }
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+mysql = { workspace = true, features = ["native-tls"] }

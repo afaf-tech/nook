@@ -1,0 +1,15 @@
+[package]
+name = "datacraft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "datacraft"
+path = "src/main.rs"
+
+[dependencies]
+datacraft-core = { workspace = true }
+datacraft-engine = { workspace = true }
+datacraft-ui = { workspace = true }
+eframe = { workspace = true }

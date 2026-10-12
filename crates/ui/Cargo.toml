@@ -1,0 +1,16 @@
+[package]
+name = "datacraft-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+datacraft-core = { workspace = true }
+datacraft-model = { workspace = true }
+datacraft-drivers = { workspace = true }
+datacraft-engine = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+serde_json = { workspace = true }
+rfd = { workspace = true }
+png = "0.17"

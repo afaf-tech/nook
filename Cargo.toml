@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+  "xtask",
+  "crates/ui",
+  "apps/datacraft",
+  "crates/mcp",
+  "apps/datacraft-cli",
+  "crates/core",
+  "crates/model",
+  "crates/drivers",
+  "crates/engine",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+datacraft-core = { path = "crates/core" }
+datacraft-model = { path = "crates/model" }
+datacraft-drivers = { path = "crates/drivers" }
+datacraft-engine = { path = "crates/engine" }
+datacraft-mcp = { path = "crates/mcp" }
+datacraft-ui = { path = "crates/ui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = "0.40"
+postgres = "0.19"
+mysql = "28"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.36"
+egui_kittest = { version = "0.36", features = ["snapshot", "wgpu"] }
+rfd = "0.15"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+
+[profile.dev]
+debug = 1

@@ -1,0 +1,297 @@
+//! Application-level commands: settings, tabs, snippets, help, project files.
+
+use datacraft_core::{Error, Result};
+use serde_json::json;
+
+use crate::sqltext::KeywordCase;
+use crate::{CommandSpec, Level, Session, Snippet, TabKind};
+
+pub fn commands() -> Vec<CommandSpec> {
+    vec![
+        CommandSpec::new("app.settings", "Preferences", "App", get_settings)
+            .params("{}")
+            .help("Report the current preferences."),
+        CommandSpec::new("app.setSetting", "Change a preference", "App", set_setting)
+            .params(r#"{"key":"theme","value":"light"}"#)
+            .help("Set one preference: theme, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects."),
+        CommandSpec::new("app.log", "Message log", "App", get_log)
+            .params(r#"{"limit":50}"#)
+            .help("Recent messages, oldest first."),
+        CommandSpec::new("app.clearLog", "Clear the message log", "App", clear_log),
+        CommandSpec::new("app.help", "Command help", "Help", help).params(r#"{"id":"sql.run"}"#),
+        CommandSpec::new("app.about", "About DataCraft", "Help", about),
+        CommandSpec::new("app.platform", "Platform information", "Help", platform)
+            .help("Build target, UI toolkit and where the configuration lives."),
+        CommandSpec::new("app.mcp", "MCP server", "Help", mcp_info)
+            .help("How an agent reaches DataCraft: every command is an MCP tool."),
+        CommandSpec::new("tab.new", "New query tab", "App", new_query_tab)
+            .params(r#"{"conn":"local","sql":"select 1"}"#)
+            .shortcut("cmd+t"),
+        CommandSpec::new("tab.newData", "New data tab", "App", new_data_tab)
+            .params(r#"{"table":"public.users"}"#),
+        CommandSpec::new("tab.list", "List tabs", "App", list_tabs),
+        CommandSpec::new("tab.select", "Switch tab", "App", select_tab).params(r#"{"index":0}"#),
+        CommandSpec::new("tab.close", "Close tab", "App", close_tab).shortcut("cmd+w"),
+        CommandSpec::new("tab.setEditorText", "Set editor text", "App", set_editor_text)
+            .params(r#"{"sql":"select 1"}"#),
+        CommandSpec::new("tab.rename", "Rename the tab", "App", rename_tab),
+        CommandSpec::new("snippet.list", "List snippets", "App", list_snippets),
+        CommandSpec::new("snippet.save", "Save a snippet", "App", save_snippet)
+            .params(r#"{"name":"Count rows","sql":"select count(*) from t"}"#),
+        CommandSpec::new("snippet.delete", "Delete a snippet", "App", delete_snippet),
+    ]
+}
+
+fn get_settings(session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    let s = &session.settings;
+    Ok(json!({
+        "theme": s.theme,
+        "page_size": s.page_size,
+        "max_rows": s.max_rows,
+        "font_size": s.font_size,
+        "confirm_destructive": s.confirm_destructive,
+        "auto_commit_edits": s.auto_commit_edits,
+        "keyword_case": match s.keyword_case { KeywordCase::Upper => "upper", KeywordCase::Lower => "lower", KeywordCase::Preserve => "preserve" },
+        "show_system_objects": s.show_system_objects,
+        "config_dir": crate::profiles::config_dir().to_string_lossy(),
+        "profiles": session.profiles.list().len(),
+        "jobs": session.jobs.jobs.len(),
+    }))
+}
+
+fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let key = p.str_arg("key")?;
+    let value = p.str_arg("value")?;
+    match key.as_str() {
+        "theme" => {
+            if !matches!(value.as_str(), "dark" | "light" | "system") {
+                return Err(Error::config("theme must be dark, light or system"));
+            }
+            session.settings.theme = value.clone();
+        }
+        "page_size" => session.settings.page_size = clamp_usize(&value, 1, 100_000)?,
+        "max_rows" => session.settings.max_rows = clamp_usize(&value, 1, 5_000_000)?,
+        "font_size" => {
+            let size: f32 = value
+                .parse()
+                .map_err(|_| Error::config("font_size must be a number"))?;
+            session.settings.font_size = size.clamp(9.0, 28.0);
+        }
+        "confirm_destructive" => session.settings.confirm_destructive = truthy(&value),
+        "auto_commit_edits" => session.settings.auto_commit_edits = truthy(&value),
+        "show_system_objects" => session.settings.show_system_objects = truthy(&value),
+        "keyword_case" => {
+            session.settings.keyword_case = KeywordCase::parse(&value)
+                .ok_or_else(|| Error::config("keyword_case must be upper, lower or preserve"))?;
+        }
+        other => {
+            return Err(Error::config(format!(
+                "unknown preference '{other}'; try theme, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects"
+            )))
+        }
+    }
+    session.log(Level::Info, format!("{key} = {value}"));
+    get_settings(session, p)
+}
+
+fn clamp_usize(value: &str, min: usize, max: usize) -> Result<usize> {
+    let n: usize = value
+        .parse()
+        .map_err(|_| Error::config(format!("'{value}' is not a whole number")))?;
+    Ok(n.clamp(min, max))
+}
+
+fn truthy(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn get_log(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let limit = p.int_opt("limit", 50).clamp(1, 2000) as usize;
+    let start = session.messages.len().saturating_sub(limit);
+    let messages: Vec<serde_json::Value> = session.messages[start..]
+        .iter()
+        .map(|m| {
+            json!({
+                "level": match m.level { Level::Info => "info", Level::Warn => "warn", Level::Error => "error", Level::Success => "ok" },
+                "text": m.text,
+            })
+        })
+        .collect();
+    Ok(json!({ "messages": messages }))
+}
+
+fn clear_log(session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    let n = session.messages.len();
+    session.messages.clear();
+    Ok(json!({ "cleared": n }))
+}
+
+fn help(_session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    match p.str_opt("id") {
+        Some(id) => {
+            let spec = crate::find(&id)
+                .ok_or_else(|| Error::not_found(format!("unknown command '{id}'")))?;
+            Ok(json!({
+                "id": spec.id, "label": spec.label, "group": spec.group,
+                "shortcut": spec.shortcut, "params": spec.params, "help": spec.help,
+            }))
+        }
+        None => Ok(json!({
+            "commands": crate::registry().iter().map(|c| json!({
+                "id": c.id, "label": c.label, "group": c.group, "shortcut": c.shortcut,
+            })).collect::<Vec<_>>()
+        })),
+    }
+}
+
+fn about(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    Ok(json!({
+        "name": "DataCraft",
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": "Fast, open database administration: SQLite, PostgreSQL and MySQL in one native app.",
+        "license": "MIT OR Apache-2.0",
+        "commands": crate::registry().len(),
+    }))
+}
+
+fn platform(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    Ok(json!({
+        "target": format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        "ui": "egui on the GPU (native window, no Electron, no browser)",
+        "lanes": ["desktop app", "datacraft-cli", "MCP over stdio", "JSON control channel"],
+        "config_dir": crate::profiles::config_dir().to_string_lossy(),
+        "profiles_file": crate::profiles::profiles_path().to_string_lossy(),
+        "jobs_file": crate::profiles::jobs_path().to_string_lossy(),
+        "keychain": crate::profiles::keychain_available(),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+fn mcp_info(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    Ok(json!({
+        "transport": "stdio",
+        "protocol": "2025-06-18",
+        "entry": "datacraft-cli mcp",
+        "tools": crate::registry().len(),
+        "note": "tool names are command ids, arguments are command parameters",
+        "groups": {
+            "connection": registry_group("Connection"),
+            "query": registry_group("Query"),
+            "data": registry_group("Data"),
+            "transfer": registry_group("Transfer"),
+        },
+    }))
+}
+
+fn registry_group(group: &str) -> usize {
+    crate::registry()
+        .iter()
+        .filter(|c| c.group == group)
+        .count()
+}
+
+fn new_query_tab(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let conn = match p.conn_id() {
+        Some(id) => Some(session.conn_index(&id)?),
+        None => session.active_conn,
+    };
+    let index = session.add_tab(TabKind::Query, "Query", conn);
+    if let Some(sql) = p.str_opt("sql") {
+        if let Some(tab) = session.tabs.get_mut(index) {
+            tab.sql.text = sql;
+        }
+    }
+    Ok(json!({ "tab": index }))
+}
+
+fn new_data_tab(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let conn = session.resolve_conn(p)?;
+    let table_name = p.str_arg("table")?;
+    let table = crate::TableRef::parse(&table_name);
+    let index = session.add_tab(TabKind::Data, table.key(), Some(conn));
+    super::bind_grid_table(session, index, table)?;
+    super::load_grid(session, index)?;
+    Ok(json!({ "tab": index }))
+}
+
+fn list_tabs(session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    Ok(json!({
+        "active": session.active_tab,
+        "tabs": session.tabs.iter().enumerate().map(|(i, t)| json!({
+            "index": i, "id": t.id, "title": t.title, "kind": format!("{:?}", t.kind).to_lowercase(),
+            "conn": t.conn, "dirty": t.grid.dirty(),
+        })).collect::<Vec<_>>()
+    }))
+}
+
+fn select_tab(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let index = p.int_arg("index").unwrap_or(0);
+    if index < 0 || index as usize >= session.tabs.len() {
+        return Err(Error::not_found(format!("no tab at {index}")));
+    }
+    session.active_tab = Some(index as usize);
+    Ok(json!({ "tab": index }))
+}
+
+fn close_tab(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let index = match p.int_opt("index", -1) {
+        n if n >= 0 => n as usize,
+        _ => session
+            .active_tab
+            .ok_or_else(|| Error::internal("no active tab"))?,
+    };
+    session.close_tab(index)?;
+    Ok(json!({ "closed": index }))
+}
+
+fn set_editor_text(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let sql = p.str_arg("sql")?;
+    let tab = session.active_tab_mut()?;
+    tab.sql.text = sql.clone();
+    Ok(json!({ "length": sql.chars().count() }))
+}
+
+fn rename_tab(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let title = p.str_arg("title")?;
+    let tab = session.active_tab_mut()?;
+    tab.title = title;
+    Ok(json!({ "ok": true }))
+}
+
+fn list_snippets(session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    Ok(json!({
+        "snippets": session.snippets.iter().map(|s| json!({
+            "name": s.name, "sql": s.sql, "tags": s.tags
+        })).collect::<Vec<_>>()
+    }))
+}
+
+fn save_snippet(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    let sql = p
+        .str_opt("sql")
+        .or_else(|| session.active_tab().ok().map(|t| t.sql.text.clone()))
+        .ok_or_else(|| Error::config("nothing to save"))?;
+    if sql.trim().is_empty() {
+        return Err(Error::config("refusing to save an empty snippet"));
+    }
+    let tags = p.list("tags");
+    match session.snippets.iter_mut().find(|s| s.name == name) {
+        Some(existing) => existing.sql = sql,
+        None => session.snippets.push(Snippet { name, sql, tags }),
+    }
+    Ok(json!({ "snippets": session.snippets.len() }))
+}
+
+fn delete_snippet(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    let before = session.snippets.len();
+    session.snippets.retain(|s| s.name != name);
+    if session.snippets.len() == before {
+        return Err(Error::not_found(format!("no snippet named '{name}'")));
+    }
+    Ok(json!({ "removed": name }))
+}
