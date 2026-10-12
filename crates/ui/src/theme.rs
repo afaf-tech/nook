@@ -126,7 +126,7 @@ impl Tokens {
                 selection: Color32::from_rgb(0xd6, 0xe4, 0xff),
                 dirty: Color32::from_rgb(0xff, 0xf2, 0xce),
                 dirty_text: Color32::from_rgb(0x7a, 0x51, 0x00),
-                hover: Color32::from_rgb(0xee, 0xf2, 0xf7),
+                hover: Color32::from_rgb(0xe3, 0xe9, 0xf1),
                 // rgba(19,26,36,.35) — the design's light scrim.
                 scrim: Color32::from_rgba_unmultiplied(0x13, 0x1a, 0x24, 89),
                 chart: [
@@ -167,7 +167,7 @@ impl Tokens {
                 selection: Color32::from_rgb(0x17, 0x32, 0x4f),
                 dirty: Color32::from_rgb(0x33, 0x2a, 0x00),
                 dirty_text: Color32::from_rgb(0xe5, 0xc0, 0x7b),
-                hover: Color32::from_rgb(0x2a, 0x2d, 0x2e),
+                hover: Color32::from_rgb(0x2b, 0x2b, 0x2b),
                 // rgba(15,15,15,.6) — the design's dark scrim.
                 scrim: Color32::from_rgba_unmultiplied(0x0f, 0x0f, 0x0f, 153),
                 chart: [
@@ -482,27 +482,41 @@ pub fn segmented(ui: &mut Ui, tokens: &Tokens, options: &[(&str, bool)]) -> Opti
 
 /// Small label in a rounded box: counts, states, versions.
 ///
+/// The chip allocates its own 24px box rather than wrapping a `Frame`: a frame inside a horizontal
+/// layout stretches to the row height the parent offers (40px inside a toolbar band), which is how a
+/// chip stops being a chip.
+///
 /// ponytail: the design's chips are 600-weight; egui's default proportional family has no weight
-/// axis, so the chip reads by colour and size alone. Add a bold font family if one is ever bundled.
+/// axis, so the chip reads by colour, size and shape alone. Add a bold font family if one is ever
+/// bundled.
 pub fn chip(ui: &mut Ui, tokens: &Tokens, text: &str, colour: Color32) -> Response {
-    let label = RichText::new(text).size(T_XS).color(colour);
-    Frame::new()
-        .fill(tokens.panel_alt)
-        .stroke(Stroke::new(1.0, tokens.stroke))
-        .corner_radius(CornerRadius::same(R_CHIP))
-        .inner_margin(Margin {
-            left: S4,
-            right: S4,
-            top: 0,
-            bottom: 0,
-        })
-        .show(ui, |ui| {
-            ui.set_min_height(CHIP_H);
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.label(label)
-            });
-        })
-        .response
+    let font = tokens.font(T_XS);
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x;
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(text_width + 2.0 * f32::from(S4), CHIP_H),
+        Sense::hover(),
+    );
+    let radius = CornerRadius::same(R_CHIP);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        font,
+        colour,
+    );
+    response
 }
 
 /// Coloured dot used for connection state and message levels.
@@ -595,10 +609,13 @@ mod tests {
         (lighter + 0.05) / (darker + 0.05)
     }
 
-    /// Every foreground/background pair the interface paints, in both themes, against the floors the
-    /// design sets: 4.5:1 for text, 3.0:1 for large text and for state colours that carry meaning
-    /// (`accent`, the indicator, a hairline against its panel). This is the assertion a screenshot
-    /// cannot make for us: the palette is checked arithmetically, not by eye.
+    /// Every foreground/background pair the interface paints, in both themes, against the floors this
+    /// application holds itself to: 4.5:1 for text and for any semantic colour used as text (the
+    /// design's contract, including the dim and faint ranks on each surface they sit on); 3.0:1 for
+    /// the accent indicator over its soft fill; 1.3:1 for a hairline, because the design's own dark
+    /// border measures 1.33:1 on its panel, and below that a border stops reading as a boundary. The
+    /// design's named worst cases are the pairs below: dim and faint on `panel_high`, the accent on
+    /// `accent_dim`, `accent_text` on `accent`, and each semantic colour on its soft fill.
     #[test]
     fn palettes_clear_their_contrast_floors() {
         for tokens in [Tokens::of("dark"), Tokens::of("light")] {
@@ -674,15 +691,27 @@ mod tests {
         }
     }
 
-    /// The scrim has to dim what it covers in both themes: it is drawn over panels, so it must not
-    /// be brighter than the surface underneath it.
+    /// The scrim has to dim what it covers, in both themes. `Color32` stores premultiplied bytes, so
+    /// the check composites those bytes over the panel using the token's alpha instead of treating a
+    /// translucent colour as opaque — the opaque comparison passes for any dark value, including one
+    /// too faint to dim anything.
     #[test]
     fn scrim_dims_the_surface_below_it() {
         for tokens in [Tokens::of("dark"), Tokens::of("light")] {
             let theme = if tokens.dark { "dark" } else { "light" };
+            let alpha = f32::from(tokens.scrim.a()) / 255.0;
+            let over = |over: u8, under: u8| {
+                (f32::from(over) + f32::from(under) * (1.0 - alpha)).round() as u8
+            };
+            let dimmed = Color32::from_rgb(
+                over(tokens.scrim.r(), tokens.panel.r()),
+                over(tokens.scrim.g(), tokens.panel.g()),
+                over(tokens.scrim.b(), tokens.panel.b()),
+            );
             assert!(
-                luminance(tokens.scrim) <= luminance(tokens.panel),
-                "{theme}: scrim is brighter than the panel it covers"
+                luminance(dimmed) < luminance(tokens.panel) * 0.9,
+                "{theme}: the scrim leaves {:.0}% of the panel's luminance, which is not dimming",
+                luminance(dimmed) / luminance(tokens.panel) * 100.0
             );
         }
     }

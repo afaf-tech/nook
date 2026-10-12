@@ -191,7 +191,7 @@ pub fn show(
                         egui::pos2(rect.right() - 12.0, rect.center().y - 8.0),
                         Align2::RIGHT_CENTER,
                         &conn.cfg.group,
-                        tokens.font(10.5),
+                        tokens.font(design::T_XS),
                         tokens.text_faint,
                     );
                 }
@@ -199,7 +199,7 @@ pub fn show(
                     egui::pos2(rect.right() - 12.0, rect.center().y + 10.0),
                     Align2::RIGHT_CENTER,
                     format!("{tables} tables"),
-                    tokens.font(10.5),
+                    tokens.font(design::T_XS),
                     tokens.text_faint,
                 );
 
@@ -255,7 +255,7 @@ pub fn show(
                                 ),
                                 Align2::LEFT_CENTER,
                                 if schema_open { "▾" } else { "▸" },
-                                tokens.font(10.5),
+                                tokens.font(design::T_XS),
                                 tokens.text_dim,
                             );
                             ui.painter().text(
@@ -265,14 +265,14 @@ pub fn show(
                                 ),
                                 Align2::LEFT_CENTER,
                                 &schema.name,
-                                tokens.font(12.0),
+                                tokens.font(design::T_SM),
                                 tokens.text,
                             );
                             ui.painter().text(
                                 egui::pos2(rect.right() - 12.0, rect.center().y),
                                 Align2::RIGHT_CENTER,
                                 format!("{}", schema.tables.len()),
-                                tokens.font(10.5),
+                                tokens.font(design::T_XS),
                                 tokens.text_faint,
                             );
                             if response.clicked() {
@@ -348,7 +348,7 @@ pub fn show(
                                     ),
                                     Align2::LEFT_CENTER,
                                     crate::table::clip(&table.name, 30),
-                                    tokens.font(12.0),
+                                    tokens.font(design::T_SM),
                                     tokens.text,
                                 );
                                 if let Some(rows) = table.row_estimate {
