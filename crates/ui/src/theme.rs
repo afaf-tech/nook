@@ -23,11 +23,18 @@ pub const ROW_COMFORT_H: f32 = 30.0;
 pub const HEAD_H: f32 = 28.0;
 pub const TREE_H: f32 = 32.0;
 pub const BUTTON_H: f32 = 28.0;
+/// The top bar's bordered controls, as the design's `.iconbtn` and `.ws` are 26.
+pub const ICON_BUTTON_H: f32 = 26.0;
+/// The box every bar control gives its 14-unit glyph.
+pub const GLYPH_BOX: f32 = 14.0;
 pub const SEG_H: f32 = 26.0;
 pub const SEG_ITEM_H: f32 = 24.0;
 pub const CHIP_H: f32 = 24.0;
 pub const APP_BAR_H: f32 = 40.0;
 pub const TAB_H: f32 = 34.0;
+/// The tab bar's own height: the design writes `calc(--h-tabs + 1px)`, so the bar is one pixel taller
+/// than its tabs and the active tab's bottom edge covers that row.
+pub const TAB_BAR_H: f32 = TAB_H + 1.0;
 pub const TOOLBAR_H: f32 = 40.0;
 pub const STATUS_H: f32 = 26.0;
 
@@ -35,6 +42,13 @@ pub const STATUS_H: f32 = 26.0;
 pub const TREE_W: f32 = 300.0;
 pub const INDENT_STEP: f32 = 14.0;
 pub const INDICATOR_W: f32 = 2.0;
+/// Activity rail: a 44px column of 32px workspace buttons.
+pub const RAIL_W: f32 = 44.0;
+pub const RAIL_BUTTON: f32 = 32.0;
+/// A tab is never narrower than 96 nor wider than 260, and its close button is 24px.
+pub const TAB_MIN_W: f32 = 96.0;
+pub const TAB_MAX_W: f32 = 260.0;
+pub const TAB_CLOSE: f32 = 24.0;
 
 /// Corner radii: 4 for controls, 6 for containers, a pill for chips.
 pub const R_CTL: u8 = 4;
@@ -268,18 +282,14 @@ impl Tokens {
     }
 }
 
-/// Frame for a top panel: panel fill, comfortable horizontal padding.
-pub fn top_panel_frame(tokens: &Tokens, _height: f32) -> Frame {
+/// Frame for a top or bottom bar. The bar paints its own fill and hairline inside `band_h`, so the
+/// frame adds nothing at all: with a stroke or a margin here the bar would be taller than its token,
+/// which is exactly what the previous frame did.
+pub fn bar_frame(tokens: &Tokens) -> Frame {
     Frame::new()
         .fill(tokens.panel)
-        .inner_margin(Margin {
-            left: S5,
-            right: S5,
-            top: 0,
-            bottom: 0,
-        })
+        .inner_margin(Margin::same(0))
         .outer_margin(Margin::ZERO)
-        .stroke(Stroke::new(1.0, tokens.stroke))
         .corner_radius(CornerRadius::ZERO)
 }
 
@@ -312,25 +322,58 @@ pub fn divider(ui: &mut Ui, tokens: &Tokens) {
     );
 }
 
-/// Horizontal band of a fixed height: panel fill, content centred vertically, and — important — a
-/// bounded rect, so a band can never consume the panel it sits in the way `horizontal_centered`
-/// does inside an unbounded layout. Returns the band rect so the caller can draw its own hairline.
+/// Horizontal band of a fixed height: a fill, content aligned vertically, and — important — a bounded
+/// rect, so a band can never consume the panel it sits in the way `horizontal_centered` does inside
+/// an unbounded layout. Returns the band rect, so the caller can draw its own hairline inside it.
 pub fn band_h(ui: &mut Ui, tokens: &Tokens, height: f32, add: impl FnOnce(&mut Ui)) -> egui::Rect {
+    band_fill(ui, height, tokens.panel, S5, egui::Align::Center, add)
+}
+
+/// `band_h` with an explicit fill, horizontal inset and alignment: the tab strip sits on `panel_alt`
+/// with the design's 8px lead-in and its tabs against the band's top edge, while every other bar uses
+/// the panel fill, 12px and a centred row.
+pub fn band_fill(
+    ui: &mut Ui,
+    height: f32,
+    fill: Color32,
+    inset: i8,
+    align: egui::Align,
+    add: impl FnOnce(&mut Ui),
+) -> egui::Rect {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::ZERO, tokens.panel);
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, fill);
     let inner = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + f32::from(S5), rect.top()),
-        egui::pos2(rect.right() - f32::from(S5), rect.bottom()),
+        egui::pos2(rect.left() + f32::from(inset), rect.top()),
+        egui::pos2(rect.right() - f32::from(inset), rect.bottom()),
     );
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(inner)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            .layout(egui::Layout::left_to_right(align)),
     );
     add(&mut child);
     rect
+}
+
+/// 1px separator drawn *inside* the bottom edge of a band. A bar that draws its own border outside
+/// its rect grows by it, which is how the shell bars ended up one pixel taller than their tokens.
+pub fn band_hairline(ui: &Ui, tokens: &Tokens, rect: egui::Rect) {
+    ui.painter().hline(
+        rect.left()..=rect.right(),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+}
+
+/// `band_hairline` for a bar the design gives a `border-top`: the status bar's line sits at the top
+/// of its 26px band, not at the bottom where it would also fall on the window's last row.
+pub fn band_top_hairline(ui: &Ui, tokens: &Tokens, rect: egui::Rect) {
+    ui.painter().hline(
+        rect.left()..=rect.right(),
+        rect.top() + 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
 }
 
 /// Toolbar-height band: the shape every view header uses.
@@ -516,6 +559,8 @@ pub fn chip(ui: &mut Ui, tokens: &Tokens, text: &str, colour: Color32) -> Respon
         font,
         colour,
     );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
     response
 }
 

@@ -14,6 +14,7 @@ pub mod control;
 pub mod dialogs;
 pub mod editor;
 pub mod grid;
+pub mod icons;
 pub mod table;
 pub mod theme;
 pub mod tree;

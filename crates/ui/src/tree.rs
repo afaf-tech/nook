@@ -1,7 +1,7 @@
 //! The connection sidebar: search, connection cards, schema and table lists.
 
 use datacraft_engine::{ConnState, Session, TabKind, TableRef};
-use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, Vec2};
+use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
 
 use crate::app::UiState;
 use crate::theme::{self as design, Tokens};
@@ -330,6 +330,17 @@ pub fn show(
                                         tokens.accent_dim
                                     },
                                 );
+                                // The design's `.rbadge` carries a strong border, and it earns its
+                                // keep here: the view fill is the row's own hover colour, so without
+                                // the outline a hovered row would swallow the badge's shape.
+                                if is_view {
+                                    ui.painter().rect_stroke(
+                                        badge,
+                                        CornerRadius::same(3),
+                                        Stroke::new(1.0, tokens.stroke_strong),
+                                        StrokeKind::Inside,
+                                    );
+                                }
                                 ui.painter().text(
                                     badge.center(),
                                     Align2::CENTER_CENTER,

@@ -2,12 +2,13 @@
 //! dialogs, control channel and the scheduled-job tick.
 
 use datacraft_engine::{Conn, Level, Session, TabKind, TableRef};
-use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, Vec2};
+use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::Value;
 
 use crate::control::Control;
+use crate::icons::{self, Glyph};
 use crate::table::TableState;
-use crate::theme::{self as t, Tokens, APP_BAR_H, STATUS_H, TAB_H};
+use crate::theme::{self as t, Tokens, APP_BAR_H, STATUS_H, TAB_BAR_H, TAB_H};
 use crate::{dialogs, grid, tree, views, Options};
 
 /// Top-level menus. Each one owns registry groups, so the registry stays the single list of actions
@@ -542,7 +543,7 @@ impl DatacraftApp {
 
     /// Application bar: identity, menu bar, search, and the state cluster on the right.
     fn app_bar(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
-        t::band_h(ui, tokens, APP_BAR_H, |ui| {
+        let band = t::band_h(ui, tokens, APP_BAR_H, |ui| {
             ui.horizontal(|ui| {
                 let (mark_rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::hover());
                 ui.painter()
@@ -613,35 +614,191 @@ impl DatacraftApp {
                             serde_json::json!({"key": "theme", "value": next}),
                         );
                     }
-                    if t::ghost_button(ui, tokens, "Jobs", true)
-                        .on_hover_text("Scheduled jobs")
-                        .clicked()
-                    {
-                        let index = self.session.add_tab(TabKind::Jobs, "Jobs", None);
-                        self.state.active_tab_override = Some(index);
-                    }
+                    // Scheduled jobs moved to the activity rail; the palette stays the fallback.
 
-                    // Search field, which is also the command palette.
-                    let label = RichText::new("Search or run a command")
-                        .size(12.0)
-                        .color(tokens.text_faint);
-                    let response = ui.add(
-                        egui::Button::new(label)
-                            .fill(tokens.background)
-                            .stroke(Stroke::new(1.0, tokens.stroke))
-                            .corner_radius(CornerRadius::same(6))
-                            .min_size(Vec2::new(230.0, 24.0)),
+                    // The palette is a real field: clicking it opens the overlay, which then owns the
+                    // focus, so the bar reads like a search box and behaves like one.
+                    ui.spacing_mut().interact_size.y = t::ICON_BUTTON_H;
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut self.state.palette_query)
+                            .hint_text(
+                                RichText::new("Search or run a command")
+                                    .size(t::T_SM)
+                                    .color(tokens.text_faint),
+                            )
+                            .font(tokens.font(t::T_SM))
+                            .text_color(tokens.text)
+                            .desired_width(230.0)
+                            // The design's field is 26 tall: a 12px galley, 1px of frame on each
+                            // side, and 6 above and below to make up the rest.
+                            .margin(egui::Margin {
+                                left: t::S4,
+                                right: t::S4,
+                                top: 6,
+                                bottom: 6,
+                            }),
                     );
-                    if response.clicked() {
+                    if field.gained_focus() || field.clicked() {
                         self.state.palette_open = true;
-                        self.state.palette_query.clear();
                     }
-                    response.on_hover_text("Command palette (Cmd+K)");
+                    field.on_hover_text("Command palette (Cmd+K)");
                     t::keycap(ui, tokens, "Cmd K");
                     t::divider(ui, tokens);
                 });
             });
         });
+        t::band_hairline(ui, tokens, band);
+    }
+
+    /// Activity rail: the five workspaces the design shows, each wired to a destination the app
+    /// already has. Reports is the exception: a report is a chart built from a query result, so that
+    /// button selects an existing report tab instead of opening an empty chart.
+    fn rail(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
+        let open_conn = self.session.active_conn.filter(|index| {
+            self.session
+                .conns
+                .get(*index)
+                .is_some_and(|conn| conn.is_open())
+        });
+        let scheduled = self
+            .session
+            .jobs
+            .jobs
+            .iter()
+            .filter(|job| job.enabled)
+            .count();
+        let active = self
+            .session
+            .active_tab
+            .and_then(|index| self.session.tabs.get(index))
+            .map(|tab| tab.kind);
+        let report_tab = self
+            .session
+            .tabs
+            .iter()
+            .position(|tab| tab.kind == TabKind::Report);
+
+        let entries = [
+            (Glyph::Connections, "Connections", true, active.is_none(), 0),
+            (
+                Glyph::Queries,
+                "New query",
+                open_conn.is_some(),
+                active == Some(TabKind::Query),
+                0,
+            ),
+            (
+                Glyph::Jobs,
+                "Scheduled jobs",
+                true,
+                active == Some(TabKind::Jobs),
+                scheduled,
+            ),
+            (
+                Glyph::Reports,
+                "Reports — build a chart from a query",
+                report_tab.is_some(),
+                active == Some(TabKind::Report),
+                0,
+            ),
+            (
+                Glyph::Monitor,
+                "Monitor — needs an open connection",
+                open_conn.is_some(),
+                active == Some(TabKind::Monitor),
+                0,
+            ),
+        ];
+
+        // The indicator hangs on the rail's own left edge, which is where the design puts it: the
+        // button is centred in the 44px rail, so the button's -6px offset is the rail's x.
+        let rail_left = ui.max_rect().left();
+        let mut clicked: Option<usize> = None;
+        ui.add_space(f32::from(t::S4));
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = f32::from(t::S2);
+            for (index, (glyph, tip, enabled, active, badge)) in entries.into_iter().enumerate() {
+                let sense = if enabled {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                };
+                let (rect, response) = ui.allocate_exact_size(Vec2::splat(t::RAIL_BUTTON), sense);
+                let hovered = enabled && response.hovered();
+                let painter = ui.painter();
+                if active {
+                    painter.rect_filled(rect, CornerRadius::same(t::R_CTL), tokens.accent_dim);
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(rail_left, rect.center().y - 10.0),
+                            Vec2::new(t::INDICATOR_W, 20.0),
+                        ),
+                        CornerRadius::same(1),
+                        tokens.accent,
+                    );
+                } else if hovered {
+                    painter.rect_filled(rect, CornerRadius::same(t::R_CTL), tokens.hover);
+                }
+                let ink = if !enabled {
+                    tokens.text_faint
+                } else if active {
+                    tokens.accent
+                } else if hovered {
+                    tokens.text
+                } else {
+                    tokens.text_dim
+                };
+                icons::glyph(
+                    ui,
+                    egui::Rect::from_center_size(rect.center(), Vec2::splat(t::GLYPH_BOX)),
+                    glyph,
+                    ink,
+                );
+                if badge > 0 {
+                    rail_badge(ui, tokens, rect, badge);
+                }
+                if response.clicked() {
+                    clicked = Some(index);
+                }
+                response.on_hover_text(tip);
+            }
+        });
+        if let Some(index) = clicked {
+            self.rail_action(index, open_conn, report_tab);
+        }
+    }
+
+    /// What each rail button does, kept apart so the rail's painting stays a function of state.
+    fn rail_action(&mut self, index: usize, open_conn: Option<usize>, report_tab: Option<usize>) {
+        match index {
+            0 => self.session.active_tab = None,
+            1 => {
+                if let Some(conn) = open_conn {
+                    let tab = self.session.add_tab(TabKind::Query, "Query", Some(conn));
+                    self.state.active_tab_override = Some(tab);
+                }
+            }
+            2 => {
+                let tab = self.session.add_tab(TabKind::Jobs, "Jobs", None);
+                self.state.active_tab_override = Some(tab);
+            }
+            3 => {
+                if let Some(tab) = report_tab {
+                    self.state.active_tab_override = Some(tab);
+                }
+            }
+            4 => {
+                if let Some(conn) = open_conn {
+                    let tab = self
+                        .session
+                        .add_tab(TabKind::Monitor, "Monitor", Some(conn));
+                    self.state
+                        .request_monitor(&mut self.session, conn, "dashboard");
+                    self.state.active_tab_override = Some(tab);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Tab strip: painted tabs, accent underline on the active one, close on hover.
@@ -649,135 +806,166 @@ impl DatacraftApp {
         let mut select: Option<usize> = self.state.active_tab_override.take();
         let mut close: Option<usize> = None;
 
-        egui::ScrollArea::horizontal()
-            .id_salt("tab-strip")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for (index, tab) in self.session.tabs.iter().enumerate() {
-                        let active = self.session.active_tab == Some(index);
-                        let dirty = tab.grid.dirty();
-                        let pending = tab.grid.pending.len();
-                        let text_width = ui
-                            .painter()
-                            .layout_no_wrap(
-                                tab.title.clone(),
-                                tokens.font(12.5),
-                                Color32::PLACEHOLDER,
-                            )
-                            .size()
-                            .x;
-                        let width = (text_width + if dirty || pending > 0 { 74.0 } else { 52.0 })
-                            .clamp(96.0, 260.0);
-                        let (rect, response) =
-                            ui.allocate_exact_size(Vec2::new(width, TAB_H), Sense::click());
-                        let hovered = response.hovered();
+        // The design's tab bar is one pixel taller than its tabs, so the active tab's bottom edge
+        // covers the bar's border: that row is painted first and the tabs paint over it.
+        t::band_fill(
+            ui,
+            TAB_BAR_H,
+            tokens.panel_alt,
+            t::S4,
+            egui::Align::Min,
+            |ui| {
+                t::band_hairline(ui, tokens, ui.max_rect());
+                egui::ScrollArea::horizontal()
+                    .max_width(ui.available_width() - 41.0)
+                    .id_salt("tab-strip")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            for (index, tab) in self.session.tabs.iter().enumerate() {
+                                let active = self.session.active_tab == Some(index);
+                                let dirty = tab.grid.dirty();
+                                let pending = tab.grid.pending.len();
+                                let text_width = ui
+                                    .painter()
+                                    .layout_no_wrap(
+                                        tab.title.clone(),
+                                        tokens.font(t::T_SM),
+                                        Color32::PLACEHOLDER,
+                                    )
+                                    .size()
+                                    .x;
+                                let width = (text_width
+                                    + if dirty || pending > 0 { 74.0 } else { 52.0 })
+                                .clamp(t::TAB_MIN_W, t::TAB_MAX_W);
+                                let (rect, response) =
+                                    ui.allocate_exact_size(Vec2::new(width, TAB_H), Sense::click());
+                                let hovered = response.hovered();
 
-                        if active {
-                            ui.painter().rect_filled(
-                                egui::Rect::from_min_max(
-                                    rect.min,
-                                    egui::pos2(rect.right(), rect.bottom() + 1.0),
-                                ),
-                                CornerRadius {
-                                    nw: tokens.radius,
-                                    ne: tokens.radius,
-                                    sw: 0,
-                                    se: 0,
-                                },
-                                tokens.panel,
-                            );
-                        } else if hovered {
-                            ui.painter()
-                                .rect_filled(rect, CornerRadius::ZERO, tokens.hover);
-                        }
-                        if active {
-                            ui.painter().rect_filled(
-                                egui::Rect::from_min_size(
-                                    egui::pos2(rect.left() + 8.0, rect.bottom() - 2.0),
-                                    Vec2::new((rect.width() - 16.0).max(8.0), 2.0),
-                                ),
-                                CornerRadius::same(1),
-                                tokens.accent,
-                            );
-                        }
+                                if active {
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_max(
+                                            rect.min,
+                                            egui::pos2(rect.right(), rect.bottom() + 1.0),
+                                        ),
+                                        CornerRadius {
+                                            nw: tokens.radius,
+                                            ne: tokens.radius,
+                                            sw: 0,
+                                            se: 0,
+                                        },
+                                        tokens.panel,
+                                    );
+                                } else if hovered {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        CornerRadius::ZERO,
+                                        tokens.hover,
+                                    );
+                                }
+                                if active {
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_size(
+                                            egui::pos2(rect.left() + 8.0, rect.bottom() - 2.0),
+                                            Vec2::new((rect.width() - 16.0).max(8.0), 2.0),
+                                        ),
+                                        CornerRadius::same(1),
+                                        tokens.accent,
+                                    );
+                                }
 
-                        let mut x = rect.left() + 12.0;
-                        if dirty || pending > 0 {
-                            ui.painter().circle_filled(
-                                egui::pos2(x + 3.0, rect.center().y),
-                                3.0,
-                                tokens.warn,
-                            );
-                            x += 12.0;
-                        }
-                        ui.painter().text(
-                            egui::pos2(x, rect.center().y),
-                            Align2::LEFT_CENTER,
-                            &tab.title,
-                            tokens.font(12.5),
-                            if active { tokens.text } else { tokens.text_dim },
-                        );
-
-                        // Close cross: always on the active tab, on hover for the rest.
-                        if active || hovered {
-                            let close_rect = egui::Rect::from_center_size(
-                                egui::pos2(rect.right() - 15.0, rect.center().y),
-                                Vec2::new(18.0, 18.0),
-                            );
-                            let close_response = ui.interact(
-                                close_rect,
-                                ui.id().with(("close", index)),
-                                Sense::click(),
-                            );
-                            if close_response.hovered() {
-                                ui.painter().rect_filled(
-                                    close_rect,
-                                    CornerRadius::same(4),
-                                    tokens.panel_high,
+                                let mut x = rect.left() + f32::from(t::S4);
+                                if dirty || pending > 0 {
+                                    ui.painter().circle_filled(
+                                        egui::pos2(x + 3.0, rect.center().y),
+                                        3.0,
+                                        tokens.warn,
+                                    );
+                                    x += 12.0;
+                                }
+                                ui.painter().text(
+                                    egui::pos2(x, rect.center().y),
+                                    Align2::LEFT_CENTER,
+                                    &tab.title,
+                                    tokens.font(t::T_SM),
+                                    if active { tokens.text } else { tokens.text_dim },
                                 );
+
+                                // Close cross: always on the active tab, on hover for the rest.
+                                if active || hovered {
+                                    // `.tclose` is 24px with `margin-right:-4`, so its right edge sits 4px
+                                    // inside the tab's 8px padding.
+                                    let close_rect = egui::Rect::from_center_size(
+                                        egui::pos2(
+                                            rect.right() - 4.0 - t::TAB_CLOSE / 2.0,
+                                            rect.center().y,
+                                        ),
+                                        Vec2::splat(t::TAB_CLOSE),
+                                    );
+                                    let close_response = ui.interact(
+                                        close_rect,
+                                        ui.id().with(("close", index)),
+                                        Sense::click(),
+                                    );
+                                    if close_response.hovered() {
+                                        ui.painter().rect_filled(
+                                            close_rect,
+                                            CornerRadius::same(4),
+                                            tokens.panel_high,
+                                        );
+                                    }
+                                    ui.painter().text(
+                                        close_rect.center(),
+                                        Align2::CENTER_CENTER,
+                                        "×",
+                                        tokens.font(t::T_LG),
+                                        if close_response.hovered() {
+                                            tokens.error
+                                        } else {
+                                            tokens.text_dim
+                                        },
+                                    );
+                                    if close_response.clicked() {
+                                        close = Some(index);
+                                    }
+                                }
+
+                                // `.tab` carries a full-height border-right, not an inset divider.
+                                ui.painter().vline(
+                                    rect.right(),
+                                    rect.top()..=rect.bottom(),
+                                    Stroke::new(1.0, tokens.stroke),
+                                );
+                                if response.clicked() {
+                                    select = Some(index);
+                                }
+                                if response.middle_clicked() {
+                                    close = Some(index);
+                                }
                             }
-                            ui.painter().text(
-                                close_rect.center(),
-                                Align2::CENTER_CENTER,
-                                "×",
-                                tokens.font(13.0),
-                                if close_response.hovered() {
-                                    tokens.error
-                                } else {
-                                    tokens.text_dim
+
+                            // `.tabctl`: right-aligned behind its own border.
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if t::ghost_button(ui, tokens, "+", true)
+                                        .on_hover_text("New query tab")
+                                        .clicked()
+                                    {
+                                        let index = self.session.add_tab(
+                                            TabKind::Query,
+                                            "Query",
+                                            self.session.active_conn,
+                                        );
+                                        select = Some(index);
+                                    }
+                                    t::divider(ui, tokens);
                                 },
                             );
-                            if close_response.clicked() {
-                                close = Some(index);
-                            }
-                        }
-
-                        ui.painter().vline(
-                            rect.right(),
-                            rect.top() + 8.0..=rect.bottom() - 8.0,
-                            Stroke::new(1.0, tokens.stroke),
-                        );
-                        if response.clicked() {
-                            select = Some(index);
-                        }
-                        if response.middle_clicked() {
-                            close = Some(index);
-                        }
-                    }
-
-                    ui.add_space(2.0);
-                    if t::ghost_button(ui, tokens, "+", true)
-                        .on_hover_text("New query tab")
-                        .clicked()
-                    {
-                        let index =
-                            self.session
-                                .add_tab(TabKind::Query, "Query", self.session.active_conn);
-                        select = Some(index);
-                    }
-                });
-            });
+                        });
+                    });
+            },
+        );
         if let Some(index) = select {
             self.session.active_tab = Some(index);
         }
@@ -855,7 +1043,7 @@ impl DatacraftApp {
             datacraft_engine::parity::measure().covered.len(),
             datacraft_engine::parity::measure().total()
         );
-        t::band_h(ui, tokens, STATUS_H, |ui| {
+        let band = t::band_h(ui, tokens, STATUS_H, |ui| {
             ui.horizontal(|ui| {
                 match self
                     .session
@@ -971,6 +1159,7 @@ impl DatacraftApp {
                 });
             });
         });
+        t::band_top_hairline(ui, tokens, band);
         if toggle_log {
             self.state.log_open = !self.state.log_open;
         }
@@ -1172,28 +1361,45 @@ impl eframe::App for DatacraftApp {
             self.session = crate::demo_session();
         }
 
+        // Bars paint their own fill and hairline inside an exact band, so neither the frame around
+        // them nor egui's built-in separator line may add anything: each one costs a pixel, and the
+        // design's bars are exactly 40, 35 and 26 tall with a single border inside that height.
         egui::Panel::top("app-bar")
-            .frame(t::top_panel_frame(&tokens, APP_BAR_H))
+            .show_separator_line(false)
+            .frame(t::bar_frame(&tokens))
             .show(ui, |ui| self.app_bar(ui, &tokens));
         egui::Panel::top("tab-strip")
-            .frame(t::top_panel_frame(&tokens, TAB_H))
+            .show_separator_line(false)
+            .frame(t::bar_frame(&tokens))
             .show(ui, |ui| self.tab_strip(ui, &tokens));
 
         egui::Panel::bottom("status-bar")
-            .frame(t::top_panel_frame(&tokens, STATUS_H))
+            .show_separator_line(false)
+            .frame(t::bar_frame(&tokens))
             .show(ui, |ui| self.status_bar(ui, &tokens));
         if self.state.log_open {
             egui::Panel::bottom("log")
                 .resizable(true)
                 .default_size(150.0)
                 .max_size(400.0)
-                .frame(t::top_panel_frame(&tokens, 120.0))
+                .show_separator_line(false)
+                .frame(t::side_panel_frame(&tokens))
                 .show(ui, |ui| self.log_panel(ui, &tokens));
         }
+
+        // The rail borrows the tree's left border rather than drawing its own, so the boundary
+        // between them is one hairline instead of two.
+        egui::Panel::left("activity-rail")
+            .exact_size(t::RAIL_W)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(t::bar_frame(&tokens))
+            .show(ui, |ui| self.rail(ui, &tokens));
 
         egui::Panel::left("tree")
             .resizable(true)
             .default_size(t::TREE_W)
+            .show_separator_line(false)
             .frame(t::side_panel_frame(&tokens))
             .show(ui, |ui| self.sidebar(ui, &tokens));
 
@@ -1206,6 +1412,39 @@ impl eframe::App for DatacraftApp {
         }
         let _ = &self.options;
     }
+}
+
+/// The design's `.rbadge`: a 14px pill on the button's top-right corner, mono and strong-bordered so
+/// it stays legible over whichever glyph sits under it.
+fn rail_badge(ui: &egui::Ui, tokens: &Tokens, button: egui::Rect, count: usize) {
+    let label = count.to_string();
+    let font = tokens.mono(t::T_XS);
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.clone(), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x;
+    let width = (text + 8.0).max(14.0);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(button.right() - 1.0 - width, button.top() + 1.0),
+        Vec2::new(width, 14.0),
+    );
+    let radius = CornerRadius::same(t::R_CHIP);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_high);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke_strong),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        font,
+        tokens.text,
+    );
 }
 
 /// Write an egui screenshot as a PNG.
