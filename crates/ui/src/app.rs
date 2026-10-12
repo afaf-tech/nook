@@ -456,17 +456,18 @@ impl DatacraftApp {
                         .params
                         .get("theme")
                         .and_then(|t| t.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    if theme == "dark" || theme == "light" {
-                        self.session.settings.theme = theme.clone();
-                        ctx.request_repaint();
-                        serde_json::json!({"ok": true, "theme": theme})
-                    } else {
-                        serde_json::json!({
-                            "ok": false,
-                            "error": "theme must be 'dark' or 'light'"
-                        })
+                        .unwrap_or_default();
+                    // Delegate to the command the Settings button uses, so the control channel cannot
+                    // accept a value the product refuses (and vice versa).
+                    match self.session.run(
+                        "app.setSetting",
+                        serde_json::json!({"key": "theme", "value": theme}),
+                    ) {
+                        Ok(value) => {
+                            ctx.request_repaint();
+                            serde_json::json!({"ok": true, "result": value})
+                        }
+                        Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
                     }
                 }
                 "ui.messages" => serde_json::json!({
