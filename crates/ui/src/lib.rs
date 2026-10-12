@@ -14,6 +14,7 @@ pub mod control;
 pub mod dialogs;
 pub mod editor;
 pub mod grid;
+pub mod table;
 pub mod theme;
 pub mod tree;
 pub mod views;
@@ -72,11 +73,21 @@ pub fn demo_session() -> datacraft_engine::Session {
     if let Some(tab) = session.tabs.get_mut(index) {
         tab.sql.text = "SELECT c.city, count(o.id) AS orders, round(sum(o.total), 2) AS revenue\n  FROM customers c\n  LEFT JOIN orders o ON o.customer_id = c.id\n GROUP BY c.city\n ORDER BY revenue DESC;".into();
     }
+    let query = session
+        .tabs
+        .get(index)
+        .map(|tab| tab.sql.text.clone())
+        .unwrap_or_default();
     if let Err(e) = session.run(
         "sql.run",
-        serde_json::json!({"conn": session.conns[0].cfg.id.clone(), "sql": "SELECT c.name, c.city, o.total, o.status FROM customers c JOIN orders o ON o.customer_id = c.id ORDER BY o.total DESC", "limit": 200}),
+        serde_json::json!({"conn": session.conns[0].cfg.id.clone(), "sql": query, "limit": 200}),
     ) {
         session.log(Level::Warn, format!("demo query: {e}"));
+    }
+    let monitor_tab = session.add_tab(TabKind::Monitor, "Monitor", Some(0));
+    if let Some(tab) = session.tabs.get_mut(monitor_tab) {
+        tab.payload
+            .insert("monitor".into(), serde_json::json!({"kind": "dashboard"}));
     }
     let data_tab = session.add_tab(TabKind::Data, "main.customers", Some(0));
     let _ = datacraft_engine::cmd::bind_grid_table(

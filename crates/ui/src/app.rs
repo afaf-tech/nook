@@ -1,13 +1,28 @@
-//! The application shell: ribbon-style menus built from the command registry, the tree, the tabs,
-//! the message log, the dialogs, the control channel and the scheduled-job tick.
+//! The application shell: app bar with real menus, tab strip, status bar, log drawer, sidebar,
+//! dialogs, control channel and the scheduled-job tick.
 
 use datacraft_engine::{Conn, Level, Session, TabKind, TableRef};
-use egui::RichText;
+use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, Vec2};
 use serde_json::Value;
 
 use crate::control::Control;
-use crate::theme::Tokens;
+use crate::table::TableState;
+use crate::theme::{self as t, Tokens, APP_BAR_H, STATUS_H, TAB_H};
 use crate::{dialogs, grid, tree, views, Options};
+
+/// Top-level menus. Each one owns registry groups, so the registry stays the single list of actions
+/// while the bar stays readable.
+const MENUS: &[(&str, &[&str])] = &[
+    ("File", &["Connection", "App"]),
+    ("Data", &["Data", "Design", "Modeler", "Tools"]),
+    ("Query", &["Query", "Report"]),
+    (
+        "Server",
+        &["Monitor", "Privileges", "Backup", "Sync", "Transfer"],
+    ),
+    ("Automation", &["Automation"]),
+    ("Help", &["Help"]),
+];
 
 /// The connection editor's working copy.
 #[derive(Debug, Clone)]
@@ -74,11 +89,12 @@ impl Default for DatagenForm {
 
 /// Everything the UI itself remembers between frames.
 pub struct UiState {
-    pub selected_cell: Option<(usize, usize)>,
-    pub cell_edit: String,
-    pub cell_editing: bool,
+    /// Inline-editor state, one entry per tab (data grid and query results).
+    pub tables: std::collections::BTreeMap<usize, TableState>,
     pub filter_edit: String,
-    pub connection_filter: Option<String>,
+    /// Sidebar search text and the expanded connection/schema keys.
+    pub tree_filter: String,
+    pub tree_expanded: std::collections::BTreeSet<String>,
     pub connection_open: bool,
     pub connection_editing: Option<usize>,
     pub connection_form: ConnectionForm,
@@ -102,6 +118,8 @@ pub struct UiState {
     pub want_demo: bool,
     pub apply_after_edit: bool,
     pub editor_dirty: bool,
+    /// Log drawer: collapsed by default so the data gets the room.
+    pub log_open: bool,
     pub control: Option<Control>,
     pub shot: Option<String>,
     shot_requested: bool,
@@ -114,11 +132,10 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         UiState {
-            selected_cell: None,
-            cell_edit: String::new(),
-            cell_editing: false,
+            tables: std::collections::BTreeMap::new(),
             filter_edit: String::new(),
-            connection_filter: None,
+            tree_filter: String::new(),
+            tree_expanded: std::collections::BTreeSet::new(),
             connection_open: false,
             connection_editing: None,
             connection_form: ConnectionForm::default(),
@@ -142,6 +159,7 @@ impl Default for UiState {
             want_demo: false,
             apply_after_edit: false,
             editor_dirty: false,
+            log_open: false,
             control: None,
             shot: None,
             shot_requested: false,
@@ -153,6 +171,11 @@ impl Default for UiState {
 }
 
 impl UiState {
+    /// Inline-editor state for one tab.
+    pub fn table(&mut self, index: usize) -> &mut TableState {
+        self.tables.entry(index).or_default()
+    }
+
     pub fn open_connection_dialog(&mut self, index: Option<usize>) {
         self.connection_open = true;
         self.connection_editing = index;
@@ -402,7 +425,11 @@ impl DatacraftApp {
                         .get("index")
                         .and_then(|i| i.as_i64())
                         .unwrap_or(0);
-                    if index >= 0 && (index as usize) < self.session.tabs.len() {
+                    if index < 0 {
+                        // Negative index: show the start page, which has no tab of its own.
+                        self.session.active_tab = None;
+                        serde_json::json!({"ok": true, "active_tab": null})
+                    } else if (index as usize) < self.session.tabs.len() {
                         self.session.active_tab = Some(index as usize);
                         serde_json::json!({"ok": true, "active_tab": index})
                     } else {
@@ -488,106 +515,117 @@ impl DatacraftApp {
             if self.state.shot_quit {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else {
-                // The caller polls for the file; say so in the log.
-                self.session.log(Level::Info, format!("screenshot written: {path}"));
+                self.session
+                    .log(Level::Info, format!("screenshot written: {path}"));
             }
         }
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("DataCraft").strong().size(15.0));
-            ui.separator();
+    /// Application bar: identity, menu bar, search, and the state cluster on the right.
+    fn app_bar(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
+        t::band_h(ui, tokens, APP_BAR_H, |ui| {
+            ui.horizontal(|ui| {
+                let (mark_rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(mark_rect, CornerRadius::same(6), tokens.accent);
+                ui.painter().text(
+                    mark_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "DC",
+                    tokens.font(11.5),
+                    tokens.accent_text,
+                );
+                ui.add_space(2.0);
+                ui.label(RichText::new("DataCraft").size(13.5).color(tokens.text));
+                ui.add_space(6.0);
+                t::divider(ui, tokens);
 
-            // Menus come from the registry: every group, every command.
-            let mut groups: Vec<&'static str> = datacraft_engine::registry()
-                .iter()
-                .map(|c| c.group)
-                .collect();
-            groups.sort_unstable();
-            groups.dedup();
-            for group in groups {
-                ui.menu_button(group, |ui| {
-                    let mut current_sub: &str = "";
-                    for spec in datacraft_engine::registry()
-                        .iter()
-                        .filter(|c| c.group == group)
-                    {
-                        // A cheap grouping: prefix before the dot becomes a submenu.
-                        let prefix = spec.id.split('.').next().unwrap_or("");
-                        if prefix != current_sub {
-                            current_sub = prefix;
-                            if current_sub.is_empty() {
+                for (menu, groups) in MENUS {
+                    ui.menu_button(RichText::new(*menu).size(12.5), |ui| {
+                        ui.set_min_width(280.0);
+                        for group in *groups {
+                            let specs: Vec<&'static datacraft_engine::CommandSpec> =
+                                datacraft_engine::registry()
+                                    .iter()
+                                    .filter(|c| c.group == *group)
+                                    .collect();
+                            if specs.is_empty() {
                                 continue;
                             }
+                            ui.menu_button(RichText::new(*group).size(12.5), |ui| {
+                                ui.set_min_width(340.0);
+                                for spec in specs {
+                                    let response = ui.button(
+                                        RichText::new(spec.label).size(12.5).color(tokens.text),
+                                    );
+                                    if response.clicked() {
+                                        self.state.open_command(spec.id.to_string());
+                                        ui.close();
+                                    }
+                                    if !spec.help.is_empty() {
+                                        response.on_hover_text(spec.help);
+                                    }
+                                }
+                            });
                         }
-                        let label = format!("{}  ({})", spec.label, spec.id);
-                        if ui.button(label).clicked() {
-                            self.state.open_command(spec.id.to_string());
-                            ui.close();
-                        }
+                    });
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if t::ghost_button(ui, tokens, "Settings", true)
+                        .on_hover_text("Preferences")
+                        .clicked()
+                    {
+                        self.state.settings_open = true;
                     }
+                    let theme = self.session.settings.theme.clone();
+                    let next = if theme == "dark" { "light" } else { "dark" };
+                    if t::ghost_button(
+                        ui,
+                        tokens,
+                        if theme == "dark" { "Light" } else { "Dark" },
+                        true,
+                    )
+                    .on_hover_text(format!("Switch to the {next} theme"))
+                    .clicked()
+                    {
+                        let _ = self.session.run(
+                            "app.setSetting",
+                            serde_json::json!({"key": "theme", "value": next}),
+                        );
+                    }
+                    if t::ghost_button(ui, tokens, "Jobs", true)
+                        .on_hover_text("Scheduled jobs")
+                        .clicked()
+                    {
+                        let index = self.session.add_tab(TabKind::Jobs, "Jobs", None);
+                        self.state.active_tab_override = Some(index);
+                    }
+
+                    // Search field, which is also the command palette.
+                    let label = RichText::new("Search or run a command")
+                        .size(12.0)
+                        .color(tokens.text_faint);
+                    let response = ui.add(
+                        egui::Button::new(label)
+                            .fill(tokens.background)
+                            .stroke(Stroke::new(1.0, tokens.stroke))
+                            .corner_radius(CornerRadius::same(6))
+                            .min_size(Vec2::new(230.0, 24.0)),
+                    );
+                    if response.clicked() {
+                        self.state.palette_open = true;
+                        self.state.palette_query.clear();
+                    }
+                    response.on_hover_text("Command palette (Cmd+K)");
+                    t::keycap(ui, tokens, "Cmd K");
+                    t::divider(ui, tokens);
                 });
-            }
-            ui.separator();
-            if ui
-                .button(RichText::new("Palette").strong())
-                .on_hover_text("Command palette (Cmd+K)")
-                .clicked()
-            {
-                self.state.palette_open = true;
-            }
-            if ui.button("+ Connection").clicked() {
-                self.state.open_connection_dialog(None);
-            }
-            let theme = self.session.settings.theme.clone();
-            let icon = if theme == "dark" { "Light" } else { "Dark" };
-            if ui.button(icon).on_hover_text("Switch theme").clicked() {
-                let next = if theme == "dark" { "light" } else { "dark" };
-                let _ = self.session.run(
-                    "app.setSetting",
-                    serde_json::json!({"key": "theme", "value": next}),
-                );
-            }
-            if ui.button("Settings").clicked() {
-                self.state.settings_open = true;
-            }
-            if ui.button("Jobs").clicked() {
-                let index = self.session.add_tab(TabKind::Jobs, "Jobs", None);
-                self.state.active_tab_override = Some(index);
-            }
-            if ui.button("Transfer wizard").clicked() {
-                let index =
-                    self.session
-                        .add_tab(TabKind::Transfer, "Transfer", self.session.active_conn);
-                self.state.active_tab_override = Some(index);
-            }
-            ui.separator();
-            let report = datacraft_engine::parity::measure();
-            ui.label(
-                RichText::new(format!(
-                    "{} commands · {} catalog features ({:.0}%)",
-                    datacraft_engine::registry().len(),
-                    report.total(),
-                    report.percent()
-                ))
-                .size(11.0)
-                .color(tokens.text_dim),
-            );
-            if let Some(control) = &self.state.control {
-                ui.separator();
-                ui.label(
-                    RichText::new(format!(
-                        "control :{} · {} requests",
-                        control.port, control.served
-                    ))
-                    .size(11.0)
-                    .color(tokens.text_dim),
-                );
-            }
+            });
         });
     }
 
+    /// Tab strip: painted tabs, accent underline on the active one, close on hover.
     fn tab_strip(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
         let mut select: Option<usize> = self.state.active_tab_override.take();
         let mut close: Option<usize> = None;
@@ -596,44 +634,121 @@ impl DatacraftApp {
             .id_salt("tab-strip")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     for (index, tab) in self.session.tabs.iter().enumerate() {
                         let active = self.session.active_tab == Some(index);
                         let dirty = tab.grid.dirty();
-                        let label = format!(
-                            "{}{}{}",
-                            tab.title,
-                            if dirty { " ●" } else { "" },
-                            match tab.kind {
-                                TabKind::Query => "  sql",
-                                TabKind::Data => "  ",
-                                TabKind::Design => "  ddl",
-                                TabKind::Diagram => "  er",
-                                TabKind::Report => "  rpt",
-                                TabKind::Monitor => "  mon",
-                                TabKind::Jobs => "  job",
-                                TabKind::Transfer => "  xfer",
-                                TabKind::Users => "  usr",
-                                TabKind::Welcome => "",
-                            }
+                        let pending = tab.grid.pending.len();
+                        let text_width = ui
+                            .painter()
+                            .layout_no_wrap(
+                                tab.title.clone(),
+                                tokens.font(12.5),
+                                Color32::PLACEHOLDER,
+                            )
+                            .size()
+                            .x;
+                        let width = (text_width + if dirty || pending > 0 { 74.0 } else { 52.0 })
+                            .clamp(96.0, 260.0);
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::new(width, TAB_H), Sense::click());
+                        let hovered = response.hovered();
+
+                        if active {
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_max(
+                                    rect.min,
+                                    egui::pos2(rect.right(), rect.bottom() + 1.0),
+                                ),
+                                CornerRadius {
+                                    nw: tokens.radius,
+                                    ne: tokens.radius,
+                                    sw: 0,
+                                    se: 0,
+                                },
+                                tokens.panel,
+                            );
+                        } else if hovered {
+                            ui.painter()
+                                .rect_filled(rect, CornerRadius::ZERO, tokens.hover);
+                        }
+                        if active {
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    egui::pos2(rect.left() + 8.0, rect.bottom() - 2.0),
+                                    Vec2::new((rect.width() - 16.0).max(8.0), 2.0),
+                                ),
+                                CornerRadius::same(1),
+                                tokens.accent,
+                            );
+                        }
+
+                        let mut x = rect.left() + 12.0;
+                        if dirty || pending > 0 {
+                            ui.painter().circle_filled(
+                                egui::pos2(x + 3.0, rect.center().y),
+                                3.0,
+                                tokens.warn,
+                            );
+                            x += 12.0;
+                        }
+                        ui.painter().text(
+                            egui::pos2(x, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            &tab.title,
+                            tokens.font(12.5),
+                            if active { tokens.text } else { tokens.text_dim },
                         );
-                        let color = if dirty { tokens.warn } else { tokens.text };
-                        if ui
-                            .selectable_label(active, RichText::new(label).color(color))
-                            .clicked()
-                        {
+
+                        // Close cross: always on the active tab, on hover for the rest.
+                        if active || hovered {
+                            let close_rect = egui::Rect::from_center_size(
+                                egui::pos2(rect.right() - 15.0, rect.center().y),
+                                Vec2::new(18.0, 18.0),
+                            );
+                            let close_response = ui.interact(
+                                close_rect,
+                                ui.id().with(("close", index)),
+                                Sense::click(),
+                            );
+                            if close_response.hovered() {
+                                ui.painter().rect_filled(
+                                    close_rect,
+                                    CornerRadius::same(4),
+                                    tokens.panel_high,
+                                );
+                            }
+                            ui.painter().text(
+                                close_rect.center(),
+                                Align2::CENTER_CENTER,
+                                "×",
+                                tokens.font(13.0),
+                                if close_response.hovered() {
+                                    tokens.error
+                                } else {
+                                    tokens.text_dim
+                                },
+                            );
+                            if close_response.clicked() {
+                                close = Some(index);
+                            }
+                        }
+
+                        ui.painter().vline(
+                            rect.right(),
+                            rect.top() + 8.0..=rect.bottom() - 8.0,
+                            Stroke::new(1.0, tokens.stroke),
+                        );
+                        if response.clicked() {
                             select = Some(index);
                         }
-                        if ui
-                            .small_button("x")
-                            .on_hover_text("Close the tab")
-                            .clicked()
-                        {
+                        if response.middle_clicked() {
                             close = Some(index);
                         }
-                        ui.separator();
                     }
-                    if ui
-                        .small_button("+")
+
+                    ui.add_space(2.0);
+                    if t::ghost_button(ui, tokens, "+", true)
                         .on_hover_text("New query tab")
                         .clicked()
                     {
@@ -682,7 +797,7 @@ impl DatacraftApp {
                 }
                 views::diagram(ui, &mut self.session, index, &mut self.state, tokens)
             }
-            TabKind::Report => views::report(ui, &mut self.session, index, tokens),
+            TabKind::Report => views::report(ui, &mut self.session, index, &mut self.state, tokens),
             TabKind::Monitor => {
                 if !self.session.tabs[index].payload.contains_key("monitor") {
                     if let Some(conn) = self.session.tabs[index].conn {
@@ -707,35 +822,173 @@ impl DatacraftApp {
         }
     }
 
-    fn message_log(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
+    /// Status bar: one line, everything glanceable.
+    fn status_bar(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
+        let pending: usize = self
+            .session
+            .tabs
+            .iter()
+            .map(|tab| tab.grid.pending.len())
+            .sum();
+        let mut toggle_log = false;
+        let features = format!(
+            "{}/{} features",
+            datacraft_engine::parity::measure().covered.len(),
+            datacraft_engine::parity::measure().total()
+        );
+        t::band_h(ui, tokens, STATUS_H, |ui| {
+            ui.horizontal(|ui| {
+                match self
+                    .session
+                    .active_conn
+                    .and_then(|i| self.session.conns.get(i))
+                {
+                    Some(conn) => {
+                        t::dot(
+                            ui,
+                            if conn.is_open() {
+                                tokens.ok
+                            } else {
+                                tokens.error
+                            },
+                        );
+                        ui.label(RichText::new(&conn.cfg.name).size(12.0).color(tokens.text));
+                        let cfg = &conn.cfg;
+                        let target = match cfg.kind {
+                            datacraft_core::DriverKind::Sqlite => cfg.file.clone(),
+                            _ => {
+                                let (host, port) = cfg.target();
+                                let db = if cfg.database.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("/{}", cfg.database)
+                                };
+                                format!("{}@{}:{}{}", cfg.user, host, port, db)
+                            }
+                        };
+                        ui.label(RichText::new(target).size(11.5).color(tokens.text_faint));
+                    }
+                    None => {
+                        t::dot(ui, tokens.text_faint);
+                        ui.label(
+                            RichText::new("no connection")
+                                .size(12.0)
+                                .color(tokens.text_dim),
+                        );
+                    }
+                }
+
+                if let Some(index) = self.session.active_tab {
+                    if let Some(tab) = self.session.tabs.get(index) {
+                        t::divider(ui, tokens);
+                        let (rows, ms) = match tab.kind {
+                            TabKind::Query => (
+                                tab.sql.last_result.as_ref().map(|r| r.row_count()),
+                                tab.sql.last_result.as_ref().map(|r| r.elapsed_ms),
+                            ),
+                            TabKind::Data => (
+                                Some(tab.grid.result.row_count()),
+                                Some(tab.grid.result.elapsed_ms),
+                            ),
+                            _ => (None, None),
+                        };
+                        let mut line = tab.title.clone();
+                        if let Some(rows) = rows {
+                            line.push_str(&format!(" · {rows} rows"));
+                        }
+                        if let Some(ms) = ms {
+                            line.push_str(&format!(" · {ms:.0} ms"));
+                        }
+                        ui.label(RichText::new(line).size(11.5).color(tokens.text_dim));
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(control) = &self.state.control {
+                        t::chip(
+                            ui,
+                            tokens,
+                            &format!("control {}", control.port),
+                            tokens.info,
+                        )
+                        .on_hover_text("JSON control channel listening on 127.0.0.1");
+                    }
+                    if pending > 0 {
+                        t::chip(ui, tokens, &format!("{pending} pending"), tokens.warn);
+                    }
+                    t::chip(ui, tokens, &features, tokens.text_faint);
+                    let level = self
+                        .session
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.level != Level::Info)
+                        .map(|m| m.level)
+                        .unwrap_or(Level::Info);
+                    let colour = tokens.level_color(level);
+                    let label = format!("{} messages", self.session.messages.len());
+                    if t::chip(
+                        ui,
+                        tokens,
+                        &label,
+                        if self.state.log_open {
+                            tokens.accent
+                        } else {
+                            colour
+                        },
+                    )
+                    .interact(Sense::click())
+                    .on_hover_text("Show or hide the log")
+                    .clicked()
+                    {
+                        toggle_log = true;
+                    }
+                    if let Some((message, seconds)) = self.state.toast.clone() {
+                        if seconds > 0.0 {
+                            ui.label(RichText::new(&message).size(11.5).color(tokens.ok));
+                            self.state.toast = Some((message, seconds - 0.05));
+                        }
+                    }
+                });
+            });
+        });
+        if toggle_log {
+            self.state.log_open = !self.state.log_open;
+        }
+    }
+
+    fn log_panel(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
         ui.horizontal(|ui| {
+            ui.label(RichText::new("Log").size(12.0).color(tokens.text));
             ui.label(
-                RichText::new(format!("{} messages", self.session.messages.len()))
+                RichText::new(format!("{} entries", self.session.messages.len()))
                     .size(11.0)
-                    .strong(),
+                    .color(tokens.text_faint),
             );
-            if ui.small_button("clear").clicked() {
+            if t::ghost_button(ui, tokens, "Clear", true).clicked() {
                 let _ = self.session.run("app.clearLog", serde_json::json!({}));
             }
-            if let Some((message, seconds)) = self.state.toast.clone() {
-                if seconds > 0.0 {
-                    ui.label(RichText::new(message.clone()).size(11.0).color(tokens.ok));
-                    self.state.toast = Some((message, seconds - 0.02));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if t::ghost_button(ui, tokens, "Hide", true).clicked() {
+                    self.state.log_open = false;
                 }
-            }
+            });
         });
         egui::ScrollArea::vertical()
             .id_salt("messages")
-            .max_height(90.0)
+            .max_height(ui.available_height() - 4.0)
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for message in self.session.messages.iter().rev().take(60) {
-                    ui.label(
-                        RichText::new(message.text.clone())
-                            .size(11.0)
-                            .monospace()
-                            .color(tokens.level_color(message.level)),
-                    );
+                for message in self.session.messages.iter().rev().take(200) {
+                    ui.horizontal(|ui| {
+                        t::dot(ui, tokens.level_color(message.level));
+                        ui.label(
+                            RichText::new(&message.text)
+                                .size(11.5)
+                                .monospace()
+                                .color(tokens.level_color(message.level)),
+                        );
+                    });
                 }
             });
     }
@@ -835,21 +1088,21 @@ impl DatacraftApp {
 
     /// Keyboard shortcuts that are not tied to the menu.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let (palette, run_query, apply, close_tab, format_sql) = ctx.input(|i| {
+        let (palette, run_query, apply, close_tab, format_sql, toggle_log) = ctx.input(|i| {
             (
                 i.modifiers.command && i.key_pressed(egui::Key::K),
                 i.modifiers.command && i.key_pressed(egui::Key::Enter),
                 i.modifiers.command && i.key_pressed(egui::Key::S),
                 i.modifiers.command && i.key_pressed(egui::Key::W),
                 i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::F),
+                i.modifiers.command && i.key_pressed(egui::Key::L),
             )
         });
         if palette {
             self.state.palette_open = true;
         }
         if run_query {
-            let params = serde_json::json!({});
-            if let Err(e) = self.session.run("sql.run", params) {
+            if let Err(e) = self.session.run("sql.run", serde_json::json!({})) {
                 self.session.log(Level::Warn, e.to_string());
             }
         }
@@ -862,6 +1115,9 @@ impl DatacraftApp {
             if let Err(e) = self.session.run("sql.format", serde_json::json!({})) {
                 self.session.log(Level::Warn, e.to_string());
             }
+        }
+        if toggle_log {
+            self.state.log_open = !self.state.log_open;
         }
         if close_tab {
             if let Some(index) = self.session.active_tab {
@@ -884,6 +1140,11 @@ impl eframe::App for DatacraftApp {
 
         self.handle_control(&ctx);
         self.handle_shot(&ctx);
+        // egui only repaints on input; with the control channel open, wake up regularly so a
+        // request from a script is answered even when nobody is touching the window.
+        if self.state.control.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         self.shortcuts(&ctx);
         self.tick_jobs();
 
@@ -892,20 +1153,29 @@ impl eframe::App for DatacraftApp {
             self.session = crate::demo_session();
         }
 
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            self.top_bar(ui, &tokens);
-            ui.separator();
-            self.tab_strip(ui, &tokens);
-        });
+        egui::Panel::top("app-bar")
+            .frame(t::top_panel_frame(&tokens, APP_BAR_H))
+            .show(ui, |ui| self.app_bar(ui, &tokens));
+        egui::Panel::top("tab-strip")
+            .frame(t::top_panel_frame(&tokens, TAB_H))
+            .show(ui, |ui| self.tab_strip(ui, &tokens));
 
-        egui::Panel::bottom("messages")
-            .resizable(true)
-            .default_size(110.0)
-            .show(ui, |ui| self.message_log(ui, &tokens));
+        egui::Panel::bottom("status-bar")
+            .frame(t::top_panel_frame(&tokens, STATUS_H))
+            .show(ui, |ui| self.status_bar(ui, &tokens));
+        if self.state.log_open {
+            egui::Panel::bottom("log")
+                .resizable(true)
+                .default_size(150.0)
+                .max_size(400.0)
+                .frame(t::top_panel_frame(&tokens, 120.0))
+                .show(ui, |ui| self.log_panel(ui, &tokens));
+        }
 
         egui::Panel::left("tree")
             .resizable(true)
             .default_size(300.0)
+            .frame(t::side_panel_frame(&tokens))
             .show(ui, |ui| self.sidebar(ui, &tokens));
 
         egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui, &tokens));

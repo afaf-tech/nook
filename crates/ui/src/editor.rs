@@ -1,11 +1,11 @@
-//! The query editor: SQL text, results, history and snippets.
+//! The query editor: toolbar, SQL text, statement strip, results table, history and snippets.
 
 use datacraft_engine::{Level, Session};
 use egui::RichText;
 
 use crate::app::UiState;
-use crate::theme::Tokens;
-use crate::tree::value_color;
+use crate::table::{self, TableColumn, TableView};
+use crate::theme::{self as design, Tokens};
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -17,42 +17,71 @@ pub fn show(
     let mut run_sql: Option<String> = None;
     let mut command: Option<(&str, serde_json::Value)> = None;
 
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .button(RichText::new("▶ Run").strong())
-            .on_hover_text("Run the whole script (Cmd+Enter)")
-            .clicked()
-        {
-            command = Some(("sql.run", serde_json::json!({})));
-        }
-        if ui.button("▶ Statement at cursor").clicked() {
-            command = Some(("sql.runStatement", serde_json::json!({"index": 0})));
-        }
-        if ui.button("Format").clicked() {
-            command = Some(("sql.format", serde_json::json!({})));
-        }
-        if ui.button("Explain").clicked() {
-            command = Some(("sql.explain", serde_json::json!({})));
-        }
-        if ui.button("Σ Aggregate report").clicked() {
-            command = Some(("report.chart", serde_json::json!({"chart": "column"})));
-        }
-        if ui.button("Save snippet").clicked() {
-            let name = format!("Query {}", session.snippets.len() + 1);
-            command = Some(("snippet.save", serde_json::json!({"name": name})));
-        }
-        if ui.button("Clear").clicked() {
-            if let Some(tab) = session.tabs.get_mut(tab_index) {
-                tab.sql.text.clear();
+    let statements = datacraft_engine::cmd::sql::split(&session.tabs[tab_index].sql.text);
+    let conn_name = session.tabs[tab_index]
+        .conn
+        .and_then(|i| session.conns.get(i))
+        .map(|c| c.cfg.name.clone())
+        .unwrap_or_else(|| "no connection".into());
+    let error = session.tabs[tab_index].sql.error.clone();
+    let result = session.tabs[tab_index].sql.last_result.clone();
+    let result_label = session.tabs[tab_index].sql.result_label.clone();
+
+    // Context toolbar.
+    let toolbar = design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
+            if design::primary_button(ui, tokens, "Run", true)
+                .on_hover_text("Run the whole script (Cmd+Enter)")
+                .clicked()
+            {
+                command = Some(("sql.run", serde_json::json!({})));
             }
-        }
-        ui.separator();
-        let conn_name = session.tabs[tab_index]
-            .conn
-            .and_then(|i| session.conns.get(i))
-            .map(|c| format!("{} · {}", c.cfg.name, c.cfg.display_uri()))
-            .unwrap_or_else(|| "no connection on this tab".into());
-        ui.label(RichText::new(conn_name).size(11.0).color(tokens.text_dim));
+            if design::ghost_button(ui, tokens, "Run statement", true)
+                .on_hover_text("Run the statement the cursor sits in")
+                .clicked()
+            {
+                command = Some(("sql.runStatement", serde_json::json!({"index": 0})));
+            }
+            design::divider(ui, tokens);
+            if design::ghost_button(ui, tokens, "Format", true)
+                .on_hover_text("Pretty-print the script (Cmd+Shift+F)")
+                .clicked()
+            {
+                command = Some(("sql.format", serde_json::json!({})));
+            }
+            if design::ghost_button(ui, tokens, "Explain", true)
+                .on_hover_text("Ask the server for the plan")
+                .clicked()
+            {
+                command = Some(("sql.explain", serde_json::json!({})));
+            }
+            design::divider(ui, tokens);
+            if design::ghost_button(ui, tokens, "Chart", true)
+                .on_hover_text("Send the last result to the report view")
+                .clicked()
+            {
+                command = Some(("report.chart", serde_json::json!({"chart": "column"})));
+            }
+            if design::ghost_button(ui, tokens, "Pivot", true).clicked() {
+                command = Some(("report.pivot", serde_json::json!({})));
+            }
+            if design::ghost_button(ui, tokens, "Save snippet", true).clicked() {
+                let name = format!("Query {}", session.snippets.len() + 1);
+                command = Some(("snippet.save", serde_json::json!({"name": name})));
+            }
+            if design::ghost_button(ui, tokens, "Clear", true).clicked() {
+                if let Some(tab) = session.tabs.get_mut(tab_index) {
+                    tab.sql.text.clear();
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "Export CSV", true).clicked() {
+                    state.open_export_grid("csv");
+                }
+                design::chip(ui, tokens, &conn_name, tokens.info);
+            });
+        });
     });
 
     let shortcuts = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
@@ -60,156 +89,236 @@ pub fn show(
         command = Some(("sql.run", serde_json::json!({})));
     }
 
-    let available = ui.available_height();
-    let editor_height = (available * 0.42).clamp(120.0, 420.0);
-
-    egui::ScrollArea::vertical()
-        .id_salt(format!("editor-scroll-{tab_index}"))
-        .max_height(editor_height)
-        .show(ui, |ui| {
-            let response = ui.add(
-                egui::TextEdit::multiline(&mut session.tabs[tab_index].sql.text)
-                    .code_editor()
-                    .desired_rows(12)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("SELECT * FROM customers WHERE city = 'London';\n\nCmd+Enter runs it, Cmd+Shift+F formats it."),
-            );
-            if response.changed() {
-                state.editor_dirty = true;
-            }
+    // Text area: as tall as the script needs, never more than a third of the window.
+    let lines = session.tabs[tab_index].sql.text.lines().count().max(6);
+    let editor_height =
+        (lines as f32 * 19.0 + 32.0).clamp(140.0, (ui.available_height() * 0.45).max(140.0));
+    let frame = egui::Frame::new()
+        .fill(tokens.background)
+        .inner_margin(egui::Margin {
+            left: 10,
+            right: 10,
+            top: 8,
+            bottom: 8,
         });
+    frame.show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt(format!("editor-scroll-{tab_index}"))
+            .max_height(editor_height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let response = ui.add(
+                    egui::TextEdit::multiline(&mut session.tabs[tab_index].sql.text)
+                        .code_editor()
+                        .desired_rows(lines)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(
+                            "SELECT * FROM customers WHERE city = 'London';\n\nCmd+Enter runs it, Cmd+Shift+F formats it.",
+                        ),
+                );
+                if response.changed() {
+                    state.editor_dirty = true;
+                }
+            });
+    });
 
-    ui.separator();
-
-    // Statement list, so a script is never a mystery.
-    let statements = datacraft_engine::cmd::sql::split(&session.tabs[tab_index].sql.text);
-    if statements.len() > 1 {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(format!("{} statements:", statements.len()))
-                    .size(11.0)
-                    .color(tokens.text_dim),
+    // Statement strip: one chip per statement, plus the counters.
+    let strip = design::band(ui, tokens, |ui| {
+        ui.horizontal_centered(|ui| {
+            let text = &session.tabs[tab_index].sql.text;
+            design::chip(
+                ui,
+                tokens,
+                &if statements.len() == 1 {
+                    "1 statement".to_owned()
+                } else {
+                    format!("{} statements", statements.len())
+                },
+                tokens.text_dim,
             );
-            for (index, statement) in statements.iter().take(12).enumerate() {
-                let label = statement.chars().take(24).collect::<String>();
-                if ui
-                    .small_button(format!("▶ {index}: {label}…"))
+            design::chip(
+                ui,
+                tokens,
+                &format!("{} lines", text.lines().count()),
+                tokens.text_faint,
+            );
+            for (index, statement) in statements.iter().take(6).enumerate() {
+                let label = table::clip(statement.trim(), 26);
+                if design::ghost_button(ui, tokens, &format!("{index}: {label}"), true)
                     .on_hover_text(statement)
                     .clicked()
                 {
                     command = Some(("sql.runStatement", serde_json::json!({"index": index})));
                 }
             }
-        });
-    }
-
-    if let Some(error) = session.tabs[tab_index].sql.error.clone() {
-        ui.colored_label(tokens.error, error);
-    }
-
-    let result = session.tabs[tab_index].sql.last_result.clone();
-    let label = session.tabs[tab_index].sql.result_label.clone();
-    if let Some(result) = result {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(label).size(11.0).color(tokens.text_dim));
-            if result.is_tabular() {
-                if ui.small_button("Export CSV…").clicked() {
-                    state.open_export_grid("csv");
-                }
-                if ui.small_button("Chart").clicked() {
-                    command = Some(("report.chart", serde_json::json!({"chart": "column"})));
-                }
-                if ui.small_button("Pivot").clicked() {
-                    command = Some(("report.pivot", serde_json::json!({})));
-                }
+            if statements.len() > 6 {
+                design::chip(
+                    ui,
+                    tokens,
+                    &format!("+{} more", statements.len() - 6),
+                    tokens.text_faint,
+                );
             }
-        });
-        egui::ScrollArea::both()
-            .id_salt(format!("result-scroll-{tab_index}"))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                egui::Grid::new(format!("result-{tab_index}"))
-                    .min_col_width(80.0)
-                    .show(ui, |ui| {
-                        for (index, name) in result.columns.iter().enumerate() {
-                            let kind = result
-                                .column_types
-                                .get(index)
-                                .map(String::as_str)
-                                .unwrap_or("");
-                            ui.label(
-                                RichText::new(name.to_string())
-                                    .strong()
-                                    .size(12.0)
-                                    .color(tokens.text),
-                            )
-                            .on_hover_text(kind);
-                        }
-                        ui.end_row();
-                        for row in result.rows.iter().take(500) {
-                            for value in row {
-                                let text = value.display().replace('\n', "\\n");
-                                let text = if text.chars().count() > 40 {
-                                    format!("{}…", text.chars().take(39).collect::<String>())
-                                } else {
-                                    text
-                                };
-                                ui.label(
-                                    RichText::new(text)
-                                        .size(12.0)
-                                        .monospace()
-                                        .color(value_color(value, tokens)),
-                                );
-                            }
-                            ui.end_row();
-                        }
-                    });
-            });
-    }
-
-    // History and snippets, side by side.
-    ui.separator();
-    ui.columns(2, |columns| {
-        columns[0].label(RichText::new("History").strong().size(12.0));
-        egui::ScrollArea::vertical()
-            .id_salt(format!("history-{tab_index}"))
-            .max_height(160.0)
-            .show(&mut columns[0], |ui| {
-                for entry in session.history.iter().rev().take(40) {
-                    let label = entry.sql.replace('\n', " ");
-                    let label = label.chars().take(70).collect::<String>();
-                    if ui
-                        .small_button(format!("{} · {} ms", label, entry.elapsed_ms.round()))
-                        .on_hover_text(&entry.sql)
-                        .clicked()
-                    {
-                        run_sql = Some(entry.sql.clone());
-                    }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(error) = &error {
+                    ui.label(RichText::new(error).size(11.5).color(tokens.error));
                 }
-                if session.history.is_empty() {
-                    ui.label(
-                        RichText::new("nothing yet")
-                            .size(11.0)
-                            .color(tokens.text_dim),
+            });
+        });
+    });
+    ui.painter().hline(
+        toolbar.left()..=strip.right(),
+        strip.top() + 0.5,
+        egui::Stroke::new(1.0, tokens.stroke),
+    );
+
+    // Results.
+    if let Some(result) = result {
+        let specs: Vec<TableColumn> = result
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                TableColumn::new(
+                    name.clone(),
+                    result.column_types.get(index).cloned().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let head = design::band(ui, tokens, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.label(RichText::new("Result").size(12.5).color(tokens.text));
+                if !result_label.is_empty() && !result_label.contains("rows") {
+                    design::chip(ui, tokens, &result_label, tokens.text_faint);
+                }
+                design::chip(
+                    ui,
+                    tokens,
+                    &format!("{} rows", result.rows.len()),
+                    tokens.text_dim,
+                );
+                design::chip(
+                    ui,
+                    tokens,
+                    &format!("{} ms", result.elapsed_ms.round()),
+                    tokens.text_faint,
+                );
+                if result.affected > 0 {
+                    design::chip(
+                        ui,
+                        tokens,
+                        &format!("{} affected", result.affected),
+                        tokens.ok,
                     );
                 }
             });
-        columns[1].label(RichText::new("Snippets").strong().size(12.0));
-        egui::ScrollArea::vertical()
-            .id_salt(format!("snippets-{tab_index}"))
-            .max_height(160.0)
-            .show(&mut columns[1], |ui| {
-                for snippet in &session.snippets {
-                    if ui
-                        .small_button(snippet.name.clone())
-                        .on_hover_text(&snippet.sql)
-                        .clicked()
-                    {
-                        run_sql = Some(snippet.sql.clone());
-                    }
-                }
+        });
+        ui.painter().hline(
+            head.left()..=head.right(),
+            head.bottom() - 0.5,
+            egui::Stroke::new(1.0, tokens.stroke),
+        );
+
+        if result.rows.is_empty() {
+            ui.add_space(10.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("the statement ran and returned no rows")
+                        .size(12.0)
+                        .color(tokens.text_faint),
+                );
             });
+        } else {
+            let view = TableView {
+                columns: &specs,
+                rows: &result.rows,
+                pending: Vec::new(),
+                inserted: Vec::new(),
+                selected: state.table(tab_index).selected,
+                sort: None,
+                editable: false,
+                sortable: false,
+                gutter: true,
+                height: (ui.available_height() - 30.0).max(120.0),
+                empty_text: "no rows",
+            };
+            crate::table::show(
+                ui,
+                tokens,
+                &view,
+                state.table(tab_index),
+                egui::Id::new(("result", tab_index)),
+            );
+        }
+    } else if error.is_none() {
+        ui.add_space(10.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new("Write a statement and press Run, or Cmd+Enter.")
+                    .size(12.0)
+                    .color(tokens.text_faint),
+            );
+        });
+    }
+
+    // History and snippets side by side, small.
+    let bottom = design::band(ui, tokens, |ui| {
+        ui.columns(2, |columns| {
+            columns[0].label(RichText::new("History").size(12.0).color(tokens.text));
+            egui::ScrollArea::vertical()
+                .id_salt(format!("history-{tab_index}"))
+                .max_height(120.0)
+                .show(&mut columns[0], |ui| {
+                    for entry in session.history.iter().rev().take(40) {
+                        let label = table::clip(&entry.sql.replace('\n', " "), 58);
+                        if design::ghost_button(
+                            ui,
+                            tokens,
+                            &format!("{label} · {:.0} ms", entry.elapsed_ms),
+                            true,
+                        )
+                        .on_hover_text(&entry.sql)
+                        .clicked()
+                        {
+                            run_sql = Some(entry.sql.clone());
+                        }
+                    }
+                    if session.history.is_empty() {
+                        ui.label(
+                            RichText::new("nothing yet")
+                                .size(11.0)
+                                .color(tokens.text_faint),
+                        );
+                    }
+                });
+            columns[1].label(RichText::new("Snippets").size(12.0).color(tokens.text));
+            egui::ScrollArea::vertical()
+                .id_salt(format!("snippets-{tab_index}"))
+                .max_height(120.0)
+                .show(&mut columns[1], |ui| {
+                    for snippet in &session.snippets {
+                        if design::ghost_button(ui, tokens, &snippet.name, true)
+                            .on_hover_text(&snippet.sql)
+                            .clicked()
+                        {
+                            run_sql = Some(snippet.sql.clone());
+                        }
+                    }
+                    if session.snippets.is_empty() {
+                        ui.label(
+                            RichText::new("no saved snippets")
+                                .size(11.0)
+                                .color(tokens.text_faint),
+                        );
+                    }
+                });
+        });
     });
+    ui.painter().hline(
+        bottom.left()..=bottom.right(),
+        bottom.top() + 0.5,
+        egui::Stroke::new(1.0, tokens.stroke),
+    );
 
     if let Some(sql) = run_sql {
         if let Some(tab) = session.tabs.get_mut(tab_index) {

@@ -1,10 +1,77 @@
 //! The non-grid tabs: object design, ER diagram, reports, server monitor, jobs, transfer and users.
+//! Every one of them is built from the same pieces: a context toolbar, chips for the facts, cards
+//! for the details and the shared table widget wherever rows are involved.
 
+use datacraft_core::Value as Cell;
 use datacraft_engine::{Level, Session, TabKind};
-use egui::{Color32, RichText};
+use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, Vec2};
 
 use crate::app::UiState;
-use crate::theme::Tokens;
+use crate::table::{self, TableColumn, TableView};
+use crate::theme::{self as design, Tokens};
+
+/// serde_json in, the one cell type out.
+fn cell(value: &serde_json::Value) -> Cell {
+    match value {
+        serde_json::Value::Null => Cell::Null,
+        serde_json::Value::Bool(b) => Cell::Bool(*b),
+        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
+            (Some(i), _, _) => Cell::Int(i),
+            (None, Some(u), _) => Cell::UInt(u),
+            (None, None, Some(f)) => Cell::Float(f),
+            _ => Cell::Null,
+        },
+        serde_json::Value::String(s) => Cell::Text(s.clone()),
+        other => Cell::Json(other.to_string()),
+    }
+}
+
+fn rows_from(items: &[serde_json::Value], keys: &[&str]) -> Vec<Vec<Cell>> {
+    items
+        .iter()
+        .map(|item| keys.iter().map(|key| cell(&item[*key])).collect())
+        .collect()
+}
+
+fn specs(names: &[&str], types: &[&str]) -> Vec<TableColumn> {
+    names
+        .iter()
+        .zip(types.iter())
+        .map(|(name, type_name)| TableColumn::new(*name, *type_name))
+        .collect()
+}
+
+/// What a read-only list in this file needs: the data, the room it has, and its own frame id.
+struct List<'a> {
+    columns: &'a [TableColumn],
+    rows: &'a [Vec<Cell>],
+    height: f32,
+    id: egui::Id,
+    empty: &'a str,
+}
+
+/// Read-only table: the shape every list in this file uses.
+fn list(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    spec: List<'_>,
+    state: &mut table::TableState,
+) -> table::TableEvent {
+    let view = TableView {
+        columns: spec.columns,
+        rows: spec.rows,
+        pending: Vec::new(),
+        inserted: Vec::new(),
+        selected: state.selected,
+        sort: None,
+        editable: false,
+        sortable: false,
+        gutter: true,
+        height: spec.height,
+        empty_text: spec.empty,
+    };
+    table::show(ui, tokens, &view, state, spec.id)
+}
 
 /// Object design: columns, indexes, foreign keys and the DDL, with the designer buttons.
 pub fn design(
@@ -14,138 +81,253 @@ pub fn design(
     state: &mut UiState,
     tokens: &Tokens,
 ) {
-    let Some(table) = session.tabs[tab_index].table.clone() else {
-        ui.label("this tab has no table");
+    let Some(table_snapshot) = session.tabs[tab_index].table.clone() else {
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new("this tab has no table")
+                    .size(12.5)
+                    .color(tokens.text_faint),
+            );
+        });
         return;
     };
-    ui.horizontal(|ui| {
-        ui.heading(RichText::new(table.key()).size(15.0));
-        ui.label(
-            RichText::new(format!(
-                "{} · {} columns{}",
-                table.kind.label(),
-                table.columns.len(),
-                table
-                    .row_estimate
-                    .map(|r| format!(" · ~{r} rows"))
-                    .unwrap_or_default()
-            ))
-            .color(tokens.text_dim),
-        );
-        if ui.button("+ Column").clicked() {
-            state.open_command("schema.addColumn&table=".to_string());
+    let table_def = table_snapshot;
+    let mut show_ddl = false;
+    let mut er_diagram = false;
+
+    let toolbar = design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
+            ui.label(RichText::new(table_def.key()).size(13.5).color(tokens.text));
+            design::chip(ui, tokens, table_def.kind.label(), tokens.info);
+            design::chip(
+                ui,
+                tokens,
+                &format!("{} columns", table_def.columns.len()),
+                tokens.text_dim,
+            );
+            design::chip(
+                ui,
+                tokens,
+                &format!("{} indexes", table_def.indexes.len()),
+                tokens.text_dim,
+            );
+            if let Some(rows) = table_def.row_estimate {
+                design::chip(ui, tokens, &format!("~{rows} rows"), tokens.text_faint);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "DDL", true).clicked() {
+                    show_ddl = true;
+                }
+                if design::ghost_button(ui, tokens, "ER diagram", true).clicked() {
+                    er_diagram = true;
+                }
+                design::divider(ui, tokens);
+                if design::ghost_button(ui, tokens, "+ Foreign key", true).clicked() {
+                    state.open_command("schema.addForeignKey&table=".to_string());
+                }
+                if design::ghost_button(ui, tokens, "+ Index", true).clicked() {
+                    state.open_command("schema.createIndex&table=".to_string());
+                }
+                if design::primary_button(ui, tokens, "+ Column", true).clicked() {
+                    state.open_command("schema.addColumn&table=".to_string());
+                }
+            });
+        });
+    });
+    ui.painter().hline(
+        toolbar.left()..=toolbar.right(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+
+    if er_diagram {
+        if let Some(conn) = session.tabs[tab_index].conn {
+            state.request_diagram(session, conn);
         }
-        if ui.button("+ Index").clicked() {
-            state.open_command("schema.createIndex&table=".to_string());
-        }
-        if ui.button("+ Foreign key").clicked() {
-            state.open_command("schema.addForeignKey&table=".to_string());
-        }
-        if ui.button("Diagnostics").clicked() {
-            state.open_command("schema.ddl&table=".to_string());
-        }
-        if ui.button("ER diagram").clicked() {
-            if let Some(conn) = session.tabs[tab_index].conn {
-                state.request_diagram(session, conn);
+    }
+    if show_ddl {
+        if let Some(conn) = session.tabs[tab_index].conn {
+            let params = serde_json::json!({
+                "conn": session.conns[conn].cfg.id,
+                "table": table_def.key(),
+            });
+            match session.run("schema.ddl", params) {
+                Ok(value) => {
+                    if let Some(sql) = value["ddl"].as_str() {
+                        session.tabs[tab_index]
+                            .payload
+                            .insert("ddl".into(), serde_json::json!(sql));
+                    }
+                }
+                Err(e) => session.log(Level::Error, e.to_string()),
             }
         }
-    });
-    ui.separator();
+    }
 
     egui::ScrollArea::vertical()
         .id_salt(format!("design-{tab_index}"))
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.label(RichText::new("Columns").strong());
-            egui::Grid::new(format!("design-columns-{tab_index}"))
-                .striped(true)
-                .min_col_width(80.0)
-                .show(ui, |ui| {
-                    for header in ["name", "type", "nullable", "default", "key", "comment"] {
-                        ui.label(RichText::new(header).strong().size(12.0));
-                    }
-                    ui.end_row();
-                    for column in &table.columns {
-                        ui.label(RichText::new(column.name.clone()).monospace());
-                        ui.label(RichText::new(column.type_name.clone()).monospace());
-                        ui.label(if column.nullable { "yes" } else { "no" });
-                        ui.label(column.default.clone().unwrap_or_default());
-                        ui.label(if column.primary_key {
-                            "primary key"
-                        } else if column.auto_increment {
-                            "generated"
-                        } else {
-                            ""
+            design::section(
+                ui,
+                tokens,
+                "Columns",
+                Some("double-click a header to sort nothing — this is the definition"),
+            );
+            ui.add_space(4.0);
+            let column_specs = specs(
+                &["name", "type", "nullable", "default", "key", "comment"],
+                &["text", "text", "text", "text", "text", "text"],
+            );
+            let column_rows: Vec<Vec<Cell>> = table_def
+                .columns
+                .iter()
+                .map(|column| {
+                    vec![
+                        Cell::Text(column.name.clone()),
+                        Cell::Text(column.type_name.clone()),
+                        Cell::Text(if column.nullable { "yes" } else { "no" }.into()),
+                        Cell::Text(column.default.clone().unwrap_or_default()),
+                        Cell::Text(
+                            if column.primary_key {
+                                "primary key"
+                            } else if column.auto_increment {
+                                "generated"
+                            } else if column.enum_values.is_empty() {
+                                ""
+                            } else {
+                                "enum"
+                            }
+                            .into(),
+                        ),
+                        Cell::Text(column.comment.clone()),
+                    ]
+                })
+                .collect();
+            let height = (column_rows.len() as f32 * design::ROW_H + 34.0).min(360.0);
+            list(
+                ui,
+                tokens,
+                List {
+                    columns: &column_specs,
+                    rows: &column_rows,
+                    height,
+                    id: egui::Id::new(("design-columns", tab_index)),
+                    empty: "no columns",
+                },
+                state.table(tab_index),
+            );
+
+            if !table_def.indexes.is_empty() {
+                ui.add_space(12.0);
+                design::section(ui, tokens, "Indexes", None);
+                ui.add_space(4.0);
+                for index in &table_def.indexes {
+                    let card = design::card_frame(tokens);
+                    card.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&index.name).size(12.5).color(tokens.text));
+                            if index.primary {
+                                design::chip(ui, tokens, "primary", tokens.accent);
+                            }
+                            if index.unique {
+                                design::chip(ui, tokens, "unique", tokens.ok);
+                            }
+                            if !index.kind.is_empty() {
+                                design::chip(ui, tokens, &index.kind, tokens.text_faint);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(index.columns.join(", "))
+                                            .size(11.5)
+                                            .monospace()
+                                            .color(tokens.text_dim),
+                                    );
+                                },
+                            );
                         });
-                        ui.label(column.comment.clone());
-                        ui.end_row();
-                    }
-                });
-
-            if !table.indexes.is_empty() {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Indexes").strong());
-                for index in &table.indexes {
-                    ui.label(format!(
-                        "{} ({}){}{}",
-                        index.name,
-                        index.columns.join(", "),
-                        if index.unique { " unique" } else { "" },
-                        if index.primary { " primary" } else { "" }
-                    ));
+                    });
+                    ui.add_space(4.0);
                 }
             }
 
-            if !table.foreign_keys.is_empty() {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Foreign keys").strong());
-                for fk in &table.foreign_keys {
-                    ui.label(format!(
-                        "{}: ({}) → {}({}){}",
-                        fk.name,
-                        fk.columns.join(", "),
-                        fk.ref_table,
-                        fk.ref_columns.join(", "),
-                        if fk.on_delete.is_empty() || fk.on_delete.eq_ignore_ascii_case("no action")
-                        {
-                            String::new()
-                        } else {
-                            format!(" on delete {}", fk.on_delete.to_uppercase())
-                        }
-                    ));
+            if !table_def.foreign_keys.is_empty() {
+                ui.add_space(12.0);
+                design::section(ui, tokens, "Foreign keys", None);
+                ui.add_space(4.0);
+                for fk in &table_def.foreign_keys {
+                    let card = design::card_frame(tokens);
+                    card.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&fk.name).size(12.5).color(tokens.text));
+                            if !fk.on_delete.is_empty()
+                                && !fk.on_delete.eq_ignore_ascii_case("no action")
+                            {
+                                design::chip(
+                                    ui,
+                                    tokens,
+                                    &format!("on delete {}", fk.on_delete.to_uppercase()),
+                                    tokens.warn,
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{}  →  {}({})",
+                                            fk.columns.join(", "),
+                                            fk.ref_table,
+                                            fk.ref_columns.join(", ")
+                                        ))
+                                        .size(11.5)
+                                        .monospace()
+                                        .color(tokens.text_dim),
+                                    );
+                                },
+                            );
+                        });
+                    });
+                    ui.add_space(4.0);
                 }
             }
 
+            ui.add_space(12.0);
+            design::section(
+                ui,
+                tokens,
+                "DDL",
+                Some("what the server would run to rebuild this table"),
+            );
+            ui.add_space(4.0);
             if let Some(ddl) = session.tabs[tab_index]
                 .payload
                 .get("ddl")
                 .and_then(|v| v.as_str())
             {
-                ui.add_space(8.0);
-                ui.label(RichText::new("DDL").strong());
                 let mut text = ddl.to_string();
-                ui.add(
-                    egui::TextEdit::multiline(&mut text)
-                        .code_editor()
-                        .desired_rows(10)
-                        .desired_width(f32::INFINITY),
+                let frame = egui::Frame::new()
+                    .fill(tokens.background)
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(10));
+                frame.show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text)
+                            .code_editor()
+                            .desired_rows(10)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+            } else {
+                ui.label(
+                    RichText::new("press DDL to load the statement")
+                        .size(11.5)
+                        .color(tokens.text_faint),
                 );
-            } else if ui.button("Show DDL").clicked() {
-                if let Some(conn) = session.tabs[tab_index].conn {
-                    let params = serde_json::json!({
-                        "conn": session.conns[conn].cfg.id,
-                        "table": table.key(),
-                    });
-                    match session.run("schema.ddl", params) {
-                        Ok(value) => {
-                            if let Some(sql) = value["ddl"].as_str() {
-                                session.tabs[tab_index]
-                                    .payload
-                                    .insert("ddl".into(), serde_json::json!(sql));
-                            }
-                        }
-                        Err(e) => session.log(Level::Error, e.to_string()),
-                    }
-                }
             }
         });
 }
@@ -159,48 +341,113 @@ pub fn diagram(
     tokens: &Tokens,
 ) {
     let payload = session.tabs[tab_index].payload.get("diagram").cloned();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("ER diagram").strong());
-        if let Some(conn) = session.tabs[tab_index].conn {
-            if ui.button("Reload").clicked() {
-                state.request_diagram(session, conn);
+    let mut reload = false;
+    let mut export = false;
+    let toolbar = design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
+            ui.label(RichText::new("ER diagram").size(13.5).color(tokens.text));
+            if let Some(payload) = &payload {
+                design::chip(
+                    ui,
+                    tokens,
+                    &format!(
+                        "{} tables",
+                        payload["nodes"].as_array().map(Vec::len).unwrap_or(0)
+                    ),
+                    tokens.text_dim,
+                );
+                design::chip(
+                    ui,
+                    tokens,
+                    &format!(
+                        "{} relations",
+                        payload["edges"].as_array().map(Vec::len).unwrap_or(0)
+                    ),
+                    tokens.text_dim,
+                );
             }
-            if ui.button("Export SVG…").clicked() {
-                let path = state.pick_save_path("diagram.svg");
-                if let Some(path) = path {
-                    let params = serde_json::json!({
-                        "conn": session.conns[conn].cfg.id,
-                        "path": path,
-                    });
-                    match session.run("diagram.exportSvg", params) {
-                        Ok(value) => session.log(
-                            Level::Success,
-                            format!("wrote {}", value["path"].as_str().unwrap_or("")),
-                        ),
-                        Err(e) => session.log(Level::Error, e.to_string()),
-                    }
+            design::chip(
+                ui,
+                tokens,
+                &format!("{:.0}% zoom", state.diagram_zoom * 100.0),
+                tokens.text_faint,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "Export SVG", true).clicked() {
+                    export = true;
+                }
+                if design::ghost_button(ui, tokens, "Reload", true).clicked() {
+                    reload = true;
+                }
+                if design::ghost_button(ui, tokens, "Reset view", true).clicked() {
+                    state.diagram_offset = egui::vec2(0.0, 0.0);
+                    state.diagram_zoom = 1.0;
+                }
+                design::keycap(ui, tokens, "drag to pan");
+                design::keycap(ui, tokens, "scroll to zoom");
+            });
+        });
+    });
+    ui.painter().hline(
+        toolbar.left()..=toolbar.right(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+    if reload {
+        if let Some(conn) = session.tabs[tab_index].conn {
+            state.request_diagram(session, conn);
+        }
+    }
+    if export {
+        if let Some(conn) = session.tabs[tab_index].conn {
+            if let Some(path) = state.pick_save_path("diagram.svg") {
+                let params = serde_json::json!({"conn": session.conns[conn].cfg.id, "path": path});
+                match session.run("diagram.exportSvg", params) {
+                    Ok(value) => session.log(
+                        Level::Success,
+                        format!("wrote {}", value["path"].as_str().unwrap_or("")),
+                    ),
+                    Err(e) => session.log(Level::Error, e.to_string()),
                 }
             }
         }
-        ui.label(
-            RichText::new("drag to pan · ctrl+scroll to zoom")
-                .size(11.0)
-                .color(tokens.text_dim),
-        );
-    });
+    }
+
     let Some(payload) = payload else {
-        ui.label(RichText::new("loading the catalog…").color(tokens.text_dim));
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new("reading the catalog…")
+                    .size(12.5)
+                    .color(tokens.text_faint),
+            );
+        });
         return;
     };
     let nodes = payload["nodes"].as_array().cloned().unwrap_or_default();
     let edges = payload["edges"].as_array().cloned().unwrap_or_default();
 
     let (response, painter) = ui.allocate_painter(
-        egui::Vec2::new(ui.available_width(), ui.available_height().max(200.0)),
-        egui::Sense::click_and_drag(),
+        Vec2::new(ui.available_width(), ui.available_height().max(200.0)),
+        Sense::click_and_drag(),
     );
-    painter.rect_filled(response.rect, 4.0, tokens.background);
+    painter.rect_filled(response.rect, 0.0, tokens.background);
+
+    // Canvas dots, so panning has a reference.
+    let step = 26.0;
+    let mut x = response.rect.left() - response.rect.left() % step;
+    while x < response.rect.right() {
+        let mut y = response.rect.top() - response.rect.top() % step;
+        while y < response.rect.bottom() {
+            painter.circle_filled(egui::pos2(x, y), 0.8, tokens.stroke);
+            y += step;
+        }
+        x += step;
+    }
+
     let origin = response.rect.min + state.diagram_offset;
+    let zoom = state.diagram_zoom;
 
     for edge in &edges {
         let (Some(from), Some(to)) = (
@@ -211,28 +458,30 @@ pub fn diagram(
         };
         let from_pos = egui::pos2(
             from["x"].as_f64().unwrap_or(0.0) as f32 + from["w"].as_f64().unwrap_or(140.0) as f32,
-            from["y"].as_f64().unwrap_or(0.0) as f32 + 30.0,
+            from["y"].as_f64().unwrap_or(0.0) as f32 + 26.0,
         );
         let to_pos = egui::pos2(
             to["x"].as_f64().unwrap_or(0.0) as f32,
-            to["y"].as_f64().unwrap_or(0.0) as f32 + 30.0,
+            to["y"].as_f64().unwrap_or(0.0) as f32 + 26.0,
         );
-        let a = origin + from_pos.to_vec2() * state.diagram_zoom;
-        let b = origin + to_pos.to_vec2() * state.diagram_zoom;
-        let mid = egui::pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-        painter.line_segment(
-            [a, egui::pos2(mid.x, a.y)],
-            egui::Stroke::new(1.5, tokens.accent),
-        );
-        painter.line_segment(
-            [egui::pos2(mid.x, a.y), egui::pos2(mid.x, b.y)],
-            egui::Stroke::new(1.5, tokens.accent),
-        );
-        painter.line_segment(
-            [egui::pos2(mid.x, b.y), b],
-            egui::Stroke::new(1.5, tokens.accent),
-        );
-        painter.circle_filled(b, 3.0, tokens.accent);
+        let a = origin + from_pos.to_vec2() * zoom;
+        let b = origin + to_pos.to_vec2() * zoom;
+        let mid_x = (a.x + b.x) / 2.0;
+        let stroke = Stroke::new(1.4, tokens.accent.gamma_multiply(0.75));
+        painter.line_segment([a, egui::pos2(mid_x, a.y)], stroke);
+        painter.line_segment([egui::pos2(mid_x, a.y), egui::pos2(mid_x, b.y)], stroke);
+        painter.line_segment([egui::pos2(mid_x, b.y), b], stroke);
+        // Arrow head at the referenced table.
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                b,
+                egui::pos2(b.x - 7.0, b.y - 4.0),
+                egui::pos2(b.x - 7.0, b.y + 4.0),
+            ],
+            tokens.accent,
+            Stroke::NONE,
+        ));
+        painter.circle_filled(a, 3.0, tokens.accent.gamma_multiply(0.6));
     }
 
     for node in &nodes {
@@ -240,29 +489,58 @@ pub fn diagram(
         let y = node["y"].as_f64().unwrap_or(0.0) as f32;
         let w = node["w"].as_f64().unwrap_or(140.0) as f32;
         let h = node["h"].as_f64().unwrap_or(60.0) as f32;
-        let rect = egui::Rect::from_min_size(
-            origin + egui::vec2(x, y) * state.diagram_zoom,
-            egui::vec2(w, h) * state.diagram_zoom,
-        );
-        painter.rect_filled(rect, 4.0, tokens.panel_alt);
-        painter.rect_stroke(
-            rect,
-            4.0,
-            egui::Stroke::new(1.0, tokens.stroke),
-            egui::StrokeKind::Inside,
-        );
+        let rect =
+            egui::Rect::from_min_size(origin + egui::vec2(x, y) * zoom, egui::vec2(w, h) * zoom);
+        if !response.rect.intersects(rect) {
+            continue;
+        }
+        let radius = CornerRadius::same((6.0 * zoom) as u8);
         painter.rect_filled(
-            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 22.0)),
-            4.0,
+            rect.translate(Vec2::new(0.0, 2.0)),
+            radius,
+            Color32::from_black_alpha(if tokens.dark { 90 } else { 24 }),
+        );
+        painter.rect_filled(rect, radius, tokens.panel);
+        let head = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0 * zoom));
+        painter.rect_filled(
+            head,
+            CornerRadius {
+                nw: radius.nw,
+                ne: radius.ne,
+                sw: 0,
+                se: 0,
+            },
             tokens.grid_header,
         );
         painter.text(
-            rect.min + egui::vec2(8.0, 11.0),
-            egui::Align2::LEFT_CENTER,
+            rect.min + Vec2::new(9.0, 12.0 * zoom),
+            Align2::LEFT_CENTER,
             node["table"].as_str().unwrap_or(""),
-            egui::FontId::proportional(12.0),
+            egui::FontId::proportional(12.0 * zoom),
             tokens.text,
         );
+        let keys: Vec<String> = node["primary_key"]
+            .as_array()
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|k| k.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !keys.is_empty() {
+            let badge = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - 24.0, rect.top() + 6.0),
+                Vec2::new(17.0, 13.0),
+            );
+            painter.rect_filled(badge, CornerRadius::same(3), tokens.accent_dim);
+            painter.text(
+                badge.center(),
+                Align2::CENTER_CENTER,
+                "PK",
+                egui::FontId::proportional(9.0),
+                tokens.accent,
+            );
+        }
         for (index, column) in node["columns"]
             .as_array()
             .cloned()
@@ -274,22 +552,42 @@ pub fn diagram(
                 break;
             }
             let name = column.as_str().unwrap_or("");
-            let is_key = node["primary_key"]
-                .as_array()
-                .map(|keys| keys.iter().any(|k| k.as_str() == Some(name)))
-                .unwrap_or(false);
+            let is_key = keys.iter().any(|k| k == name);
+            let row = egui::Rect::from_min_size(
+                egui::pos2(
+                    rect.left(),
+                    rect.top() + 24.0 * zoom + index as f32 * 18.0 * zoom,
+                ),
+                Vec2::new(rect.width(), 18.0 * zoom),
+            );
+            if index % 2 == 1 {
+                painter.rect_filled(row, CornerRadius::ZERO, tokens.grid_row_alt);
+            }
+            if is_key {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(row.min, Vec2::new(2.0, row.height())),
+                    CornerRadius::ZERO,
+                    tokens.warn,
+                );
+            }
             painter.text(
-                rect.min + egui::vec2(10.0, 30.0 + index as f32 * 18.0),
-                egui::Align2::LEFT_CENTER,
+                row.left_center() + Vec2::new(10.0, 0.0),
+                Align2::LEFT_CENTER,
+                name,
+                egui::FontId::monospace(10.5 * zoom),
                 if is_key {
-                    format!("{name} (pk)")
+                    tokens.dirty_text
                 } else {
-                    name.to_string()
+                    tokens.text_dim
                 },
-                egui::FontId::monospace(11.0),
-                if is_key { tokens.warn } else { tokens.text_dim },
             );
         }
+        painter.rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, tokens.stroke_strong),
+            egui::StrokeKind::Inside,
+        );
     }
 
     if response.dragged() {
@@ -302,100 +600,186 @@ pub fn diagram(
 }
 
 /// Report tab: a chart, a pivot or a plain table, from the payload the command produced.
-pub fn report(ui: &mut egui::Ui, session: &mut Session, tab_index: usize, tokens: &Tokens) {
+pub fn report(
+    ui: &mut egui::Ui,
+    session: &mut Session,
+    tab_index: usize,
+    state: &mut UiState,
+    tokens: &Tokens,
+) {
     let payload = session.tabs[tab_index]
         .payload
         .get("chart")
         .cloned()
         .unwrap_or_default();
     let kind = payload["chart"].as_str().unwrap_or("table").to_string();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Report").strong());
-        if let Some(sql) = payload["sql"].as_str() {
-            ui.label(
-                RichText::new(shorten(sql, 90))
-                    .size(11.0)
-                    .color(tokens.text_dim),
-            );
-        }
-        if let Some(conn) = session.tabs[tab_index].conn {
-            for (id, label) in [("report.chart", "Chart"), ("report.pivot", "Pivot")] {
-                if ui.small_button(label).clicked() {
-                    let sql = payload["sql"].as_str().unwrap_or("").to_string();
-                    let params = serde_json::json!({
-                        "conn": session.conns[conn].cfg.id,
-                        "sql": sql,
-                        "chart": if id == "report.pivot" { "table" } else { "column" },
-                    });
-                    match session.run(id, params) {
-                        Ok(value) => {
-                            session.tabs[tab_index]
-                                .payload
-                                .insert("chart".into(), value);
-                        }
-                        Err(e) => session.log(Level::Error, e.to_string()),
-                    }
-                }
-            }
-        }
-    });
-    ui.separator();
+    let sql = payload["sql"].as_str().unwrap_or("").to_string();
+    let mut rerun: Option<&str> = None;
 
-    if payload.get("rows").is_some() && payload.get("cells").is_some() {
-        // Pivot shape.
-        let rows = payload["rows"].as_array().cloned().unwrap_or_default();
-        let columns = payload["columns"].as_array().cloned().unwrap_or_default();
-        egui::Grid::new(format!("pivot-{tab_index}"))
-            .striped(true)
-            .show(ui, |ui| {
-                ui.label("");
-                for column in &columns {
-                    ui.label(RichText::new(column.as_str().unwrap_or("")).strong());
-                }
-                ui.end_row();
-                for (index, row) in rows.iter().enumerate() {
-                    ui.label(RichText::new(row.as_str().unwrap_or("")).strong());
-                    let cells = payload["cells"][index]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                    for cell in &cells {
-                        ui.label(match cell.as_f64() {
-                            Some(v) => format!("{v:.2}"),
-                            None => "·".into(),
-                        });
-                    }
-                    ui.end_row();
+    let toolbar = design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
+            ui.label(RichText::new("Report").size(13.5).color(tokens.text));
+            if !sql.is_empty() {
+                ui.label(
+                    RichText::new(table::clip(&sql.replace('\n', " "), 70))
+                        .size(11.0)
+                        .monospace()
+                        .color(tokens.text_faint),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let options = [
+                    ("Bar", kind == "bar"),
+                    ("Column", kind == "column"),
+                    ("Line", kind == "line"),
+                    ("Area", kind == "area"),
+                    ("Pie", kind == "pie"),
+                    ("Table", kind == "table"),
+                ];
+                if let Some(index) = design::segmented(
+                    ui,
+                    tokens,
+                    &options.iter().map(|(l, s)| (*l, *s)).collect::<Vec<_>>(),
+                ) {
+                    rerun = Some(match index {
+                        0 => "bar",
+                        1 => "column",
+                        2 => "line",
+                        3 => "area",
+                        4 => "pie",
+                        _ => "table",
+                    });
                 }
             });
+        });
+    });
+    ui.painter().hline(
+        toolbar.left()..=toolbar.right(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+    if let (Some(chart), Some(conn)) = (rerun, session.tabs[tab_index].conn) {
+        let params = serde_json::json!({
+            "conn": session.conns[conn].cfg.id,
+            "sql": sql,
+            "chart": chart,
+        });
+        match session.run("report.chart", params) {
+            Ok(value) => {
+                session.tabs[tab_index]
+                    .payload
+                    .insert("chart".into(), value);
+            }
+            Err(e) => session.log(Level::Error, e.to_string()),
+        }
+    }
+
+    // Pivot shape.
+    if payload.get("rows").is_some() && payload.get("cells").is_some() {
+        let row_keys = payload["rows"].as_array().cloned().unwrap_or_default();
+        let column_keys = payload["columns"].as_array().cloned().unwrap_or_default();
+        let mut names: Vec<&str> = vec!["row"];
+        let column_labels: Vec<String> = column_keys
+            .iter()
+            .map(|c| c.as_str().unwrap_or("").to_string())
+            .collect();
+        for label in &column_labels {
+            names.push(label);
+        }
+        let column_specs: Vec<TableColumn> =
+            names.iter().map(|n| TableColumn::new(*n, "text")).collect();
+        let rows: Vec<Vec<Cell>> = row_keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let mut row = vec![Cell::Text(key.as_str().unwrap_or("").to_string())];
+                for cell_value in payload["cells"][index]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    row.push(match cell_value.as_f64() {
+                        Some(v) => Cell::Float(v),
+                        None => Cell::Null,
+                    });
+                }
+                row
+            })
+            .collect();
+        let height = (rows.len() as f32 * design::ROW_H + 34.0).min(ui.available_height());
+        list(
+            ui,
+            tokens,
+            List {
+                columns: &column_specs,
+                rows: &rows,
+                height,
+                id: egui::Id::new(("pivot", tab_index)),
+                empty: "nothing to pivot",
+            },
+            state.table(tab_index),
+        );
+        ui.label(
+            RichText::new(payload["summary"].as_str().unwrap_or(""))
+                .size(11.5)
+                .color(tokens.text_dim),
+        );
         return;
     }
 
     if kind == "table" {
-        if let Some(result) = payload.get("result").or_else(|| payload.get("data")) {
-            let columns = result["columns"].as_array().cloned().unwrap_or_default();
-            let rows = result["rows"].as_array().cloned().unwrap_or_default();
-            egui::Grid::new(format!("report-table-{tab_index}"))
-                .striped(true)
-                .show(ui, |ui| {
-                    for column in &columns {
-                        ui.label(RichText::new(column.as_str().unwrap_or("")).strong());
-                    }
-                    ui.end_row();
-                    for row in rows.iter().take(200) {
-                        if let Some(object) = row.as_object() {
-                            for column in &columns {
-                                let key = column.as_str().unwrap_or("");
-                                ui.label(
-                                    RichText::new(object.get(key).map(scalar).unwrap_or_default())
-                                        .monospace(),
-                                );
-                            }
-                        }
-                        ui.end_row();
-                    }
-                });
-        }
+        let result = payload.get("result").or_else(|| payload.get("data"));
+        let Some(result) = result else {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("no rows in this report")
+                        .size(12.5)
+                        .color(tokens.text_faint),
+                );
+            });
+            return;
+        };
+        let names: Vec<String> = result["columns"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c.as_str().unwrap_or("").to_string())
+            .collect();
+        let column_specs: Vec<TableColumn> = names
+            .iter()
+            .map(|n| TableColumn::new(n.clone(), ""))
+            .collect();
+        let items = result["rows"].as_array().cloned().unwrap_or_default();
+        let rows: Vec<Vec<Cell>> = items
+            .iter()
+            .map(|item| {
+                names
+                    .iter()
+                    .map(|name| item.get(name).map(cell).unwrap_or(Cell::Null))
+                    .collect()
+            })
+            .collect();
+        let height = (rows.len() as f32 * design::ROW_H + 34.0).min(ui.available_height());
+        list(
+            ui,
+            tokens,
+            List {
+                columns: &column_specs,
+                rows: &rows,
+                height,
+                id: egui::Id::new(("report-table", tab_index)),
+                empty: "no rows",
+            },
+            state.table(tab_index),
+        );
+        ui.label(
+            RichText::new(payload["summary"].as_str().unwrap_or(""))
+                .size(11.5)
+                .color(tokens.text_dim),
+        );
         return;
     }
 
@@ -424,33 +808,62 @@ pub fn report(ui: &mut egui::Ui, session: &mut Session, tab_index: usize, tokens
         })
         .unwrap_or_default();
     if labels.is_empty() {
-        ui.label(RichText::new("nothing to chart yet").color(tokens.text_dim));
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new(
+                    "nothing to chart yet — run a query that returns a label column and a number",
+                )
+                .size(12.5)
+                .color(tokens.text_faint),
+            );
+        });
         return;
     }
+
     let (response, painter) = ui.allocate_painter(
-        egui::Vec2::new(ui.available_width(), ui.available_height().max(240.0)),
-        egui::Sense::hover(),
+        Vec2::new(
+            ui.available_width(),
+            (ui.available_height() - 30.0).max(220.0),
+        ),
+        Sense::hover(),
     );
-    let rect = response.rect.shrink2(egui::vec2(24.0, 20.0));
+    let outer = response.rect.shrink2(Vec2::new(28.0, 22.0));
+    let plot = egui::Rect::from_min_max(
+        egui::pos2(outer.left() + 54.0, outer.top()),
+        egui::pos2(outer.right(), outer.bottom() - 22.0),
+    );
     let max = series
         .iter()
         .flat_map(|(_, values)| values.iter().cloned())
         .fold(0.0f64, f64::max)
         .max(1.0);
-    let palette = [
-        tokens.accent,
-        tokens.ok,
-        tokens.warn,
-        tokens.error,
-        Color32::from_rgb(0x9b, 0x7c, 0xff),
-    ];
+    let palette = tokens.chart;
+
+    if kind != "pie" {
+        // Y gridlines and their labels.
+        for step in 0..=4 {
+            let y = plot.bottom() - plot.height() * step as f32 / 4.0;
+            painter.line_segment(
+                [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+                Stroke::new(0.75, tokens.grid_line),
+            );
+            painter.text(
+                egui::pos2(plot.left() - 8.0, y),
+                Align2::RIGHT_CENTER,
+                format_axis(max * step as f64 / 4.0),
+                egui::FontId::proportional(10.0),
+                tokens.text_faint,
+            );
+        }
+    }
 
     match kind.as_str() {
         "pie" => {
             let values = series.first().map(|(_, v)| v.clone()).unwrap_or_default();
             let total: f64 = values.iter().sum::<f64>().max(0.001);
-            let center = rect.center();
-            let radius = rect.height().min(rect.width()) * 0.35;
+            let center = outer.center();
+            let radius = outer.height().min(outer.width()) * 0.34;
             let mut start = 0.0f32;
             for (index, value) in values.iter().enumerate() {
                 let sweep = (value / total) as f32 * std::f32::consts::TAU;
@@ -464,102 +877,167 @@ pub fn report(ui: &mut egui::Ui, session: &mut Session, tab_index: usize, tokens
                 for pair in points.windows(2) {
                     painter.add(egui::Shape::convex_polygon(
                         vec![center, pair[0], pair[1]],
-                        palette[index % palette.len()].gamma_multiply(0.85),
-                        egui::Stroke::NONE,
+                        palette[index % palette.len()],
+                        Stroke::NONE,
                     ));
                 }
-                let angle = start + sweep / 2.0;
-                painter.text(
-                    center + egui::vec2(angle.cos(), angle.sin()) * (radius * 0.7),
-                    egui::Align2::CENTER_CENTER,
-                    labels.get(index).cloned().unwrap_or_default(),
-                    egui::FontId::proportional(11.0),
-                    tokens.text,
-                );
+                if sweep > 0.25 {
+                    let angle = start + sweep / 2.0;
+                    painter.text(
+                        center + egui::vec2(angle.cos(), angle.sin()) * (radius * 0.68),
+                        Align2::CENTER_CENTER,
+                        format!("{:.0}%", value / total * 100.0),
+                        egui::FontId::proportional(10.5),
+                        tokens.accent_text,
+                    );
+                }
                 start += sweep;
                 if start >= std::f32::consts::TAU {
                     break;
                 }
             }
+            // Legend.
+            let mut y = outer.top();
+            for (index, label) in labels.iter().enumerate() {
+                let x = outer.right() - 130.0;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(x, y + 2.0), Vec2::new(9.0, 9.0)),
+                    CornerRadius::same(2),
+                    palette[index % palette.len()],
+                );
+                painter.text(
+                    egui::pos2(x + 15.0, y + 7.0),
+                    Align2::LEFT_CENTER,
+                    table::clip(label, 18),
+                    egui::FontId::proportional(11.0),
+                    tokens.text_dim,
+                );
+                y += 16.0;
+            }
         }
         "line" | "area" => {
             for (series_index, (name, values)) in series.iter().enumerate() {
+                let colour = palette[series_index % palette.len()];
                 let points: Vec<egui::Pos2> = values
                     .iter()
                     .enumerate()
                     .map(|(index, value)| {
                         let x = if values.len() <= 1 {
-                            rect.left()
+                            plot.left()
                         } else {
-                            rect.left() + rect.width() * index as f32 / (values.len() - 1) as f32
+                            plot.left() + plot.width() * index as f32 / (values.len() - 1) as f32
                         };
-                        let y = rect.bottom() - (value / max) as f32 * rect.height();
+                        let y = plot.bottom() - (value / max) as f32 * plot.height();
                         egui::pos2(x, y)
                     })
                     .collect();
-                painter.add(egui::Shape::line(
-                    points.clone(),
-                    egui::Stroke::new(2.0, palette[series_index % palette.len()]),
-                ));
-                if let Some((name, _)) = Some((name, &series_index)) {
-                    painter.text(
-                        rect.left_top() + egui::vec2(0.0, series_index as f32 * 14.0),
-                        egui::Align2::LEFT_TOP,
-                        name,
-                        egui::FontId::proportional(11.0),
-                        palette[series_index % palette.len()],
-                    );
+                if kind == "area" && points.len() > 1 {
+                    let mut shape = points.clone();
+                    shape.push(egui::pos2(plot.right(), plot.bottom()));
+                    shape.push(egui::pos2(plot.left(), plot.bottom()));
+                    painter.add(egui::Shape::convex_polygon(
+                        shape,
+                        colour.gamma_multiply(0.25),
+                        Stroke::NONE,
+                    ));
                 }
+                painter.add(egui::Shape::line(points.clone(), Stroke::new(2.0, colour)));
+                for point in &points {
+                    painter.circle_filled(*point, 2.5, colour);
+                }
+                // Legend entry.
+                let legend = egui::pos2(
+                    plot.left() + 8.0 + series_index as f32 * 110.0,
+                    plot.top() + 6.0,
+                );
+                painter.rect_filled(
+                    egui::Rect::from_min_size(legend, Vec2::new(9.0, 9.0)),
+                    CornerRadius::same(2),
+                    colour,
+                );
+                painter.text(
+                    legend + Vec2::new(15.0, 5.0),
+                    Align2::LEFT_CENTER,
+                    table::clip(name, 14),
+                    egui::FontId::proportional(11.0),
+                    tokens.text_dim,
+                );
             }
-            painter.line_segment(
-                [rect.left_bottom(), rect.right_bottom()],
-                egui::Stroke::new(1.0, tokens.stroke),
-            );
         }
         _ => {
-            let group_width = rect.width() / labels.len().max(1) as f32;
+            let group_width = plot.width() / labels.len().max(1) as f32;
             let bar_width = (group_width * 0.7 / series.len().max(1) as f32).max(3.0);
-            for (label_index, _label) in labels.iter().enumerate() {
+            for (label_index, _) in labels.iter().enumerate() {
                 for (series_index, (_, values)) in series.iter().enumerate() {
                     let value = values.get(label_index).cloned().unwrap_or(0.0);
-                    let height = (value / max) as f32 * rect.height();
-                    let x = rect.left()
+                    let height = (value / max) as f32 * plot.height();
+                    let x = plot.left()
                         + group_width * label_index as f32
                         + group_width * 0.15
                         + bar_width * series_index as f32;
                     let bar = egui::Rect::from_min_size(
-                        egui::pos2(x, rect.bottom() - height),
-                        egui::vec2(bar_width * 0.9, height),
+                        egui::pos2(x, plot.bottom() - height),
+                        Vec2::new(bar_width * 0.9, height.max(1.0)),
                     );
-                    painter.rect_filled(bar, 2.0, palette[series_index % palette.len()]);
+                    painter.rect_filled(
+                        bar,
+                        CornerRadius {
+                            nw: 2,
+                            ne: 2,
+                            sw: 0,
+                            se: 0,
+                        },
+                        palette[series_index % palette.len()],
+                    );
                 }
             }
-            painter.line_segment(
-                [rect.left_bottom(), rect.right_bottom()],
-                egui::Stroke::new(1.0, tokens.stroke),
-            );
             for (index, label) in labels.iter().enumerate() {
                 if labels.len() > 24 && index % 2 == 1 {
                     continue;
                 }
                 painter.text(
                     egui::pos2(
-                        rect.left() + group_width * (index as f32 + 0.5),
-                        rect.bottom() + 4.0,
+                        plot.left() + group_width * (index as f32 + 0.5),
+                        plot.bottom() + 6.0,
                     ),
-                    egui::Align2::CENTER_TOP,
-                    shorten(label, 14),
+                    Align2::CENTER_TOP,
+                    table::clip(label, 12),
                     egui::FontId::proportional(10.0),
                     tokens.text_dim,
                 );
             }
         }
     }
-    ui.label(
-        RichText::new(payload["summary"].as_str().unwrap_or(""))
-            .size(11.0)
-            .color(tokens.text_dim),
-    );
+
+    if kind != "pie" {
+        painter.line_segment(
+            [plot.left_bottom(), plot.right_bottom()],
+            Stroke::new(1.0, tokens.stroke_strong),
+        );
+    }
+    design::band(ui, tokens, |ui| {
+        ui.horizontal_centered(|ui| {
+            if let Some(summary) = payload["summary"].as_str() {
+                ui.label(RichText::new(summary).size(11.5).color(tokens.text_dim));
+            }
+            for (index, (name, _)) in series.iter().enumerate().take(6) {
+                design::dot(ui, tokens.chart[index % tokens.chart.len()]);
+                ui.label(RichText::new(name).size(11.0).color(tokens.text_faint));
+            }
+        });
+    });
+}
+
+fn format_axis(value: f64) -> String {
+    if value.abs() >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if value.abs() >= 1_000.0 {
+        format!("{:.1}k", value / 1_000.0)
+    } else if value.abs() >= 10.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 /// Server monitor: sessions, status, variables, dashboard.
@@ -577,80 +1055,96 @@ pub fn monitor(
         .unwrap_or_default();
     let kind = payload["kind"].as_str().unwrap_or("dashboard").to_string();
     let conn = session.tabs[tab_index].conn;
-    let mut requested: Option<(&str, &str)> = None;
-    ui.horizontal_wrapped(|ui| {
-        for (value, label) in [
-            ("dashboard", "Dashboard"),
-            ("processes", "Sessions"),
-            ("status", "Status"),
-            ("variables", "Variables"),
-        ] {
-            if ui.selectable_label(kind == value, label).clicked() {
-                requested = Some((value, label));
-            }
-        }
-        if let Some(conn_index) = conn {
-            ui.separator();
-            if ui.button("Refresh").clicked() {
-                state.request_monitor(session, conn_index, &kind);
-            }
+    let mut requested: Option<&'static str> = None;
+
+    let toolbar = design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
             ui.label(
-                RichText::new(
-                    session
+                RichText::new("Server monitor")
+                    .size(13.5)
+                    .color(tokens.text),
+            );
+            if let Some(index) = conn {
+                design::chip(
+                    ui,
+                    tokens,
+                    &session
                         .conns
-                        .get(conn_index)
+                        .get(index)
                         .map(|c| c.cfg.name.clone())
                         .unwrap_or_default(),
-                )
-                .size(11.0)
-                .color(tokens.text_dim),
-            );
-        }
+                    tokens.info,
+                );
+            }
+            if let Some(index) = design::segmented(
+                ui,
+                tokens,
+                &[
+                    ("Dashboard", kind == "dashboard"),
+                    ("Sessions", kind == "processes"),
+                    ("Status", kind == "status"),
+                    ("Variables", kind == "variables"),
+                ],
+            ) {
+                requested = Some(match index {
+                    1 => "processes",
+                    2 => "status",
+                    3 => "variables",
+                    _ => "dashboard",
+                });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
+                    if let Some(index) = conn {
+                        state.request_monitor(session, index, &kind);
+                    }
+                }
+            });
+        });
     });
-    if let (Some((value, _)), Some(conn_index)) = (requested, conn) {
-        state.request_monitor(session, conn_index, value);
+    ui.painter().hline(
+        toolbar.left()..=toolbar.right(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+    if let (Some(kind), Some(index)) = (requested, conn) {
+        state.request_monitor(session, index, kind);
     }
-    ui.separator();
 
     match kind.as_str() {
         "processes" => {
             let sessions = payload["sessions"].as_array().cloned().unwrap_or_default();
+            let column_specs = specs(
+                &["id", "user", "database", "state", "elapsed_ms", "query"],
+                &["text", "text", "text", "text", "int8", "text"],
+            );
+            let rows = rows_from(
+                &sessions,
+                &["id", "user", "database", "state", "elapsed_ms", "query"],
+            );
+            let height = (ui.available_height() - 40.0).max(160.0);
+            let event = list(
+                ui,
+                tokens,
+                List {
+                    columns: &column_specs,
+                    rows: &rows,
+                    height,
+                    id: egui::Id::new(("sessions", tab_index)),
+                    empty: "no sessions reported by this server",
+                },
+                state.table(tab_index),
+            );
             let mut kill: Option<String> = None;
-            egui::ScrollArea::vertical()
-                .id_salt(format!("monitor-processes-{tab_index}"))
-                .show(ui, |ui| {
-                    egui::Grid::new(format!("processes-{tab_index}"))
-                        .striped(true)
-                        .min_col_width(70.0)
-                        .show(ui, |ui| {
-                            for header in
-                                ["id", "user", "database", "state", "elapsed", "query", ""]
-                            {
-                                ui.label(RichText::new(header).strong().size(12.0));
-                            }
-                            ui.end_row();
-                            for session_row in &sessions {
-                                ui.label(session_row["id"].as_str().unwrap_or(""));
-                                ui.label(session_row["user"].as_str().unwrap_or(""));
-                                ui.label(session_row["database"].as_str().unwrap_or(""));
-                                ui.label(session_row["state"].as_str().unwrap_or(""));
-                                ui.label(
-                                    session_row["elapsed_ms"]
-                                        .as_i64()
-                                        .map(|ms| format!("{ms} ms"))
-                                        .unwrap_or_default(),
-                                );
-                                ui.label(shorten(session_row["query"].as_str().unwrap_or(""), 60));
-                                if ui.small_button("kill").clicked() {
-                                    kill = session_row["id"].as_str().map(str::to_string);
-                                }
-                                ui.end_row();
-                            }
-                        });
-                });
-            if let (Some(id), Some(conn_index)) = (kill, conn) {
+            if let table::TableEvent::Select(row, _) = event {
+                kill = sessions
+                    .get(row)
+                    .and_then(|s| s["id"].as_str().map(str::to_string));
+            }
+            if let (Some(id), Some(index)) = (kill, conn) {
                 let params = serde_json::json!({
-                    "conn": session.conns[conn_index].cfg.id,
+                    "conn": session.conns[index].cfg.id,
                     "id": id,
                     "confirm": true,
                 });
@@ -659,6 +1153,11 @@ pub fn monitor(
                     Err(e) => session.log(Level::Error, e.to_string()),
                 }
             }
+            ui.label(
+                RichText::new("click a session row to terminate that connection")
+                    .size(11.0)
+                    .color(tokens.text_faint),
+            );
         }
         "status" | "variables" => {
             let key = if kind == "status" {
@@ -667,95 +1166,150 @@ pub fn monitor(
                 "variables"
             };
             let items = payload[key].as_array().cloned().unwrap_or_default();
-            let mut filter = state.monitor_filter.clone();
-            ui.horizontal(|ui| {
-                ui.label("Filter:");
-                if ui
-                    .add(egui::TextEdit::singleline(&mut filter).desired_width(200.0))
-                    .changed()
-                {
-                    state.monitor_filter = filter.clone();
-                }
-            });
-            let needle = state.monitor_filter.to_ascii_lowercase();
-            egui::ScrollArea::vertical()
-                .id_salt(format!("monitor-list-{tab_index}"))
-                .show(ui, |ui| {
-                    egui::Grid::new(format!("monitor-grid-{tab_index}"))
-                        .striped(true)
-                        .min_col_width(160.0)
-                        .show(ui, |ui| {
-                            for item in items.iter().take(2000) {
-                                let name = item["name"].as_str().unwrap_or("");
-                                if !needle.is_empty()
-                                    && !name.to_ascii_lowercase().contains(&needle)
-                                {
-                                    continue;
-                                }
-                                ui.label(RichText::new(name).monospace());
-                                ui.label(shorten(item["value"].as_str().unwrap_or(""), 90));
-                                ui.end_row();
-                            }
-                        });
+            let needle = state.monitor_filter.trim().to_ascii_lowercase();
+            let filtered: Vec<serde_json::Value> = items
+                .iter()
+                .filter(|item| {
+                    needle.is_empty()
+                        || item["name"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_ascii_lowercase()
+                            .contains(&needle)
+                })
+                .cloned()
+                .collect();
+            let filter_band = design::band(ui, tokens, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(RichText::new("Filter").size(12.0).color(tokens.text_dim));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.monitor_filter)
+                            .desired_width(260.0)
+                            .hint_text("name contains…"),
+                    );
+                    design::chip(
+                        ui,
+                        tokens,
+                        &format!("{} of {} shown", filtered.len(), items.len()),
+                        tokens.text_faint,
+                    );
                 });
+            });
+            ui.painter().hline(
+                filter_band.left()..=filter_band.right(),
+                filter_band.bottom() - 0.5,
+                Stroke::new(1.0, tokens.stroke),
+            );
+            let column_specs = specs(&["name", "value", "unit"], &["text", "text", "text"]);
+            let rows = rows_from(&filtered, &["name", "value", "unit"]);
+            let height = (ui.available_height() - 40.0).max(160.0);
+            list(
+                ui,
+                tokens,
+                List {
+                    columns: &column_specs,
+                    rows: &rows,
+                    height,
+                    id: egui::Id::new(("monitor-list", tab_index)),
+                    empty: "this server reports nothing here",
+                },
+                state.table(tab_index),
+            );
         }
         _ => {
             let server = payload["server"].clone();
-            ui.horizontal_wrapped(|ui| {
-                if let Some(version) = server["version"].as_str() {
-                    ui.label(RichText::new(version).strong());
-                }
-                if let Some(size) = server["size"].as_str() {
-                    ui.label(RichText::new(format!("· {size}")).color(tokens.text_dim));
-                }
-                if let Some(uptime) = server["uptime_s"].as_i64() {
-                    ui.label(
-                        RichText::new(format!("· up {} h", uptime / 3600)).color(tokens.text_dim),
-                    );
-                }
-                ui.label(
-                    RichText::new(format!(
-                        "· {} tables",
-                        payload["table_count"].as_u64().unwrap_or(0)
-                    ))
-                    .color(tokens.text_dim),
-                );
-            });
             let tables = payload["tables"].as_array().cloned().unwrap_or_default();
+            let cards: Vec<(String, String, Color32)> = vec![
+                (
+                    "Engine".into(),
+                    server["version"].as_str().unwrap_or("—").to_string(),
+                    tokens.info,
+                ),
+                (
+                    "Data size".into(),
+                    server["size"].as_str().unwrap_or("—").to_string(),
+                    tokens.ok,
+                ),
+                (
+                    "Uptime".into(),
+                    server["uptime_s"]
+                        .as_i64()
+                        .map(|seconds| format!("{:.1} h", seconds as f64 / 3600.0))
+                        .unwrap_or_else(|| "—".into()),
+                    tokens.accent,
+                ),
+                (
+                    "Tables".into(),
+                    format!(
+                        "{} · {} connections",
+                        payload["table_count"].as_u64().unwrap_or(0),
+                        payload["connections"].as_u64().unwrap_or(0)
+                    ),
+                    tokens.warn,
+                ),
+            ];
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                for (label, value, colour) in cards {
+                    let frame = design::card_frame(tokens);
+                    frame.show(ui, |ui| {
+                        ui.set_min_width(170.0);
+                        ui.label(RichText::new(label).size(11.0).color(tokens.text_faint));
+                        ui.label(RichText::new(value).size(14.0).color(colour));
+                    });
+                }
+            });
+            ui.add_space(10.0);
+            design::section(
+                ui,
+                tokens,
+                "Largest tables",
+                Some("bar length is relative size"),
+            );
+            ui.add_space(4.0);
             let max = tables
                 .iter()
                 .filter_map(|t| t["size_bytes"].as_f64())
                 .fold(0.0f64, f64::max)
                 .max(1.0);
-            for table in tables.iter().take(40) {
-                let size = table["size_bytes"].as_f64().unwrap_or(0.0);
-                let fraction = (size / max) as f32;
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(table["table"].as_str().unwrap_or(""))
-                            .monospace()
-                            .size(12.0),
-                    );
-                    let width = (ui.available_width() - 160.0).max(60.0) * fraction;
-                    let (response, painter) = ui.allocate_painter(
-                        egui::Vec2::new(width.max(2.0), 12.0),
-                        egui::Sense::hover(),
-                    );
-                    painter.rect_filled(response.rect, 2.0, tokens.accent.gamma_multiply(0.8));
-                    ui.label(
-                        RichText::new(format!(
-                            "{} rows · {}",
-                            table["rows"]
-                                .as_i64()
-                                .map(|r| r.to_string())
-                                .unwrap_or_else(|| "?".into()),
-                            table["size"].as_str().unwrap_or("")
-                        ))
-                        .size(11.0)
-                        .color(tokens.text_dim),
-                    );
+            egui::ScrollArea::vertical()
+                .id_salt(format!("monitor-tables-{tab_index}"))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for item in tables.iter().take(40) {
+                        let size = item["size_bytes"].as_f64().unwrap_or(0.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(table::clip(
+                                    item["table"].as_str().unwrap_or(""),
+                                    32,
+                                ))
+                                .size(12.0)
+                                .monospace()
+                                .color(tokens.text),
+                            );
+                            design::meter(
+                                ui,
+                                tokens,
+                                (size / max) as f32,
+                                (ui.available_width() - 190.0).max(60.0),
+                                tokens.accent,
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} rows · {}",
+                                    item["rows"]
+                                        .as_i64()
+                                        .map(|r| r.to_string())
+                                        .unwrap_or_else(|| "?".into()),
+                                    item["size"].as_str().unwrap_or("")
+                                ))
+                                .size(11.0)
+                                .color(tokens.text_dim),
+                            );
+                        });
+                    }
                 });
-            }
         }
     }
 }
@@ -765,100 +1319,174 @@ pub fn jobs(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
     let mut run: Option<String> = None;
     let mut delete: Option<String> = None;
     let mut toggle: Option<(String, bool)> = None;
-    ui.horizontal(|ui| {
-        ui.heading(RichText::new("Scheduled jobs").size(15.0));
-        if ui.button("+ New job").clicked() {
-            state.open_command("job.create".into());
-        }
-        if ui.button("Run due now").clicked() {
-            match session.run("job.runDue", serde_json::json!({})) {
-                Ok(value) => session.log(
-                    Level::Info,
-                    format!("{} job(s) were due", value["due"].as_u64().unwrap_or(0)),
+    let mut open_new = false;
+    let mut run_due = false;
+
+    let toolbar = design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
+            ui.label(
+                RichText::new("Scheduled jobs")
+                    .size(13.5)
+                    .color(tokens.text),
+            );
+            design::chip(
+                ui,
+                tokens,
+                &format!("{} jobs", session.jobs.jobs.len()),
+                tokens.text_dim,
+            );
+            design::chip(
+                ui,
+                tokens,
+                &format!(
+                    "{} enabled",
+                    session.jobs.jobs.iter().filter(|j| j.enabled).count()
                 ),
-                Err(e) => session.log(Level::Error, e.to_string()),
-            }
-        }
-        ui.label(
-            RichText::new(format!(
-                "every 30 s · store: {}",
-                datacraft_engine::profiles::jobs_path().display()
-            ))
-            .size(11.0)
-            .color(tokens.text_dim),
-        );
-    });
-    ui.separator();
-    if session.jobs.jobs.is_empty() {
-        ui.label(
-            RichText::new(
-                "No jobs yet. A job is a command plus a schedule: nightly backup, hourly sync, a query that feeds a report.",
-            )
-            .color(tokens.text_dim),
-        );
-    } else {
-        egui::Grid::new("jobs-grid")
-            .striped(true)
-            .min_col_width(90.0)
-            .show(ui, |ui| {
-                for header in ["job", "kind", "schedule", "runs", "failures", "last", ""] {
-                    ui.label(RichText::new(header).strong().size(12.0));
+                tokens.ok,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::primary_button(ui, tokens, "+ New job", true).clicked() {
+                    open_new = true;
                 }
-                ui.end_row();
-                for job in &session.jobs.jobs {
-                    ui.label(RichText::new(job.name.clone()).strong());
-                    ui.label(job.kind.label());
-                    ui.label(job.schedule.describe());
-                    ui.label(job.runs.to_string());
-                    ui.label(
-                        RichText::new(job.failures.to_string()).color(if job.failures > 0 {
-                            tokens.error
-                        } else {
-                            tokens.text
-                        }),
-                    );
-                    ui.label(shorten(job.last_status.as_deref().unwrap_or("-"), 40));
-                    ui.horizontal(|ui| {
-                        if ui.small_button("run").clicked() {
-                            run = Some(job.id.clone());
-                        }
-                        let label = if job.enabled { "disable" } else { "enable" };
-                        if ui.small_button(label).clicked() {
-                            toggle = Some((job.id.clone(), !job.enabled));
-                        }
-                        if ui.small_button("delete").clicked() {
-                            delete = Some(job.id.clone());
-                        }
-                    });
-                    ui.end_row();
+                if design::ghost_button(ui, tokens, "Run due now", true)
+                    .on_hover_text("The app already does this every 30 seconds")
+                    .clicked()
+                {
+                    run_due = true;
                 }
+                design::chip(
+                    ui,
+                    tokens,
+                    &format!(
+                        "store {}",
+                        datacraft_engine::profiles::jobs_path()
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                    tokens.text_faint,
+                );
             });
+        });
+    });
+    ui.painter().hline(
+        toolbar.left()..=toolbar.right(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+    if open_new {
+        state.open_command("job.create".into());
+    }
+    if run_due {
+        match session.run("job.runDue", serde_json::json!({})) {
+            Ok(value) => session.log(
+                Level::Info,
+                format!("{} job(s) were due", value["due"].as_u64().unwrap_or(0)),
+            ),
+            Err(e) => session.log(Level::Error, e.to_string()),
+        }
     }
 
-    ui.add_space(10.0);
-    ui.label(RichText::new("Recent runs").strong());
     egui::ScrollArea::vertical()
-        .id_salt("job-log")
-        .max_height(200.0)
+        .id_salt("jobs")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
+            if session.jobs.jobs.is_empty() {
+                ui.add_space(20.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("No jobs yet")
+                            .size(13.0)
+                            .color(tokens.text_dim),
+                    );
+                    ui.label(
+                        RichText::new("A job is a command plus a schedule: nightly backup, hourly sync, a query that feeds a report.")
+                            .size(11.5)
+                            .color(tokens.text_faint),
+                    );
+                });
+            }
+            for job in &session.jobs.jobs {
+                let frame = design::card_frame(tokens);
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        design::dot(
+                            ui,
+                            if job.enabled { tokens.ok } else { tokens.text_faint },
+                        );
+                        ui.label(RichText::new(&job.name).size(13.0).color(tokens.text));
+                        design::chip(ui, tokens, job.kind.label(), tokens.info);
+                        design::chip(ui, tokens, &job.schedule.describe(), tokens.text_dim);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if design::ghost_button(ui, tokens, "Delete", true).clicked() {
+                                delete = Some(job.id.clone());
+                            }
+                            if design::ghost_button(
+                                ui,
+                                tokens,
+                                if job.enabled { "Disable" } else { "Enable" },
+                                true,
+                            )
+                            .clicked()
+                            {
+                                toggle = Some((job.id.clone(), !job.enabled));
+                            }
+                            if design::ghost_button(ui, tokens, "Run now", true).clicked() {
+                                run = Some(job.id.clone());
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        design::chip(
+                            ui,
+                            tokens,
+                            &format!("{} runs", job.runs),
+                            tokens.text_faint,
+                        );
+                        if job.failures > 0 {
+                            design::chip(
+                                ui,
+                                tokens,
+                                &format!("{} failures", job.failures),
+                                tokens.error,
+                            );
+                        }
+                        ui.label(
+                            RichText::new(table::clip(
+                                job.last_status.as_deref().unwrap_or("never ran"),
+                                90,
+                            ))
+                            .size(11.0)
+                            .monospace()
+                            .color(tokens.text_dim),
+                        );
+                    });
+                });
+                ui.add_space(6.0);
+            }
+
+            ui.add_space(8.0);
+            design::section(ui, tokens, "Recent runs", None);
+            ui.add_space(4.0);
             for entry in session.jobs.recent_log(None, 50) {
-                ui.label(
-                    RichText::new(format!(
-                        "{} · {} · {} ms · {}{}",
-                        entry.at,
-                        entry.job,
-                        entry.ms,
-                        if entry.ok { "" } else { "FAILED: " },
-                        shorten(&entry.message, 80)
-                    ))
-                    .size(11.0)
-                    .monospace()
-                    .color(if entry.ok {
-                        tokens.text_dim
-                    } else {
-                        tokens.error
-                    }),
-                );
+                ui.horizontal(|ui| {
+                    design::dot(ui, if entry.ok { tokens.ok } else { tokens.error });
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {} · {} ms",
+                            entry.at, entry.job, entry.ms
+                        ))
+                        .size(11.0)
+                        .monospace()
+                        .color(tokens.text_faint),
+                    );
+                    ui.label(
+                        RichText::new(table::clip(&entry.message, 80))
+                            .size(11.0)
+                            .color(if entry.ok { tokens.text_dim } else { tokens.error }),
+                    );
+                });
             }
         });
 
@@ -883,6 +1511,7 @@ pub fn jobs(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
 }
 
 /// Data transfer and synchronization wizard.
+#[allow(clippy::too_many_lines)]
 pub fn transfer(
     ui: &mut egui::Ui,
     session: &mut Session,
@@ -895,172 +1524,151 @@ pub fn transfer(
         .iter()
         .map(|c| (c.cfg.id.clone(), c.cfg.name.clone()))
         .collect();
-    let from = session.tabs[tab_index]
+    let mut from = session.tabs[tab_index]
         .payload
         .get("from")
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .or_else(|| conns.first().map(|(id, _)| id.clone()))
         .unwrap_or_default();
-    let to = session.tabs[tab_index]
+    let mut to = session.tabs[tab_index]
         .payload
         .get("to")
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .unwrap_or_default();
-    let mut from = from;
-    let mut to = to;
     let mut tables = session.tabs[tab_index]
         .payload
         .get("tables")
         .and_then(|v| v.as_str())
         .unwrap_or("*")
         .to_string();
-
-    ui.heading(RichText::new("Data transfer").size(15.0));
-    ui.label(
-        RichText::new("Copy tables between any two open connections, across engines.")
-            .color(tokens.text_dim),
-    );
-    ui.separator();
-    egui::Grid::new(format!("transfer-{tab_index}"))
-        .min_col_width(90.0)
-        .show(ui, |ui| {
-            ui.label("From");
-            egui::ComboBox::from_id_salt("transfer-from")
-                .selected_text(
-                    conns
-                        .iter()
-                        .find(|(id, _)| id == &from)
-                        .map(|(_, name)| name.clone())
-                        .unwrap_or_else(|| "pick a connection".into()),
-                )
-                .show_ui(ui, |ui| {
-                    for (id, name) in &conns {
-                        ui.selectable_value(&mut from, id.clone(), name);
-                    }
-                });
-            ui.end_row();
-            ui.label("To");
-            egui::ComboBox::from_id_salt("transfer-to")
-                .selected_text(
-                    conns
-                        .iter()
-                        .find(|(id, _)| id == &to)
-                        .map(|(_, name)| name.clone())
-                        .unwrap_or_else(|| "pick a connection".into()),
-                )
-                .show_ui(ui, |ui| {
-                    for (id, name) in &conns {
-                        ui.selectable_value(&mut to, id.clone(), name);
-                    }
-                });
-            ui.end_row();
-            ui.label("Tables");
-            ui.add(
-                egui::TextEdit::singleline(&mut tables)
-                    .desired_width(320.0)
-                    .hint_text("users, orders  ·  * for every table"),
-            );
-            ui.end_row();
-        });
-
-    let create = session.tabs[tab_index]
+    let mut create = session.tabs[tab_index]
         .payload
         .get("create_tables")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let truncate = session.tabs[tab_index]
+    let mut truncate = session.tabs[tab_index]
         .payload
         .get("truncate_target")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let mut create_mut = create;
-    let mut truncate_mut = truncate;
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut create_mut, "Create missing tables");
-        ui.checkbox(&mut truncate_mut, "Empty the target first");
+    let mut action: Option<&str> = None;
+
+    let toolbar = design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
+            ui.label(RichText::new("Data transfer").size(13.5).color(tokens.text));
+            ui.label(
+                RichText::new("copy tables between any two open connections, across engines")
+                    .size(11.5)
+                    .color(tokens.text_faint),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "Compare structures", true).clicked() {
+                    action = Some("diff.structure");
+                }
+                if design::ghost_button(ui, tokens, "Compare data", true).clicked() {
+                    action = Some("sync.data");
+                }
+            });
+        });
+    });
+    ui.painter().hline(
+        toolbar.left()..=toolbar.right(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+
+    ui.add_space(8.0);
+    ui.columns(2, |columns| {
+        for (side, index) in [("Source", 0), ("Target", 1)] {
+            design::card_frame(tokens).show(&mut columns[index], |ui| {
+                ui.set_min_width(240.0);
+                ui.label(RichText::new(side).size(11.5).color(tokens.text_faint));
+                let current = if index == 0 { from.clone() } else { to.clone() };
+                let pick = if index == 0 { &mut from } else { &mut to };
+                egui::ComboBox::from_id_salt(format!("transfer-{index}"))
+                    .selected_text(
+                        conns
+                            .iter()
+                            .find(|(id, _)| id == &current)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| "pick a connection".into()),
+                    )
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        for (id, name) in &conns {
+                            ui.selectable_value(pick, id.clone(), name);
+                        }
+                    });
+            });
+            columns[index].add_space(4.0);
+        }
     });
 
-    ui.horizontal(|ui| {
-        if ui.button("Preview").clicked() {
-            let params = serde_json::json!({
-                "from": from, "to": to,
-                "tables": tables.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>(),
-            });
-            match session.run("transfer.preview", params) {
-                Ok(value) => {
-                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
-                    session.tabs[tab_index]
-                        .payload
-                        .insert("output".into(), serde_json::json!(text));
+    ui.add_space(4.0);
+    design::card_frame(tokens).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Tables").size(12.0).color(tokens.text_dim));
+            ui.add(
+                egui::TextEdit::singleline(&mut tables)
+                    .desired_width(340.0)
+                    .hint_text("users, orders  ·  * for every table"),
+            );
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut create, "Create missing tables");
+            ui.checkbox(&mut truncate, "Empty the target first");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::primary_button(ui, tokens, "Transfer", true).clicked() {
+                    action = Some("transfer.data");
                 }
-                Err(e) => session.log(Level::Error, e.to_string()),
-            }
-        }
-        if ui.button(RichText::new("Transfer").strong()).clicked() {
-            let params = serde_json::json!({
-                "from": from, "to": to,
-                "tables": tables.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>(),
-                "create_tables": create_mut,
-                "truncate_target": truncate_mut,
+                if design::ghost_button(ui, tokens, "Preview", true).clicked() {
+                    action = Some("transfer.preview");
+                }
+                if design::ghost_button(ui, tokens, "Sync structures", true).clicked() {
+                    action = Some("sync.structure");
+                }
             });
-            match session.run("transfer.data", params) {
-                Ok(value) => {
-                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
-                    session.tabs[tab_index]
-                        .payload
-                        .insert("output".into(), serde_json::json!(text));
+        });
+    });
+
+    let list: Vec<String> = tables
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Some(id) = action {
+        let params = match id {
+            "transfer.data" => serde_json::json!({
+                "from": from, "to": to, "tables": list,
+                "create_tables": create, "truncate_target": truncate,
+            }),
+            "transfer.preview" => serde_json::json!({"from": from, "to": to, "tables": list}),
+            "sync.data" => {
+                serde_json::json!({"from": from, "to": to, "dry_run": true, "tables": list})
+            }
+            "sync.structure" => serde_json::json!({"from": from, "to": to, "apply": true}),
+            _ => serde_json::json!({"from": from, "to": to}),
+        };
+        match session.run(id, params) {
+            Ok(value) => {
+                let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+                session.tabs[tab_index]
+                    .payload
+                    .insert("output".into(), serde_json::json!(text));
+                if id == "transfer.data" {
                     session.log(
                         Level::Success,
                         format!("transfer: {}", value["summary"].as_str().unwrap_or("done")),
                     );
                 }
-                Err(e) => session.log(Level::Error, e.to_string()),
             }
+            Err(e) => session.log(Level::Error, e.to_string()),
         }
-        if ui.button("Compare data (dry run)").clicked() {
-            let params = serde_json::json!({
-                "from": from, "to": to, "dry_run": true,
-                "tables": tables.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>(),
-            });
-            match session.run("sync.data", params) {
-                Ok(value) => {
-                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
-                    session.tabs[tab_index]
-                        .payload
-                        .insert("output".into(), serde_json::json!(text));
-                }
-                Err(e) => session.log(Level::Error, e.to_string()),
-            }
-        }
-        if ui.button("Compare structures").clicked() {
-            match session.run(
-                "diff.structure",
-                serde_json::json!({"from": from, "to": to}),
-            ) {
-                Ok(value) => {
-                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
-                    session.tabs[tab_index]
-                        .payload
-                        .insert("output".into(), serde_json::json!(text));
-                }
-                Err(e) => session.log(Level::Error, e.to_string()),
-            }
-        }
-        if ui.button("Synchronize structures").clicked() {
-            let params = serde_json::json!({"from": from, "to": to, "apply": true});
-            match session.run("sync.structure", params) {
-                Ok(value) => {
-                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
-                    session.tabs[tab_index]
-                        .payload
-                        .insert("output".into(), serde_json::json!(text));
-                }
-                Err(e) => session.log(Level::Error, e.to_string()),
-            }
-        }
-    });
+    }
 
     session.tabs[tab_index]
         .payload
@@ -1073,22 +1681,35 @@ pub fn transfer(
         .insert("tables".into(), serde_json::json!(tables));
     session.tabs[tab_index]
         .payload
-        .insert("create_tables".into(), serde_json::json!(create_mut));
+        .insert("create_tables".into(), serde_json::json!(create));
     session.tabs[tab_index]
         .payload
-        .insert("truncate_target".into(), serde_json::json!(truncate_mut));
+        .insert("truncate_target".into(), serde_json::json!(truncate));
 
-    ui.separator();
+    ui.add_space(8.0);
     if let Some(output) = session.tabs[tab_index]
         .payload
         .get("output")
         .and_then(|v| v.as_str())
     {
-        egui::ScrollArea::vertical()
-            .id_salt(format!("transfer-output-{tab_index}"))
-            .show(ui, |ui| {
-                ui.label(RichText::new(output).monospace().size(11.0));
-            });
+        design::card_frame(tokens).show(ui, |ui| {
+            ui.label(
+                RichText::new("Last run")
+                    .size(11.5)
+                    .color(tokens.text_faint),
+            );
+            egui::ScrollArea::vertical()
+                .id_salt(format!("transfer-output-{tab_index}"))
+                .max_height(ui.available_height().max(120.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(output)
+                            .monospace()
+                            .size(11.5)
+                            .color(tokens.text_dim),
+                    );
+                });
+        });
     }
     let _ = state;
 }
@@ -1101,9 +1722,7 @@ pub fn users(
     state: &mut UiState,
     tokens: &Tokens,
 ) {
-    let conn = session.tabs[tab_index].conn;
-    let Some(conn_index) = conn else {
-        ui.label("this tab has no connection");
+    let Some(conn_index) = session.tabs[tab_index].conn else {
         return;
     };
     let payload = session.tabs[tab_index]
@@ -1111,175 +1730,297 @@ pub fn users(
         .get("users")
         .cloned()
         .unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.heading(RichText::new("Users and privileges").size(15.0));
-        if ui.button("Refresh").clicked() {
-            state.request_users(session, conn_index);
-        }
-        if ui.button("Create user").clicked() {
-            state.open_command("priv.createUser".into());
-        }
-    });
-    ui.separator();
-    let mut grants_for: Option<String> = None;
-    let users = payload["users"].as_array().cloned().unwrap_or_default();
-    if users.is_empty() {
-        ui.label(
-            RichText::new(
-                "No users listed. SQLite has no concept of users; Postgres and MySQL do.",
-            )
-            .color(tokens.text_dim),
-        );
-    }
-    egui::Grid::new(format!("users-{tab_index}"))
-        .striped(true)
-        .min_col_width(120.0)
-        .show(ui, |ui| {
-            for header in ["user", "superuser", "can log in", "expires", ""] {
-                ui.label(RichText::new(header).strong().size(12.0));
-            }
-            ui.end_row();
-            for user in &users {
-                ui.label(RichText::new(user["display"].as_str().unwrap_or("")).monospace());
-                ui.label(if user["superuser"].as_bool().unwrap_or(false) {
-                    "yes"
-                } else {
-                    ""
-                });
-                ui.label(if user["can_login"].as_bool().unwrap_or(false) {
-                    "yes"
-                } else {
-                    "no"
-                });
-                ui.label(user["expires"].as_str().unwrap_or(""));
-                if ui.small_button("grants").clicked() {
-                    grants_for = user["name"].as_str().map(str::to_string);
+    let users_list = payload["users"].as_array().cloned().unwrap_or_default();
+    let mut refresh = false;
+    let mut create = false;
+
+    let toolbar = design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
+            ui.label(
+                RichText::new("Users and privileges")
+                    .size(13.5)
+                    .color(tokens.text),
+            );
+            design::chip(
+                ui,
+                tokens,
+                &format!("{} users", users_list.len()),
+                tokens.text_dim,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::primary_button(ui, tokens, "Create user", true).clicked() {
+                    create = true;
                 }
-                ui.end_row();
-            }
+                if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
+                    refresh = true;
+                }
+            });
         });
-    if let Some(name) = grants_for {
-        match session.run(
-            "priv.grants",
-            serde_json::json!({"conn": session.conns[conn_index].cfg.id, "user": name}),
-        ) {
-            Ok(value) => {
-                let text = value["grants"]
-                    .as_array()
-                    .map(|g| {
-                        g.iter()
-                            .map(|v| v.as_str().unwrap_or("").to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .unwrap_or_default();
-                session.tabs[tab_index]
-                    .payload
-                    .insert("grants".into(), serde_json::json!(text));
+    });
+    ui.painter().hline(
+        toolbar.left()..=toolbar.right(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+    if create {
+        state.open_command("priv.createUser".into());
+    }
+    if refresh {
+        state.request_users(session, conn_index);
+    }
+
+    let column_specs = specs(
+        &["user", "superuser", "can_log_in", "expires", "attributes"],
+        &["text", "bool", "bool", "text", "text"],
+    );
+    let rows = rows_from(
+        &users_list,
+        &["display", "superuser", "can_login", "expires", "attributes"],
+    );
+    let height = (ui.available_height() - 130.0).max(140.0);
+    let event = list(
+        ui,
+        tokens,
+        List {
+            columns: &column_specs,
+            rows: &rows,
+            height,
+            id: egui::Id::new(("users", tab_index)),
+            empty: "SQLite has no users; Postgres and MySQL do",
+        },
+        state.table(tab_index),
+    );
+    if let table::TableEvent::Select(row, _) = event {
+        if let Some(name) = users_list.get(row).and_then(|u| u["name"].as_str()) {
+            match session.run(
+                "priv.grants",
+                serde_json::json!({"conn": session.conns[conn_index].cfg.id, "user": name}),
+            ) {
+                Ok(value) => {
+                    let text = value["grants"]
+                        .as_array()
+                        .map(|g| {
+                            g.iter()
+                                .map(|v| v.as_str().unwrap_or("").to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default();
+                    session.tabs[tab_index]
+                        .payload
+                        .insert("grants".into(), serde_json::json!(text));
+                }
+                Err(e) => session.log(Level::Error, e.to_string()),
             }
-            Err(e) => session.log(Level::Error, e.to_string()),
         }
     }
+
+    ui.add_space(6.0);
     if let Some(grants) = session.tabs[tab_index]
         .payload
         .get("grants")
         .and_then(|v| v.as_str())
     {
-        ui.separator();
-        ui.label(RichText::new("Grants").strong());
-        ui.label(RichText::new(grants).monospace().size(11.0));
+        design::card_frame(tokens).show(ui, |ui| {
+            ui.label(RichText::new("Grants").size(11.5).color(tokens.text_faint));
+            egui::ScrollArea::vertical()
+                .id_salt(format!("grants-{tab_index}"))
+                .max_height(150.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(grants)
+                            .monospace()
+                            .size(11.5)
+                            .color(tokens.text_dim),
+                    );
+                });
+        });
+    } else {
+        ui.label(
+            RichText::new("click a user to read its grants")
+                .size(11.0)
+                .color(tokens.text_faint),
+        );
     }
 }
 
 /// The start page: what this is, what to do first, and the measured feature coverage.
 pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
-    ui.heading(RichText::new("DataCraft").size(22.0));
-    ui.label(
-        RichText::new(
-            "Fast, open database administration for SQLite, PostgreSQL and MySQL — native, with one command registry behind the UI, the CLI and MCP.",
-        )
-        .color(tokens.text_dim),
-    );
-    ui.add_space(8.0);
     let report = datacraft_engine::parity::measure();
-    ui.label(RichText::new(report.summary()).strong());
-    ui.label(
-        RichText::new(
-            "Coverage is measured, not claimed: `datacraft-cli parity` regenerates the checklist.",
-        )
-        .size(11.0)
-        .color(tokens.text_dim),
-    );
-    ui.add_space(12.0);
-    ui.columns(2, |columns| {
-        columns[0].label(RichText::new("Start here").strong());
-        let mut open_conn = false;
-        if columns[0].button("Add a connection").clicked() {
-            open_conn = true;
-        }
-        if columns[0].button("Load the sample database").clicked() {
-            open_conn = false;
-            state.want_demo = true;
-        }
-        if columns[0].button("Query tab").clicked() {
-            let index = session.add_tab(TabKind::Query, "Query", session.active_conn);
-            state.active_tab_override = Some(index);
-        }
-        if columns[0].button("Jobs and automation").clicked() {
-            let index = session.add_tab(TabKind::Jobs, "Jobs", None);
-            state.active_tab_override = Some(index);
-        }
-        if columns[0].button("Command palette").clicked() {
-            state.palette_open = true;
-        }
-        if open_conn {
-            state.open_connection_dialog(None);
-        }
-        columns[0].add_space(8.0);
-        columns[0].label(
-            RichText::new(
-                "Cmd+K  command palette\nCmd+Enter  run the query\nCmd+S  apply grid edits\nCmd+W  close the tab\nCmd+O  open the selected connection",
-            )
-            .monospace()
-            .size(11.0)
-            .color(tokens.text_dim),
-        );
+    egui::ScrollArea::vertical()
+        .id_salt("welcome")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add_space(18.0);
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                let (mark, _) = ui.allocate_exact_size(Vec2::new(52.0, 52.0), Sense::hover());
+                ui.painter().rect_filled(mark, CornerRadius::same(14), tokens.accent);
+                ui.painter().text(
+                    mark.center(),
+                    Align2::CENTER_CENTER,
+                    "DC",
+                    tokens.font(20.0),
+                    tokens.accent_text,
+                );
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("DataCraft").size(26.0).color(tokens.text));
+                    ui.label(
+                        RichText::new("Database administration for SQLite, PostgreSQL and MySQL — native, one command registry behind the UI, the CLI, the control channel and MCP.")
+                            .size(12.5)
+                            .color(tokens.text_dim),
+                    );
+                });
+            });
 
-        columns[1].label(RichText::new("Not there yet").strong());
-        for (area, ids) in report.missing_by_area().into_iter().take(6) {
-            columns[1].label(
-                RichText::new(format!("{area}: {} gaps", ids.len()))
-                    .size(11.0)
-                    .color(tokens.text_dim),
-            );
-        }
-        columns[1].add_space(6.0);
-        columns[1].label(
-            RichText::new(format!(
-                "{} profiles · {} jobs · {} messages",
-                session.profiles.list().len(),
-                session.jobs.jobs.len(),
-                session.messages.len()
-            ))
-            .size(11.0)
-            .color(tokens.text_dim),
-        );
-    });
-}
+            ui.add_space(20.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(24.0);
+                design::card_frame(tokens).show(ui, |ui| {
+                    ui.set_min_width(430.0);
+                    ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new("Navicat feature coverage")
+                            .size(12.0)
+                            .color(tokens.text_faint),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{}/{}",
+                                report.covered.len(),
+                                report.total()
+                            ))
+                            .size(24.0)
+                            .color(tokens.accent),
+                        );
+                        ui.vertical(|ui| {
+                            ui.add_space(4.0);
+                            design::meter(
+                                ui,
+                                tokens,
+                                (report.percent() / 100.0) as f32,
+                                240.0,
+                                tokens.accent,
+                            );
+                            ui.label(
+                                RichText::new(format!("{:.1}% measured", report.percent()))
+                                    .size(11.0)
+                                    .color(tokens.text_dim),
+                            );
+                        });
+                    });
+                    ui.add_space(6.0);
+                    for area in report.by_area.iter().take(5) {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{:<14}", table::clip(&area.area, 14)))
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(tokens.text_dim),
+                            );
+                            design::meter(
+                                ui,
+                                tokens,
+                                (area.percent() / 100.0) as f32,
+                                130.0,
+                                tokens.info,
+                            );
+                            ui.label(
+                                RichText::new(format!("{}/{}", area.covered, area.total))
+                                    .size(10.5)
+                                    .color(tokens.text_faint),
+                            );
+                        });
+                    }
+                    });
+                });
 
-fn scalar(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "NULL".into(),
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
+                design::card_frame(tokens).show(ui, |ui| {
+                    ui.set_min_width(320.0);
+                    ui.vertical(|ui| {
+                    ui.label(RichText::new("Start here").size(12.5).color(tokens.text));
+                    ui.add_space(4.0);
+                    if design::primary_button(ui, tokens, "Add a connection", true).clicked() {
+                        state.open_connection_dialog(None);
+                    }
+                    if design::ghost_button(ui, tokens, "Load the sample database", true).clicked() {
+                        state.want_demo = true;
+                    }
+                    if design::ghost_button(ui, tokens, "New query tab", true).clicked() {
+                        let index =
+                            session.add_tab(TabKind::Query, "Query", session.active_conn);
+                        state.active_tab_override = Some(index);
+                    }
+                    if design::ghost_button(ui, tokens, "Jobs and automation", true).clicked() {
+                        let index = session.add_tab(TabKind::Jobs, "Jobs", None);
+                        state.active_tab_override = Some(index);
+                    }
+                    if design::ghost_button(ui, tokens, "Command palette", true).clicked() {
+                        state.palette_open = true;
+                    }
+                    ui.add_space(8.0);
+                    for (keys, what) in [
+                        ("Cmd K", "command palette"),
+                        ("Cmd Enter", "run the query"),
+                        ("Cmd S", "apply grid edits"),
+                        ("Cmd W", "close the tab"),
+                        ("Cmd L", "show the log"),
+                    ] {
+                        ui.horizontal(|ui| {
+                            design::keycap(ui, tokens, keys);
+                            ui.label(RichText::new(what).size(11.5).color(tokens.text_dim));
+                        });
+                    }
+                    });
+                });
+            });
 
-fn shorten(text: &str, limit: usize) -> String {
-    let flat = text.replace('\n', " ");
-    if flat.chars().count() > limit {
-        format!("{}…", flat.chars().take(limit - 1).collect::<String>())
-    } else {
-        flat
-    }
+            ui.add_space(16.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(24.0);
+                design::card_frame(tokens).show(ui, |ui| {
+                    ui.set_min_width(470.0);
+                    ui.vertical(|ui| {
+                    ui.label(RichText::new("Still missing").size(12.5).color(tokens.text));
+                    ui.add_space(2.0);
+                    for (area, ids) in report.missing_by_area().into_iter().take(6) {
+                        ui.label(
+                            RichText::new(format!("{area}: {} gaps — {}", ids.len(), table::clip(&ids.join(", "), 44)))
+                                .size(11.0)
+                                .color(tokens.text_dim),
+                        );
+                    }
+                    });
+                });
+                design::card_frame(tokens).show(ui, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.vertical(|ui| {
+                    ui.label(RichText::new("This session").size(12.5).color(tokens.text));
+                    for (label, value) in [
+                        ("connections", session.conns.len().to_string()),
+                        ("saved profiles", session.profiles.list().len().to_string()),
+                        ("jobs", session.jobs.jobs.len().to_string()),
+                        ("snippets", session.snippets.len().to_string()),
+                        ("commands run", session.history.len().to_string()),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(label).size(11.5).color(tokens.text_dim));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(value).size(11.5).color(tokens.text),
+                                    );
+                                },
+                            );
+                        });
+                    }
+                    });
+                });
+            });
+            ui.add_space(20.0);
+        });
 }

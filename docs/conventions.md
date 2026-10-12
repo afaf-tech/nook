@@ -47,6 +47,21 @@ what is not measured".
   `datacraft_model::ddl`, `plan_edits`, `diff`, `layout`, `dump_script`, `datagen`. Do not write a
   second version inside a command.
 
+## Interface
+
+- **Colour, spacing, radius and type come from `crates/ui/src/theme.rs`.** A screen that invents a
+  colour or a pixel of padding is a bug; add a token instead.
+- **Every text token clears 4.5:1** against every surface it can land on, in both themes. Check the
+  arithmetic (relative luminance), not the look — a screenshot is a guess, the ratio is a fact.
+  Disabled controls use `text_dim`, so "disabled" never means "invisible".
+- **Rows are drawn by `table.rs`**, never by a fresh `egui::Grid`: sticky header, gutter, striping,
+  dirty markers and the inline editor come from there, and every list in the app stays consistent.
+- **A bar inside a panel allocates its rect first** (`theme::band_h`) and gives its contents a
+  bounded child Ui. `ui.horizontal_centered` in an unbounded panel eats the panel's height.
+- **The UI is verified by rendering it:** drive the running app over the control channel, capture a
+  PNG per view, look at the picture, fix, re-shoot. Typing code that "should look fine" is not a
+  check.
+
 ## Gates
 
 Before every commit: `cargo xtask ci` — fmt, clippy with warnings denied, the workspace tests, the
