@@ -672,6 +672,9 @@ impl DatacraftApp {
             .active_tab
             .and_then(|index| self.session.tabs.get(index))
             .map(|tab| tab.kind);
+        // The welcome view is what both "no tab" and a Welcome tab put on screen, so the rail has to
+        // call both of them the Connections workspace or the lit button disagrees with the view.
+        let on_welcome = active.is_none() || active == Some(TabKind::Welcome);
         let report_tab = self
             .session
             .tabs
@@ -679,7 +682,7 @@ impl DatacraftApp {
             .position(|tab| tab.kind == TabKind::Report);
 
         let entries = [
-            (Glyph::Connections, "Connections", true, active.is_none(), 0),
+            (Glyph::Connections, "Connections", true, on_welcome, 0),
             (
                 Glyph::Queries,
                 "New query",
@@ -771,7 +774,13 @@ impl DatacraftApp {
     /// What each rail button does, kept apart so the rail's painting stays a function of state.
     fn rail_action(&mut self, index: usize, open_conn: Option<usize>, report_tab: Option<usize>) {
         match index {
-            0 => self.session.active_tab = None,
+            0 => {
+                self.session.active_tab = self
+                    .session
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.kind == TabKind::Welcome);
+            }
             1 => {
                 if let Some(conn) = open_conn {
                     let tab = self.session.add_tab(TabKind::Query, "Query", Some(conn));
@@ -808,164 +817,189 @@ impl DatacraftApp {
 
         // The design's tab bar is one pixel taller than its tabs, so the active tab's bottom edge
         // covers the bar's border: that row is painted first and the tabs paint over it.
-        t::band_fill(
-            ui,
-            TAB_BAR_H,
-            tokens.panel_alt,
-            t::S4,
-            egui::Align::Min,
-            |ui| {
-                t::band_hairline(ui, tokens, ui.max_rect());
-                egui::ScrollArea::horizontal()
-                    .max_width(ui.available_width() - 41.0)
-                    .id_salt("tab-strip")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            for (index, tab) in self.session.tabs.iter().enumerate() {
-                                let active = self.session.active_tab == Some(index);
-                                let dirty = tab.grid.dirty();
-                                let pending = tab.grid.pending.len();
-                                let text_width = ui
-                                    .painter()
-                                    .layout_no_wrap(
-                                        tab.title.clone(),
-                                        tokens.font(t::T_SM),
-                                        Color32::PLACEHOLDER,
-                                    )
-                                    .size()
-                                    .x;
-                                let width = (text_width
-                                    + if dirty || pending > 0 { 74.0 } else { 52.0 })
-                                .clamp(t::TAB_MIN_W, t::TAB_MAX_W);
-                                let (rect, response) =
-                                    ui.allocate_exact_size(Vec2::new(width, TAB_H), Sense::click());
-                                let hovered = response.hovered();
+        t::band_fill(ui, TAB_BAR_H, tokens.panel_alt, 0, egui::Align::Min, |ui| {
+            // No inset: the design's border spans the bar and only the tabs are indented, so the
+            // hairline reaches both window edges like the bars above and below it.
+            let band = ui.max_rect();
+            t::band_hairline(ui, tokens, band);
+            let strip = egui::Rect::from_min_max(
+                egui::pos2(band.left() + f32::from(t::S4), band.top()),
+                egui::pos2(band.right() - t::TAB_CTL_W, band.bottom()),
+            );
+            let mut strip_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(strip)
+                    .layout(egui::Layout::left_to_right(egui::Align::Min)),
+            );
+            egui::ScrollArea::horizontal()
+                .id_salt("tab-strip")
+                .show(&mut strip_ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (index, tab) in self.session.tabs.iter().enumerate() {
+                            let active = self.session.active_tab == Some(index);
+                            let dirty = tab.grid.dirty();
+                            let pending = tab.grid.pending.len();
+                            let text_width = ui
+                                .painter()
+                                .layout_no_wrap(
+                                    tab.title.clone(),
+                                    tokens.font(t::T_SM),
+                                    Color32::PLACEHOLDER,
+                                )
+                                .size()
+                                .x;
+                            let width = (text_width
+                                + if dirty || pending > 0 { 74.0 } else { 52.0 })
+                            .clamp(t::TAB_MIN_W, t::TAB_MAX_W);
+                            let (rect, response) =
+                                ui.allocate_exact_size(Vec2::new(width, TAB_H), Sense::click());
+                            let hovered = response.hovered();
 
-                                if active {
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_max(
-                                            rect.min,
-                                            egui::pos2(rect.right(), rect.bottom() + 1.0),
-                                        ),
-                                        CornerRadius {
-                                            nw: tokens.radius,
-                                            ne: tokens.radius,
-                                            sw: 0,
-                                            se: 0,
-                                        },
-                                        tokens.panel,
-                                    );
-                                } else if hovered {
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        CornerRadius::ZERO,
-                                        tokens.hover,
-                                    );
-                                }
-                                if active {
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_size(
-                                            egui::pos2(rect.left() + 8.0, rect.bottom() - 2.0),
-                                            Vec2::new((rect.width() - 16.0).max(8.0), 2.0),
-                                        ),
-                                        CornerRadius::same(1),
-                                        tokens.accent,
-                                    );
-                                }
+                            if active {
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_max(
+                                        rect.min,
+                                        egui::pos2(rect.right(), rect.bottom() + 1.0),
+                                    ),
+                                    CornerRadius {
+                                        nw: tokens.radius,
+                                        ne: tokens.radius,
+                                        sw: 0,
+                                        se: 0,
+                                    },
+                                    tokens.panel,
+                                );
+                            } else if hovered {
+                                ui.painter()
+                                    .rect_filled(rect, CornerRadius::ZERO, tokens.hover);
+                            }
+                            if active {
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        egui::pos2(rect.left() + 8.0, rect.bottom() - 2.0),
+                                        Vec2::new((rect.width() - 16.0).max(8.0), 2.0),
+                                    ),
+                                    CornerRadius::same(1),
+                                    tokens.accent,
+                                );
+                            }
 
-                                let mut x = rect.left() + f32::from(t::S4);
-                                if dirty || pending > 0 {
-                                    ui.painter().circle_filled(
-                                        egui::pos2(x + 3.0, rect.center().y),
-                                        3.0,
-                                        tokens.warn,
+                            let mut x = rect.left() + f32::from(t::S4);
+                            if dirty || pending > 0 {
+                                ui.painter().circle_filled(
+                                    egui::pos2(x + 3.0, rect.center().y),
+                                    3.0,
+                                    tokens.warn,
+                                );
+                                x += 12.0;
+                            }
+                            ui.painter().text(
+                                egui::pos2(x, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                &tab.title,
+                                tokens.font(t::T_SM),
+                                if active { tokens.text } else { tokens.text_dim },
+                            );
+
+                            // Close cross: always on the active tab, on hover for the rest.
+                            if active || hovered {
+                                // `.tclose` is 24px with `margin-right:-4`, so its right edge sits 4px
+                                // inside the tab's 8px padding.
+                                let close_rect = egui::Rect::from_center_size(
+                                    egui::pos2(
+                                        rect.right() - 4.0 - t::TAB_CLOSE / 2.0,
+                                        rect.center().y,
+                                    ),
+                                    Vec2::splat(t::TAB_CLOSE),
+                                );
+                                let close_response = ui.interact(
+                                    close_rect,
+                                    ui.id().with(("close", index)),
+                                    Sense::click(),
+                                );
+                                if close_response.hovered() {
+                                    ui.painter().rect_filled(
+                                        close_rect,
+                                        CornerRadius::same(4),
+                                        tokens.panel_high,
                                     );
-                                    x += 12.0;
                                 }
                                 ui.painter().text(
-                                    egui::pos2(x, rect.center().y),
-                                    Align2::LEFT_CENTER,
-                                    &tab.title,
-                                    tokens.font(t::T_SM),
-                                    if active { tokens.text } else { tokens.text_dim },
-                                );
-
-                                // Close cross: always on the active tab, on hover for the rest.
-                                if active || hovered {
-                                    // `.tclose` is 24px with `margin-right:-4`, so its right edge sits 4px
-                                    // inside the tab's 8px padding.
-                                    let close_rect = egui::Rect::from_center_size(
-                                        egui::pos2(
-                                            rect.right() - 4.0 - t::TAB_CLOSE / 2.0,
-                                            rect.center().y,
-                                        ),
-                                        Vec2::splat(t::TAB_CLOSE),
-                                    );
-                                    let close_response = ui.interact(
-                                        close_rect,
-                                        ui.id().with(("close", index)),
-                                        Sense::click(),
-                                    );
+                                    close_rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    "×",
+                                    tokens.font(t::T_LG),
                                     if close_response.hovered() {
-                                        ui.painter().rect_filled(
-                                            close_rect,
-                                            CornerRadius::same(4),
-                                            tokens.panel_high,
-                                        );
-                                    }
-                                    ui.painter().text(
-                                        close_rect.center(),
-                                        Align2::CENTER_CENTER,
-                                        "×",
-                                        tokens.font(t::T_LG),
-                                        if close_response.hovered() {
-                                            tokens.error
-                                        } else {
-                                            tokens.text_dim
-                                        },
-                                    );
-                                    if close_response.clicked() {
-                                        close = Some(index);
-                                    }
-                                }
-
-                                // `.tab` carries a full-height border-right, not an inset divider.
-                                ui.painter().vline(
-                                    rect.right(),
-                                    rect.top()..=rect.bottom(),
-                                    Stroke::new(1.0, tokens.stroke),
+                                        tokens.error
+                                    } else {
+                                        tokens.text_dim
+                                    },
                                 );
-                                if response.clicked() {
-                                    select = Some(index);
-                                }
-                                if response.middle_clicked() {
+                                if close_response.clicked() {
                                     close = Some(index);
                                 }
                             }
 
-                            // `.tabctl`: right-aligned behind its own border.
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if t::ghost_button(ui, tokens, "+", true)
-                                        .on_hover_text("New query tab")
-                                        .clicked()
-                                    {
-                                        let index = self.session.add_tab(
-                                            TabKind::Query,
-                                            "Query",
-                                            self.session.active_conn,
-                                        );
-                                        select = Some(index);
-                                    }
-                                    t::divider(ui, tokens);
-                                },
+                            // `.tab` carries a full-height border-right, not an inset divider.
+                            ui.painter().vline(
+                                rect.right(),
+                                rect.top()..=rect.bottom(),
+                                Stroke::new(1.0, tokens.stroke),
                             );
-                        });
+                            if response.clicked() {
+                                select = Some(index);
+                            }
+                            if response.middle_clicked() {
+                                close = Some(index);
+                            }
+                        }
                     });
-            },
-        );
+                });
+
+            // `.tabctl`: pinned to the bar's right edge rather than trailing the tabs, so it
+            // stays put when the strip scrolls and when a tab is added.
+            let ctl = egui::Rect::from_min_max(
+                egui::pos2(band.right() - t::TAB_CTL_W, band.top()),
+                band.max,
+            );
+            ui.painter().vline(
+                ctl.left() + 0.5,
+                ctl.top()..=ctl.bottom(),
+                Stroke::new(1.0, tokens.stroke),
+            );
+            let button = egui::Rect::from_center_size(
+                egui::pos2(
+                    ctl.left() + 1.0 + f32::from(t::S4) + t::TAB_CLOSE / 2.0,
+                    ctl.center().y,
+                ),
+                Vec2::splat(t::TAB_CLOSE),
+            );
+            let response = ui
+                .interact(button, ui.id().with("tab-ctl-new"), Sense::click())
+                .on_hover_text("New query tab");
+            if response.hovered() {
+                ui.painter()
+                    .rect_filled(button, CornerRadius::same(t::R_CTL), tokens.hover);
+            }
+            ui.painter().text(
+                button.center(),
+                Align2::CENTER_CENTER,
+                "+",
+                tokens.font(t::T_LG),
+                if response.hovered() {
+                    tokens.text
+                } else {
+                    tokens.text_dim
+                },
+            );
+            if response.clicked() {
+                let index = self
+                    .session
+                    .add_tab(TabKind::Query, "Query", self.session.active_conn);
+                select = Some(index);
+            }
+        });
         if let Some(index) = select {
             self.session.active_tab = Some(index);
         }

@@ -49,6 +49,10 @@ pub const RAIL_BUTTON: f32 = 32.0;
 pub const TAB_MIN_W: f32 = 96.0;
 pub const TAB_MAX_W: f32 = 260.0;
 pub const TAB_CLOSE: f32 = 24.0;
+/// The tab bar's control cluster: `.tabctl` is a full-height left border, 8px of padding, its 24px
+/// button and 8px more, and the design leaves the bar no right padding, so the cluster's right edge
+/// is the bar's right edge.
+pub const TAB_CTL_W: f32 = 1.0 + S4 as f32 + TAB_CLOSE + S4 as f32;
 
 /// Corner radii: 4 for controls, 6 for containers, a pill for chips.
 pub const R_CTL: u8 = 4;

@@ -246,17 +246,32 @@ mod tests {
         }
     }
 
-    /// Every glyph draws something: a missing arm would paint an empty rail button.
+    /// Every glyph draws exactly the elements the design's path data has, and every path keeps at
+    /// least its two endpoints — otherwise a dropped arm would paint a half-empty rail button and
+    /// this test would not notice.
     #[test]
     fn every_glyph_has_geometry() {
-        for glyph in ALL {
+        for (glyph, arms, rings, boxes) in [
+            (Glyph::Connections, 2, 1, 0),
+            (Glyph::Queries, 2, 0, 1),
+            (Glyph::Jobs, 1, 1, 0),
+            (Glyph::Reports, 3, 0, 1),
+            (Glyph::Monitor, 1, 0, 0),
+        ] {
             let rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(32.0));
-            let (paths, rings, boxes) = geometry(glyph, &mapper(rect), scale_of(rect));
-            let points: usize = paths.iter().map(Vec::len).sum();
-            assert!(
-                points > 0 || !rings.is_empty() || !boxes.is_empty(),
-                "{glyph:?} has no geometry"
+            let (paths, ring_list, box_list) = geometry(glyph, &mapper(rect), scale_of(rect));
+            assert_eq!(
+                (paths.len(), ring_list.len(), box_list.len()),
+                (arms, rings, boxes),
+                "{glyph:?} changed shape"
             );
+            for path in &paths {
+                assert!(
+                    path.len() >= 2,
+                    "{glyph:?} has a path with {} point(s): it would paint nothing",
+                    path.len()
+                );
+            }
         }
     }
 
