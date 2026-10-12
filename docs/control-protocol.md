@@ -29,6 +29,7 @@ A bad key is refused with `{"id":…,"error":"bad key; read …"}`.
 | `ui.state` | `{}` | active tab and connection, the connection list with open state and table counts, the tab list with row and pending counts, the control key path |
 | `ui.selectTab` | `{"index":0}` | `{"ok":true,"active_tab":0}` |
 | `ui.setEditorText` | `{"sql":"select 1"}` | replaces the active tab's editor text |
+| `ui.setTheme` | `{"theme":"light"}` | switches between `dark` and `light`; anything else is refused |
 | `ui.messages` | `{}` | the last 50 messages, newest first, with their level |
 | `ui.commands` | `{}` | the number of registered commands and every id |
 | `ui.shot` | `{"path":"/tmp/shot.png"}` | queues a screenshot of the window; the file appears a frame later |

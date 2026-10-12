@@ -8,9 +8,8 @@
 use datacraft_core::Value;
 use egui::{Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
-use crate::theme::{Tokens, ROW_H};
+use crate::theme::{Tokens, HEAD_H, ROW_H};
 
-const HEADER_H: f32 = 30.0;
 const GUTTER_W: f32 = 54.0;
 const CELL_PAD: f32 = 9.0;
 const MIN_COL_W: f32 = 76.0;
@@ -222,7 +221,7 @@ pub fn show(
 
             // Header: names, sort caret, primary-key tag.
             let (header_rect, _) =
-                ui.allocate_exact_size(Vec2::new(total_w, HEADER_H), Sense::hover());
+                ui.allocate_exact_size(Vec2::new(total_w, HEAD_H), Sense::hover());
             let header_fill = egui::Rect::from_min_max(
                 header_rect.min,
                 egui::pos2(header_rect.left() + viewport_w, header_rect.bottom()),
@@ -239,7 +238,7 @@ pub fn show(
             );
             if view.gutter {
                 let gutter_head =
-                    egui::Rect::from_min_size(header_rect.min, Vec2::new(gutter_w, HEADER_H));
+                    egui::Rect::from_min_size(header_rect.min, Vec2::new(gutter_w, HEAD_H));
                 ui.painter()
                     .rect_filled(gutter_head, CornerRadius::ZERO, tokens.panel_alt);
                 ui.painter().text(
@@ -259,7 +258,7 @@ pub fn show(
             for (index, column) in view.columns.iter().enumerate() {
                 let cell = Rect::from_min_size(
                     egui::pos2(x, header_rect.top()),
-                    Vec2::new(widths[index], HEADER_H),
+                    Vec2::new(widths[index], HEAD_H),
                 );
                 let response = ui
                     .interact(cell, id.with(("head", index)), Sense::click())

@@ -23,9 +23,6 @@ pub enum TreeAction {
     Users(usize),
 }
 
-const ROW_H: f32 = 22.0;
-const INDENT: f32 = 14.0;
-
 pub fn show(
     ui: &mut egui::Ui,
     session: &Session,
@@ -230,7 +227,7 @@ pub fn show(
                 match (&conn.server, &conn.catalog) {
                     (Some(server), Some(catalog)) => {
                         ui.horizontal(|ui| {
-                            ui.add_space(INDENT);
+                            ui.add_space(design::INDENT_STEP);
                             ui.label(
                                 RichText::new(format!(
                                     "{} · {} ms",
@@ -244,7 +241,7 @@ pub fn show(
                             let schema_key = format!("schema:{index}:{}", schema.name);
                             let mut schema_open = state.tree_expanded.contains(&schema_key);
                             let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), ROW_H),
+                                Vec2::new(ui.available_width(), design::TREE_H),
                                 Sense::click(),
                             );
                             if response.hovered() {
@@ -252,14 +249,20 @@ pub fn show(
                                     .rect_filled(rect, CornerRadius::ZERO, tokens.hover);
                             }
                             ui.painter().text(
-                                egui::pos2(rect.left() + INDENT + 6.0, rect.center().y),
+                                egui::pos2(
+                                    rect.left() + design::INDENT_STEP + 6.0,
+                                    rect.center().y,
+                                ),
                                 Align2::LEFT_CENTER,
                                 if schema_open { "▾" } else { "▸" },
                                 tokens.font(10.5),
                                 tokens.text_dim,
                             );
                             ui.painter().text(
-                                egui::pos2(rect.left() + INDENT + 22.0, rect.center().y),
+                                egui::pos2(
+                                    rect.left() + design::INDENT_STEP + 22.0,
+                                    rect.center().y,
+                                ),
                                 Align2::LEFT_CENTER,
                                 &schema.name,
                                 tokens.font(12.0),
@@ -296,7 +299,7 @@ pub fn show(
                                     table: table.name.clone(),
                                 };
                                 let (rect, response) = ui.allocate_exact_size(
-                                    Vec2::new(ui.available_width(), ROW_H),
+                                    Vec2::new(ui.available_width(), design::TREE_H),
                                     Sense::click(),
                                 );
                                 if response.hovered() {
@@ -312,7 +315,10 @@ pub fn show(
                                         | datacraft_model::TableKind::MatView
                                 );
                                 let badge = egui::Rect::from_center_size(
-                                    egui::pos2(rect.left() + INDENT + 34.0, rect.center().y),
+                                    egui::pos2(
+                                        rect.left() + design::INDENT_STEP + 34.0,
+                                        rect.center().y,
+                                    ),
                                     Vec2::new(16.0, 14.0),
                                 );
                                 ui.painter().rect_filled(
@@ -336,7 +342,10 @@ pub fn show(
                                     },
                                 );
                                 ui.painter().text(
-                                    egui::pos2(rect.left() + INDENT + 48.0, rect.center().y),
+                                    egui::pos2(
+                                        rect.left() + design::INDENT_STEP + 48.0,
+                                        rect.center().y,
+                                    ),
                                     Align2::LEFT_CENTER,
                                     crate::table::clip(&table.name, 30),
                                     tokens.font(12.0),
@@ -394,7 +403,7 @@ pub fn show(
                     }
                     (None, _) => {
                         ui.horizontal(|ui| {
-                            ui.add_space(INDENT + 20.0);
+                            ui.add_space(design::INDENT_STEP + 20.0);
                             ui.label(RichText::new("not connected").size(11.0).color(tokens.warn));
                             if design::ghost_button(ui, tokens, "Connect", true).clicked() {
                                 action = TreeAction::OpenConnection(index);
@@ -403,7 +412,7 @@ pub fn show(
                     }
                     (Some(_), None) => {
                         ui.horizontal(|ui| {
-                            ui.add_space(INDENT + 20.0);
+                            ui.add_space(design::INDENT_STEP + 20.0);
                             ui.label(
                                 RichText::new("connected, catalog empty")
                                     .size(11.0)

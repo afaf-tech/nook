@@ -6,18 +6,50 @@ use egui::{
     Ui, Vec2,
 };
 
-/// Spacing scale.
-pub const S1: i8 = 4;
-pub const S2: i8 = 8;
-pub const S3: i8 = 12;
-pub const S4: i8 = 16;
+/// Spacing scale — the eight steps the design defines. Nothing in the UI invents a value between
+/// them; `--s1..--s8` in the design reference are these numbers.
+pub const S1: i8 = 2;
+pub const S2: i8 = 4;
+pub const S3: i8 = 6;
+pub const S4: i8 = 8;
+pub const S5: i8 = 12;
+pub const S6: i8 = 16;
+pub const S7: i8 = 20;
+pub const S8: i8 = 24;
 
-/// Layout heights.
-pub const ROW_H: f32 = 24.0;
-pub const APP_BAR_H: f32 = 38.0;
-pub const TAB_H: f32 = 36.0;
-pub const TOOLBAR_H: f32 = 42.0;
-pub const STATUS_H: f32 = 28.0;
+/// Layout heights. A row is 26px compact; a table head 28; a tree row 32; a control 28.
+pub const ROW_H: f32 = 26.0;
+pub const ROW_COMFORT_H: f32 = 30.0;
+pub const HEAD_H: f32 = 28.0;
+pub const TREE_H: f32 = 32.0;
+pub const BUTTON_H: f32 = 28.0;
+pub const SEG_H: f32 = 26.0;
+pub const SEG_ITEM_H: f32 = 24.0;
+pub const CHIP_H: f32 = 24.0;
+pub const APP_BAR_H: f32 = 40.0;
+pub const TAB_H: f32 = 34.0;
+pub const TOOLBAR_H: f32 = 40.0;
+pub const STATUS_H: f32 = 26.0;
+
+/// Panel widths and the small geometry the shell and the lists share.
+pub const TREE_W: f32 = 300.0;
+pub const INDENT_STEP: f32 = 14.0;
+pub const INDICATOR_W: f32 = 2.0;
+
+/// Corner radii: 4 for controls, 6 for containers, a pill for chips.
+pub const R_CTL: u8 = 4;
+pub const R_BOX: u8 = 6;
+/// `--r-chip: 999px`. epaint clamps a corner radius to half the rect's short side, so this renders
+/// as a true pill at any control height and as a square corner on a hairline.
+pub const R_CHIP: u8 = 255;
+
+/// Type scale.
+pub const T_XS: f32 = 11.0;
+pub const T_SM: f32 = 12.0;
+pub const T_MD: f32 = 13.0;
+pub const T_LG: f32 = 14.0;
+pub const T_XL: f32 = 18.0;
+pub const T_MONO: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tokens {
@@ -37,12 +69,17 @@ pub struct Tokens {
 
     pub accent: Color32,
     pub accent_dim: Color32,
+    pub accent_line: Color32,
     pub accent_text: Color32,
 
     pub ok: Color32,
     pub warn: Color32,
     pub error: Color32,
     pub info: Color32,
+    /// Soft fills for a semantic state: a chip, a badge, a selected-but-modified cell.
+    pub ok_fill: Color32,
+    pub warn_fill: Color32,
+    pub error_fill: Color32,
 
     pub grid_header: Color32,
     pub grid_row_alt: Color32,
@@ -51,6 +88,8 @@ pub struct Tokens {
     pub dirty: Color32,
     pub dirty_text: Color32,
     pub hover: Color32,
+    /// Dimming layer under a modal.
+    pub scrim: Color32,
 
     pub chart: [Color32; 6],
 }
@@ -60,30 +99,36 @@ impl Tokens {
         match theme {
             "light" => Tokens {
                 dark: false,
-                radius: 6,
-                background: Color32::from_rgb(0xf5, 0xf7, 0xfa),
+                radius: R_BOX,
+                background: Color32::from_rgb(0xf4, 0xf6, 0xf9),
                 panel: Color32::from_rgb(0xff, 0xff, 0xff),
                 panel_alt: Color32::from_rgb(0xee, 0xf2, 0xf7),
-                panel_high: Color32::from_rgb(0xe4, 0xea, 0xf3),
-                stroke: Color32::from_rgb(0xc4, 0xce, 0xdb),
-                stroke_strong: Color32::from_rgb(0xae, 0xba, 0xca),
-                text: Color32::from_rgb(0x15, 0x1c, 0x27),
-                text_dim: Color32::from_rgb(0x4a, 0x55, 0x67),
-                text_faint: Color32::from_rgb(0x5b, 0x66, 0x75),
-                accent: Color32::from_rgb(0x25, 0x63, 0xeb),
-                accent_dim: Color32::from_rgb(0xdd, 0xe7, 0xfd),
+                panel_high: Color32::from_rgb(0xe3, 0xe9, 0xf1),
+                stroke: Color32::from_rgb(0xd3, 0xdb, 0xe6),
+                stroke_strong: Color32::from_rgb(0xb9, 0xc4, 0xd3),
+                text: Color32::from_rgb(0x13, 0x1a, 0x24),
+                text_dim: Color32::from_rgb(0x4d, 0x58, 0x66),
+                text_faint: Color32::from_rgb(0x5a, 0x65, 0x75),
+                accent: Color32::from_rgb(0x1d, 0x4e, 0xd8),
+                accent_dim: Color32::from_rgb(0xe2, 0xea, 0xfd),
+                accent_line: Color32::from_rgb(0xb9, 0xcd, 0xf8),
                 accent_text: Color32::WHITE,
-                ok: Color32::from_rgb(0x10, 0x84, 0x4d),
-                warn: Color32::from_rgb(0xa8, 0x62, 0x00),
-                error: Color32::from_rgb(0xc0, 0x2b, 0x2b),
-                info: Color32::from_rgb(0x1c, 0x6b, 0x8f),
-                grid_header: Color32::from_rgb(0xec, 0xf1, 0xf8),
-                grid_row_alt: Color32::from_rgb(0xf8, 0xfa, 0xfc),
+                ok: Color32::from_rgb(0x0f, 0x7a, 0x49),
+                warn: Color32::from_rgb(0x8a, 0x5a, 0x00),
+                error: Color32::from_rgb(0xb3, 0x2a, 0x2a),
+                info: Color32::from_rgb(0x14, 0x63, 0x7f),
+                ok_fill: Color32::from_rgb(0xe6, 0xf5, 0xee),
+                warn_fill: Color32::from_rgb(0xfd, 0xf3, 0xdd),
+                error_fill: Color32::from_rgb(0xfb, 0xea, 0xea),
+                grid_header: Color32::from_rgb(0xee, 0xf2, 0xf7),
+                grid_row_alt: Color32::from_rgb(0xf7, 0xf9, 0xfc),
                 grid_line: Color32::from_rgb(0xe7, 0xec, 0xf3),
-                selection: Color32::from_rgb(0xd7, 0xe5, 0xff),
-                dirty: Color32::from_rgb(0xff, 0xf1, 0xcc),
+                selection: Color32::from_rgb(0xd6, 0xe4, 0xff),
+                dirty: Color32::from_rgb(0xff, 0xf2, 0xce),
                 dirty_text: Color32::from_rgb(0x7a, 0x51, 0x00),
-                hover: Color32::from_rgb(0xea, 0xef, 0xf7),
+                hover: Color32::from_rgb(0xee, 0xf2, 0xf7),
+                // rgba(19,26,36,.35) — the design's light scrim.
+                scrim: Color32::from_rgba_unmultiplied(0x13, 0x1a, 0x24, 89),
                 chart: [
                     Color32::from_rgb(0x25, 0x63, 0xeb),
                     Color32::from_rgb(0x0e, 0x9f, 0x6e),
@@ -95,30 +140,36 @@ impl Tokens {
             },
             _ => Tokens {
                 dark: true,
-                radius: 6,
-                background: Color32::from_rgb(0x0d, 0x11, 0x17),
-                panel: Color32::from_rgb(0x14, 0x19, 0x22),
-                panel_alt: Color32::from_rgb(0x1b, 0x22, 0x2d),
-                panel_high: Color32::from_rgb(0x23, 0x2c, 0x39),
-                stroke: Color32::from_rgb(0x26, 0x30, 0x3e),
-                stroke_strong: Color32::from_rgb(0x39, 0x47, 0x5a),
-                text: Color32::from_rgb(0xe8, 0xee, 0xf7),
-                text_dim: Color32::from_rgb(0x9a, 0xaa, 0xc0),
-                text_faint: Color32::from_rgb(0x7f, 0x8f, 0xa6),
-                accent: Color32::from_rgb(0x63, 0x94, 0xff),
-                accent_dim: Color32::from_rgb(0x1e, 0x2f, 0x52),
-                accent_text: Color32::from_rgb(0x08, 0x0d, 0x16),
-                ok: Color32::from_rgb(0x4c, 0xd1, 0x8a),
-                warn: Color32::from_rgb(0xe8, 0xb9, 0x4b),
-                error: Color32::from_rgb(0xf2, 0x7a, 0x7a),
-                info: Color32::from_rgb(0x63, 0xc2, 0xe8),
-                grid_header: Color32::from_rgb(0x1c, 0x24, 0x30),
-                grid_row_alt: Color32::from_rgb(0x11, 0x16, 0x1e),
-                grid_line: Color32::from_rgb(0x1e, 0x26, 0x32),
-                selection: Color32::from_rgb(0x23, 0x3a, 0x66),
-                dirty: Color32::from_rgb(0x3b, 0x31, 0x14),
-                dirty_text: Color32::from_rgb(0xf0, 0xc9, 0x6b),
-                hover: Color32::from_rgb(0x1a, 0x22, 0x2e),
+                radius: R_BOX,
+                background: Color32::from_rgb(0x1f, 0x1f, 0x1f),
+                panel: Color32::from_rgb(0x18, 0x18, 0x18),
+                panel_alt: Color32::from_rgb(0x20, 0x20, 0x20),
+                panel_high: Color32::from_rgb(0x2b, 0x2b, 0x2b),
+                stroke: Color32::from_rgb(0x2f, 0x2f, 0x2f),
+                stroke_strong: Color32::from_rgb(0x3c, 0x3c, 0x3c),
+                text: Color32::from_rgb(0xcc, 0xcc, 0xcc),
+                text_dim: Color32::from_rgb(0x9d, 0x9d, 0x9d),
+                text_faint: Color32::from_rgb(0x96, 0x96, 0x96),
+                accent: Color32::from_rgb(0x4d, 0xaa, 0xfc),
+                accent_dim: Color32::from_rgb(0x04, 0x2a, 0x45),
+                accent_line: Color32::from_rgb(0x00, 0x78, 0xd4),
+                accent_text: Color32::from_rgb(0x06, 0x26, 0x3f),
+                ok: Color32::from_rgb(0x4e, 0xc9, 0xb0),
+                warn: Color32::from_rgb(0xcc, 0xa7, 0x00),
+                error: Color32::from_rgb(0xf2, 0x6b, 0x6b),
+                info: Color32::from_rgb(0x37, 0x94, 0xff),
+                ok_fill: Color32::from_rgb(0x12, 0x33, 0x2a),
+                warn_fill: Color32::from_rgb(0x33, 0x2a, 0x00),
+                error_fill: Color32::from_rgb(0x3a, 0x1d, 0x1d),
+                grid_header: Color32::from_rgb(0x20, 0x20, 0x20),
+                grid_row_alt: Color32::from_rgb(0x24, 0x24, 0x24),
+                grid_line: Color32::from_rgb(0x30, 0x30, 0x30),
+                selection: Color32::from_rgb(0x17, 0x32, 0x4f),
+                dirty: Color32::from_rgb(0x33, 0x2a, 0x00),
+                dirty_text: Color32::from_rgb(0xe5, 0xc0, 0x7b),
+                hover: Color32::from_rgb(0x2a, 0x2d, 0x2e),
+                // rgba(15,15,15,.6) — the design's dark scrim.
+                scrim: Color32::from_rgba_unmultiplied(0x0f, 0x0f, 0x0f, 153),
                 chart: [
                     Color32::from_rgb(0x63, 0x94, 0xff),
                     Color32::from_rgb(0x4c, 0xd1, 0x8a),
@@ -189,30 +240,30 @@ impl Tokens {
             &mut visuals.widgets.hovered,
             &mut visuals.widgets.active,
         ] {
-            rounding.corner_radius = CornerRadius::same(5);
+            rounding.corner_radius = CornerRadius::same(R_CTL);
         }
         ctx.set_visuals(visuals);
 
         let theme = ctx.theme();
         let mut style = (*ctx.style_of(theme)).clone();
         for (text_style, size) in [
-            (egui::TextStyle::Body, 13.0),
-            (egui::TextStyle::Button, 13.0),
-            (egui::TextStyle::Small, 11.5),
-            (egui::TextStyle::Heading, 17.0),
-            (egui::TextStyle::Monospace, 12.5),
+            (egui::TextStyle::Body, T_MD),
+            (egui::TextStyle::Button, T_MD),
+            (egui::TextStyle::Small, T_SM),
+            (egui::TextStyle::Heading, T_XL),
+            (egui::TextStyle::Monospace, T_MONO),
         ] {
             let mut font = text_style.resolve(&style);
             font.size = size;
             style.text_styles.insert(text_style, font);
         }
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-        style.spacing.button_padding = Vec2::new(10.0, 3.0);
+        style.spacing.item_spacing = Vec2::new(f32::from(S4), f32::from(S4));
+        style.spacing.button_padding = Vec2::new(f32::from(S4), f32::from(S1));
         style.spacing.scroll.bar_width = 10.0;
-        style.spacing.window_margin = Margin::same(12);
-        style.spacing.menu_margin = Margin::same(4);
-        style.spacing.indent = 16.0;
-        style.spacing.interact_size.y = 24.0;
+        style.spacing.window_margin = Margin::same(S6);
+        style.spacing.menu_margin = Margin::same(S2);
+        style.spacing.indent = INDENT_STEP;
+        style.spacing.interact_size.y = BUTTON_H;
         ctx.set_style_of(theme, style);
     }
 }
@@ -222,8 +273,8 @@ pub fn top_panel_frame(tokens: &Tokens, _height: f32) -> Frame {
     Frame::new()
         .fill(tokens.panel)
         .inner_margin(Margin {
-            left: S3,
-            right: S3,
+            left: S5,
+            right: S5,
             top: 0,
             bottom: 0,
         })
@@ -246,8 +297,8 @@ pub fn card_frame(tokens: &Tokens) -> Frame {
     Frame::new()
         .fill(tokens.panel_alt)
         .stroke(Stroke::new(1.0, tokens.stroke))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(S3))
+        .corner_radius(CornerRadius::same(R_BOX))
+        .inner_margin(Margin::same(S5))
 }
 
 /// Vertical separator between toolbar clusters.
@@ -270,8 +321,8 @@ pub fn band_h(ui: &mut Ui, tokens: &Tokens, height: f32, add: impl FnOnce(&mut U
     ui.painter()
         .rect_filled(rect, CornerRadius::ZERO, tokens.panel);
     let inner = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + f32::from(S3), rect.top()),
-        egui::pos2(rect.right() - f32::from(S3), rect.bottom()),
+        egui::pos2(rect.left() + f32::from(S5), rect.top()),
+        egui::pos2(rect.right() - f32::from(S5), rect.bottom()),
     );
     let mut child = ui.new_child(
         egui::UiBuilder::new()
@@ -287,9 +338,9 @@ pub fn band(ui: &mut Ui, tokens: &Tokens, add: impl FnOnce(&mut Ui)) -> egui::Re
     band_h(ui, tokens, TOOLBAR_H, add)
 }
 
-/// Filled, high-emphasis button.
+/// Filled, high-emphasis button: 28px tall, `--r-ctl`, accent fill.
 pub fn primary_button(ui: &mut Ui, tokens: &Tokens, label: &str, enabled: bool) -> Response {
-    let text = RichText::new(label).size(12.5).color(if enabled {
+    let text = RichText::new(label).size(T_MD).color(if enabled {
         tokens.accent_text
     } else {
         tokens.text_dim
@@ -297,22 +348,22 @@ pub fn primary_button(ui: &mut Ui, tokens: &Tokens, label: &str, enabled: bool) 
     let fill = if enabled {
         tokens.accent
     } else {
-        tokens.panel_alt
+        tokens.panel_high
     };
     ui.add_enabled(
         enabled,
         egui::Button::new(text)
             .fill(fill)
             .stroke(Stroke::NONE)
-            .corner_radius(CornerRadius::same(5))
-            .min_size(Vec2::new(0.0, 24.0)),
+            .corner_radius(CornerRadius::same(R_CTL))
+            .min_size(Vec2::new(0.0, BUTTON_H)),
     )
 }
 
 /// Quiet button for toolbars: nothing painted until the pointer is over it.
 pub fn ghost_button(ui: &mut Ui, tokens: &Tokens, label: &str, enabled: bool) -> Response {
     // Disabled has to read as "not now", not as "not drawn".
-    let text = RichText::new(label).size(12.5).color(if enabled {
+    let text = RichText::new(label).size(T_MD).color(if enabled {
         tokens.text
     } else {
         tokens.text_dim
@@ -322,69 +373,135 @@ pub fn ghost_button(ui: &mut Ui, tokens: &Tokens, label: &str, enabled: bool) ->
         egui::Button::new(text)
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::NONE)
-            .corner_radius(CornerRadius::same(5))
-            .min_size(Vec2::new(0.0, 24.0)),
+            .corner_radius(CornerRadius::same(R_CTL))
+            .min_size(Vec2::new(0.0, BUTTON_H)),
     );
     if response.hovered() && enabled {
         let rect = response.rect;
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(5), tokens.panel_high);
+            .rect_filled(rect, CornerRadius::same(R_CTL), tokens.hover);
     }
     response
 }
 
-/// Segmented control: one rounded container, small mutually exclusive buttons inside.
-/// Returns the index that was clicked.
+/// Segmented control: a 26px bordered container holding 24px items split by hairlines, the selected
+/// item on `accent_dim` with a 2px accent indicator along its bottom edge — the shape the design
+/// defines for `.seg`. Returns the index that was clicked.
 pub fn segmented(ui: &mut Ui, tokens: &Tokens, options: &[(&str, bool)]) -> Option<usize> {
+    if options.is_empty() {
+        return None;
+    }
+    let font = tokens.font(T_XS);
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|(label, _)| {
+            ui.painter()
+                .layout_no_wrap((*label).to_owned(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+                + 2.0 * f32::from(S4)
+        })
+        .collect();
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(widths.iter().sum::<f32>() + 2.0, SEG_H),
+        Sense::hover(),
+    );
+    let radius = CornerRadius::same(R_CTL);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink(1.0))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.spacing_mut().item_spacing.x = 0.0;
     let mut clicked = None;
-    Frame::new()
-        .fill(tokens.panel_alt)
-        .stroke(Stroke::new(1.0, tokens.stroke))
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::same(2))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for (index, (label, selected)) in options.iter().enumerate() {
-                    let text = RichText::new(*label).size(12.0).color(if *selected {
-                        tokens.text
-                    } else {
-                        tokens.text_dim
-                    });
-                    let response = ui.add(
-                        egui::Button::new(text)
-                            .fill(if *selected {
-                                tokens.panel_high
-                            } else {
-                                Color32::TRANSPARENT
-                            })
-                            .stroke(Stroke::NONE)
-                            .corner_radius(CornerRadius::same(4))
-                            .min_size(Vec2::new(0.0, 22.0)),
-                    );
-                    if response.clicked() {
-                        clicked = Some(index);
-                    }
-                }
-            });
-        });
+    for (index, ((label, selected), width)) in options.iter().zip(&widths).enumerate() {
+        let (item, response) =
+            child.allocate_exact_size(Vec2::new(*width, SEG_ITEM_H), Sense::click());
+        // Clip the first and last fill to the container's rounding, the way `overflow: hidden` does.
+        let fill_radius = match (index, options.len()) {
+            (0, 1) => radius,
+            (0, _) => CornerRadius {
+                nw: R_CTL,
+                sw: R_CTL,
+                ..CornerRadius::ZERO
+            },
+            (last, len) if last == len - 1 => CornerRadius {
+                ne: R_CTL,
+                se: R_CTL,
+                ..CornerRadius::ZERO
+            },
+            _ => CornerRadius::ZERO,
+        };
+        let painter = child.painter();
+        if *selected {
+            painter.rect_filled(item, fill_radius, tokens.accent_dim);
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(item.left(), item.bottom() - INDICATOR_W),
+                    item.max,
+                ),
+                CornerRadius::ZERO,
+                tokens.accent,
+            );
+        } else if response.hovered() {
+            painter.rect_filled(item, fill_radius, tokens.hover);
+        }
+        if index > 0 {
+            painter.vline(
+                item.left(),
+                item.top()..=item.bottom(),
+                Stroke::new(1.0, tokens.stroke),
+            );
+        }
+        painter.text(
+            item.center(),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            if *selected {
+                tokens.text
+            } else {
+                tokens.text_dim
+            },
+        );
+        if response.clicked() {
+            clicked = Some(index);
+        }
+    }
     clicked
 }
 
 /// Small label in a rounded box: counts, states, versions.
+///
+/// ponytail: the design's chips are 600-weight; egui's default proportional family has no weight
+/// axis, so the chip reads by colour and size alone. Add a bold font family if one is ever bundled.
 pub fn chip(ui: &mut Ui, tokens: &Tokens, text: &str, colour: Color32) -> Response {
-    let label = RichText::new(text).size(11.5).color(colour);
+    let label = RichText::new(text).size(T_XS).color(colour);
     Frame::new()
         .fill(tokens.panel_alt)
         .stroke(Stroke::new(1.0, tokens.stroke))
-        .corner_radius(CornerRadius::same(10))
+        .corner_radius(CornerRadius::same(R_CHIP))
         .inner_margin(Margin {
-            left: 7,
-            right: 7,
-            top: 2,
-            bottom: 2,
+            left: S4,
+            right: S4,
+            top: 0,
+            bottom: 0,
         })
-        .show(ui, |ui| ui.label(label))
+        .show(ui, |ui| {
+            ui.set_min_height(CHIP_H);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(label)
+            });
+        })
         .response
 }
 
@@ -397,9 +514,9 @@ pub fn dot(ui: &mut Ui, colour: Color32) {
 /// Section heading with an optional subtitle.
 pub fn section(ui: &mut Ui, tokens: &Tokens, title: &str, subtitle: Option<&str>) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(13.5).color(tokens.text));
+        ui.label(RichText::new(title).size(T_MD).color(tokens.text));
         if let Some(subtitle) = subtitle {
-            ui.label(RichText::new(subtitle).size(11.5).color(tokens.text_faint));
+            ui.label(RichText::new(subtitle).size(T_XS).color(tokens.text_faint));
         }
     });
 }
@@ -409,11 +526,11 @@ pub fn meter(ui: &mut Ui, tokens: &Tokens, fraction: f32, width: f32, colour: Co
     let fraction = fraction.clamp(0.0, 1.0);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 8.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(4), tokens.panel_alt);
+        .rect_filled(rect, CornerRadius::same(R_CTL), tokens.panel_alt);
     let filled =
         egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * fraction, rect.height()));
     ui.painter()
-        .rect_filled(filled, CornerRadius::same(4), colour);
+        .rect_filled(filled, CornerRadius::same(R_CTL), colour);
     response
 }
 
@@ -422,17 +539,17 @@ pub fn keycap(ui: &mut Ui, tokens: &Tokens, text: &str) {
     Frame::new()
         .fill(tokens.panel_alt)
         .stroke(Stroke::new(1.0, tokens.stroke))
-        .corner_radius(CornerRadius::same(4))
+        .corner_radius(CornerRadius::same(R_CTL))
         .inner_margin(Margin {
-            left: 5,
-            right: 5,
-            top: 1,
-            bottom: 1,
+            left: S2,
+            right: S2,
+            top: S1,
+            bottom: S1,
         })
         .show(ui, |ui| {
             ui.label(
                 RichText::new(text)
-                    .size(10.5)
+                    .size(T_XS)
                     .monospace()
                     .color(tokens.text_dim),
             )
@@ -448,4 +565,125 @@ pub fn outlined(ui: &Ui, rect: egui::Rect, tokens: &Tokens, radius: CornerRadius
         Stroke::new(1.0, tokens.stroke),
         StrokeKind::Inside,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG 2.1 relative luminance of an sRGB colour.
+    fn luminance(colour: Color32) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(colour.r()) + 0.7152 * channel(colour.g()) + 0.0722 * channel(colour.b())
+    }
+
+    /// WCAG contrast ratio between two opaque colours.
+    fn contrast(one: Color32, other: Color32) -> f32 {
+        let (one, other) = (luminance(one), luminance(other));
+        let (lighter, darker) = if one > other {
+            (one, other)
+        } else {
+            (other, one)
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// Every foreground/background pair the interface paints, in both themes, against the floors the
+    /// design sets: 4.5:1 for text, 3.0:1 for large text and for state colours that carry meaning
+    /// (`accent`, the indicator, a hairline against its panel). This is the assertion a screenshot
+    /// cannot make for us: the palette is checked arithmetically, not by eye.
+    #[test]
+    fn palettes_clear_their_contrast_floors() {
+        for tokens in [Tokens::of("dark"), Tokens::of("light")] {
+            let theme = if tokens.dark { "dark" } else { "light" };
+            let floors: [(&str, Color32, Color32, f32); 29] = [
+                ("text on panel", tokens.text, tokens.panel, 4.5),
+                ("text on background", tokens.text, tokens.background, 4.5),
+                ("text on panel_alt", tokens.text, tokens.panel_alt, 4.5),
+                ("text on panel_high", tokens.text, tokens.panel_high, 4.5),
+                ("text on selection", tokens.text, tokens.selection, 4.5),
+                ("text on accent_dim", tokens.text, tokens.accent_dim, 4.5),
+                (
+                    "text on grid_row_alt",
+                    tokens.text,
+                    tokens.grid_row_alt,
+                    4.5,
+                ),
+                ("text on grid_header", tokens.text, tokens.grid_header, 4.5),
+                ("dim on panel", tokens.text_dim, tokens.panel, 4.5),
+                ("dim on background", tokens.text_dim, tokens.background, 4.5),
+                ("dim on panel_alt", tokens.text_dim, tokens.panel_alt, 4.5),
+                ("dim on panel_high", tokens.text_dim, tokens.panel_high, 4.5),
+                (
+                    "dim on grid_header",
+                    tokens.text_dim,
+                    tokens.grid_header,
+                    4.5,
+                ),
+                ("faint on panel", tokens.text_faint, tokens.panel, 4.5),
+                (
+                    "faint on panel_alt",
+                    tokens.text_faint,
+                    tokens.panel_alt,
+                    4.5,
+                ),
+                (
+                    "faint on panel_high",
+                    tokens.text_faint,
+                    tokens.panel_high,
+                    4.5,
+                ),
+                ("accent on panel", tokens.accent, tokens.panel, 4.5),
+                ("accent on panel_alt", tokens.accent, tokens.panel_alt, 4.5),
+                (
+                    "accent_text on accent",
+                    tokens.accent_text,
+                    tokens.accent,
+                    4.5,
+                ),
+                ("ok on panel", tokens.ok, tokens.panel, 4.5),
+                ("warn on panel", tokens.warn, tokens.panel, 4.5),
+                ("error on panel", tokens.error, tokens.panel, 4.5),
+                ("info on panel", tokens.info, tokens.panel, 4.5),
+                ("ok on ok_fill", tokens.ok, tokens.ok_fill, 4.5),
+                ("warn on warn_fill", tokens.warn, tokens.warn_fill, 4.5),
+                ("error on error_fill", tokens.error, tokens.error_fill, 4.5),
+                ("dirty_text on dirty", tokens.dirty_text, tokens.dirty, 4.5),
+                (
+                    "indicator on accent_dim",
+                    tokens.accent,
+                    tokens.accent_dim,
+                    3.0,
+                ),
+                ("hairline on panel", tokens.stroke, tokens.panel, 1.3),
+            ];
+            for (pair, foreground, background, floor) in floors {
+                let ratio = contrast(foreground, background);
+                assert!(
+                    ratio >= floor,
+                    "{theme}: {pair} is {ratio:.2}:1, needs at least {floor}:1"
+                );
+            }
+        }
+    }
+
+    /// The scrim has to dim what it covers in both themes: it is drawn over panels, so it must not
+    /// be brighter than the surface underneath it.
+    #[test]
+    fn scrim_dims_the_surface_below_it() {
+        for tokens in [Tokens::of("dark"), Tokens::of("light")] {
+            let theme = if tokens.dark { "dark" } else { "light" };
+            assert!(
+                luminance(tokens.scrim) <= luminance(tokens.panel),
+                "{theme}: scrim is brighter than the panel it covers"
+            );
+        }
+    }
 }

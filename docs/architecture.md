@@ -101,8 +101,9 @@ implementations:
   the parity freshness check.
 - UI verification: `cargo run -p datacraft -- --shot /tmp/shot.png` renders a frame and writes a PNG.
   For a real check, start `datacraft --demo --control <port>` and drive it over the control channel:
-  `ui.selectTab` (a negative index shows the start page), `engine.run`, `ui.setEditorText`, `ui.shot`
-  per view, `ui.quit`. The frames are then reviewed as images, and anything visual is fixed and
+  `ui.selectTab` (a negative index shows the start page), `engine.run`, `ui.setEditorText`,
+  `ui.setTheme` (so both palettes can be shot without touching the window), `ui.shot` per view,
+  `ui.quit`. The frames are then reviewed as images, and anything visual is fixed and
   re-shot. `ui.shot` writes the file and leaves the app running; only a `--shot` launch quits after
   capture.
 
@@ -118,3 +119,6 @@ implementations:
   statement from the catalog: indexes and foreign keys included, formatting not identical to
   `pg_dump`. MySQL and SQLite ask the server.
 - **ASCII-safe SVG diagrams.** No external fonts, no scripts, escaping tested.
+- **Chip weight.** The design gives chips a 600 weight; egui's bundled proportional family has one
+  weight, so chips read by colour, size and a pill radius instead. Bundling a bold family is the
+  upgrade path if the weight ever has to carry meaning.

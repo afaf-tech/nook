@@ -451,6 +451,24 @@ impl DatacraftApp {
                         Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
                     }
                 }
+                "ui.setTheme" => {
+                    let theme = request
+                        .params
+                        .get("theme")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if theme == "dark" || theme == "light" {
+                        self.session.settings.theme = theme.clone();
+                        ctx.request_repaint();
+                        serde_json::json!({"ok": true, "theme": theme})
+                    } else {
+                        serde_json::json!({
+                            "ok": false,
+                            "error": "theme must be 'dark' or 'light'"
+                        })
+                    }
+                }
                 "ui.messages" => serde_json::json!({
                     "messages": self.session.messages.iter().rev().take(50).map(|m| serde_json::json!({
                         "level": format!("{:?}", m.level).to_lowercase(), "text": m.text,
@@ -1174,7 +1192,7 @@ impl eframe::App for DatacraftApp {
 
         egui::Panel::left("tree")
             .resizable(true)
-            .default_size(300.0)
+            .default_size(t::TREE_W)
             .frame(t::side_panel_frame(&tokens))
             .show(ui, |ui| self.sidebar(ui, &tokens));
 
