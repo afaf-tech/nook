@@ -40,7 +40,7 @@ impl Postgres {
     fn simple(&mut self, sql: &str) -> Result<Vec<SimpleQueryMessage>> {
         self.client
             .simple_query(sql)
-            .map_err(|e| Error::query(format!("{e}")))
+            .map_err(|e| Error::query(describe(&e)))
     }
 
     /// Column names and server types for a statement. Prepared but never executed: this is how the
@@ -115,7 +115,7 @@ fn connect(cfg: &ConnectionConfig) -> Result<Client> {
     if cfg.ssl == nook_core::SslMode::Disable {
         return pc
             .connect(NoTls)
-            .map_err(|e| Error::connect(format!("{target}: {e}")));
+            .map_err(|e| Error::connect(format!("{target}: {}", describe(&e))));
     }
     let verify = matches!(
         cfg.ssl,
@@ -127,7 +127,17 @@ fn connect(cfg: &ConnectionConfig) -> Result<Client> {
         .build()
         .map_err(|e| Error::config(format!("tls: {e}")))?;
     pc.connect(MakeTlsConnector::new(builder))
-        .map_err(|e| Error::connect(format!("{target}: {e}")))
+        .map_err(|e| Error::connect(format!("{target}: {}", describe(&e))))
+}
+
+/// The sentence to show for a failed connect. tokio-postgres's `Display` prints the error's *kind*
+/// alone, so the server's own answer to a rejected login arrives as the bare "db error"; its `DbError`
+/// carries the sentence the user needs ("password authentication failed for user \"postgres\"").
+fn describe(error: &postgres::Error) -> String {
+    match error.as_db_error() {
+        Some(db) => db.to_string(),
+        None => error.to_string(),
+    }
 }
 
 fn parse_value(raw: Option<&str>, ty: &Type) -> Value {
