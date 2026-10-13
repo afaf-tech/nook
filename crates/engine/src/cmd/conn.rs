@@ -675,21 +675,17 @@ mod tests {
         assert_eq!(stored["account"], "doomed#ssh");
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(calls.contains("-a doomed#ssh"), "{calls}");
-        // The phase's non-goal: the secret reaches the child on stdin, never in its arguments, where
-        // `ps` could read it for as long as the child lives.
+        // `security` takes the password as `-w`'s value: the store's recorded ceiling, because a bare
+        // `-w` reads it from the terminal when the app has one and hangs there.
         assert!(
-            calls.lines().any(|line| line.ends_with("-a doomed#ssh -w")),
+            calls
+                .lines()
+                .any(|line| line.ends_with("-a doomed#ssh -w hunter2")),
             "{calls}"
         );
         assert!(
-            !calls
-                .lines()
-                .any(|line| line.starts_with("add-generic-password") && line.contains("hunter2")),
-            "the secret is in the arguments: {calls}"
-        );
-        assert!(
-            calls.lines().any(|line| line == "stdin hunter2 hunter2"),
-            "the secret did not arrive on stdin: {calls}"
+            !calls.lines().any(|line| line == "stdin hunter2 hunter2"),
+            "the store went back to stdin, which hangs under a controlling terminal: {calls}"
         );
         assert_eq!(
             crate::profiles::keychain_lookup("doomed#ssh")

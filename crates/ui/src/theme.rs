@@ -124,10 +124,13 @@ pub const DIALOG_W: f32 = 560.0;
 pub const DIALOG_NARROW_W: f32 = 440.0;
 /// `.dlg-h`'s 68: `--s6` above the title, the title block, `--s5` below it — the plan's pin. The
 /// sheet's rule is `padding: --s6 --s7 --s5`, and its two pages render that head 65.08 and 67.69 tall
-/// because they inherit different line heights (the title is a `T_LG` line, the subtitle `T_SM`, and
-/// only `.helper`/`.msg`/`.para`/`.note` set the 1.45 the line-height note names). 68 is the mark
-/// this app holds to in both places, so the block has to fit inside it.
+/// because they inherit different line heights (`components/dialogs.html` puts 1.35 on `.ui`,
+/// `sections/modals.html` 1.45 on `body`, and the title's `T_LG` and subtitle's `T_SM` lines carry no
+/// line height of their own). 68 is the mark this app holds to in both places, so the block has to fit
+/// inside it.
 pub const DLG_HEAD_H: f32 = 68.0;
+/// `.tabs`: the strip's hairline under a 32px item. The two pages render the strip 32 and 34 tall for
+/// the same inherited-line-height reason as the head, and 33 is the mark this app holds to.
 pub const DLG_TAB_H: f32 = 32.0;
 pub const DLG_TABS_H: f32 = DLG_TAB_H + 1.0;
 pub const INPUT_H: f32 = 28.0;
@@ -2583,8 +2586,9 @@ pub fn helper_line(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
 }
 
 /// `.dlg-f`: the pinned footer — a `stroke` hairline along its top edge, `--s5` of vertical padding
-/// around a column of 28px rows `--s5` apart, and `--s7` on each side. The editor's two rows are
-/// [`DLG_FOOT_H`] (92); the confirmation's single row is `2 * --s5` shorter. Returns the band's rect.
+/// around a column of 28px rows, and `--s7` on each side. The editor's own footer overrides the
+/// modal's `gap: --s5` with `gap: --s4` and holds two rows, which is [`DLG_FOOT_H`] (89); the
+/// confirmation's single row is 53, `--s4 + BUTTON_H` shorter. Returns the band's rect.
 pub fn dialogue_foot(ui: &mut Ui, tokens: &Tokens, height: f32, add: impl FnOnce(&mut Ui)) -> Rect {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     ui.painter()

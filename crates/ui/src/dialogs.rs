@@ -111,7 +111,7 @@ fn conn_row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 
 /// `.fld`: the `--s6` label box, the `--s3` gap the caller's stack spends, and the 28px control, in a
 /// column of exactly `width` — which is what makes a field the 50 the design's arithmetic names.
-fn field_col(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui)) {
+fn field_col<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.allocate_ui_with_layout(
         egui::vec2(width, 0.0),
         egui::Layout::top_down(egui::Align::Min),
@@ -119,9 +119,10 @@ fn field_col(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui)) {
             ui.set_min_width(width);
             ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = f32::from(design::S3);
-            add(ui);
+            add(ui)
         },
-    );
+    )
+    .inner
 }
 
 /// The text inside an `.inp`: egui's own editor with no chrome of its own, so the box's fill, border
@@ -149,6 +150,7 @@ fn input_text(
 }
 
 /// One `.inp` text field, its label and all.
+#[allow(clippy::too_many_arguments)]
 fn text_field(
     ui: &mut egui::Ui,
     tokens: &Tokens,
@@ -159,10 +161,9 @@ fn text_field(
     error: bool,
     enabled: bool,
 ) -> egui::Response {
-    let mut painted = None;
     field_col(ui, width, |ui| {
         design::field_label(ui, tokens, label);
-        painted = Some(design::input(ui, tokens, width, error, enabled, |ui| {
+        design::input(ui, tokens, width, error, enabled, |ui| {
             input_text(
                 ui,
                 tokens,
@@ -171,14 +172,14 @@ fn text_field(
                 hint,
                 false,
             )
-        }));
-    });
-    painted.expect("the field painted")
+        })
+    })
 }
 
 /// A password `.inp`, with the design's `keychain` chip inside its right edge when the password is
 /// kept in the keychain. The chip takes its width first and the text gets what is left, which is what
 /// the design's `margin-left:auto` does.
+#[allow(clippy::too_many_arguments)]
 fn password_field(
     ui: &mut egui::Ui,
     tokens: &Tokens,
@@ -190,10 +191,9 @@ fn password_field(
     enabled: bool,
     chip: bool,
 ) -> egui::Response {
-    let mut painted = None;
     field_col(ui, width, |ui| {
         design::field_label(ui, tokens, label);
-        painted = Some(design::input(ui, tokens, width, error, enabled, |ui| {
+        design::input(ui, tokens, width, error, enabled, |ui| {
             let text_width = width - 2.0 * f32::from(design::S4);
             if chip {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -205,13 +205,13 @@ fn password_field(
             } else {
                 input_text(ui, tokens, value, text_width, hint, true)
             }
-        }));
-    });
-    painted.expect("the field painted")
+        })
+    })
 }
 
 /// A numeric `.inp` with an optional trailing unit, which is how the design draws Timeout's `s` and
 /// the local port's `auto`.
+#[allow(clippy::too_many_arguments)]
 fn number_field(
     ui: &mut egui::Ui,
     tokens: &Tokens,
@@ -222,10 +222,9 @@ fn number_field(
     suffix: &str,
     enabled: bool,
 ) -> egui::Response {
-    let mut painted = None;
     field_col(ui, width, |ui| {
         design::field_label(ui, tokens, label);
-        painted = Some(design::input(ui, tokens, width, false, enabled, |ui| {
+        design::input(ui, tokens, width, false, enabled, |ui| {
             let mut number = i64::from(*value);
             let response = ui.add(
                 egui::DragValue::new(&mut number)
@@ -245,13 +244,13 @@ fn number_field(
                 });
             }
             response
-        }));
-    });
-    painted.expect("the field painted")
+        })
+    })
 }
 
 /// The design's `.inp.ui-font` with its chevron: a combo wearing the token layer's own control fill,
 /// stroke and radius, so it is the design's 28px control rather than a second visual language.
+#[allow(clippy::too_many_arguments)]
 fn select_field<T: PartialEq + Clone>(
     ui: &mut egui::Ui,
     tokens: &Tokens,
@@ -262,30 +261,26 @@ fn select_field<T: PartialEq + Clone>(
     value: &mut T,
     enabled: bool,
 ) -> egui::Response {
-    let mut painted = None;
     field_col(ui, width, |ui| {
         design::field_label(ui, tokens, label);
-        painted = Some(
-            ui.add_enabled_ui(enabled, |ui| {
-                let selected = options
-                    .iter()
-                    .find(|(option, _)| option == value)
-                    .map(|(_, text)| text.clone())
-                    .unwrap_or_default();
-                egui::ComboBox::from_id_salt(id)
-                    .selected_text(selected)
-                    .width(width)
-                    .show_ui(ui, |ui| {
-                        for (option, text) in options {
-                            ui.selectable_value(value, option.clone(), text);
-                        }
-                    })
-                    .response
-            })
-            .inner,
-        );
-    });
-    painted.expect("the field painted")
+        ui.add_enabled_ui(enabled, |ui| {
+            let selected = options
+                .iter()
+                .find(|(option, _)| option == value)
+                .map(|(_, text)| text.clone())
+                .unwrap_or_default();
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(selected)
+                .width(width)
+                .show_ui(ui, |ui| {
+                    for (option, text) in options {
+                        ui.selectable_value(value, option.clone(), text);
+                    }
+                })
+                .response
+        })
+        .inner
+    })
 }
 
 /// `.msg`: the design's badge and its sentence, in the state's own ink.
@@ -2001,7 +1996,7 @@ mod tests {
         })
     }
 
-    /// The band the design names by its own size — the head 68, the footer 92 — both `DIALOG_W` wide
+    /// The band the design names by its own size — the head 68, the footer 89 — both `DIALOG_W` wide
     /// and filled with the panel.
     fn band(painted: &[egui::Shape], tokens: &Tokens, height: f32) -> egui::Rect {
         painted
@@ -2107,7 +2102,7 @@ mod tests {
 
     /// The editor is the design's `.dlg`: the window under the scrim, a 560px dialog centred in the
     /// 1440 the design draws it in, the 68px head at its top with its `--s7` inset — which is the
-    /// body's content edge as well — and the 92px footer below it.
+    /// body's content edge as well — and the 89px footer below it.
     #[test]
     fn the_editor_is_a_centred_scrimmed_shell() {
         let mut editor = Editor::new();
@@ -2129,7 +2124,7 @@ mod tests {
         assert!((head.left() - 440.0).abs() <= 0.5, "{head:?}");
         assert!((head.right() - 1000.0).abs() <= 0.5, "{head:?}");
 
-        // The head's `--s7` inset, and the footer's own 8px dot in the 92 below the head.
+        // The head's `--s7` inset, and the footer's own 8px dot in the 89 below the head.
         let title = text_pos(&painted, "New connection").expect("the head's title");
         assert!((title.x - 460.0).abs() <= 0.5, "{title:?}");
         let foot = band(&painted, &editor.tokens, design::DLG_FOOT_H);
@@ -2267,8 +2262,10 @@ mod tests {
         // A key file and a stored password both set: the key file is what the field says.
         assert_eq!(ssh_auth_of("/keys/id", true), SshAuth::KeyFile);
 
-        let mut form = ConnectionForm::default();
-        form.ssh_key = "/keys/id".into();
+        let mut form = ConnectionForm {
+            ssh_key: "/keys/id".into(),
+            ..ConnectionForm::default()
+        };
         assert_eq!(form.ssh_auth(), SshAuth::KeyFile);
         form.ssh_auth = SshAuth::Password;
         assert_eq!(form.ssh_auth(), SshAuth::Password);
@@ -2351,7 +2348,7 @@ mod tests {
 
     /// The confirmation is the design's narrow shell: 440 wide — x 500..940 in the 1440 the design
     /// draws it in — the 20px `.ig` badge in the head, its `.facts` chips 20 tall `--s3` apart under
-    /// the sentence, one 52px footer band, and a `.btn.danger` that is `.off` until the typed name
+    /// the sentence, one 53px footer band, and a `.btn.danger` that is `.off` until the typed name
     /// matches the object's own.
     #[test]
     fn the_confirmation_is_the_narrow_shell_with_its_facts_and_the_risk_face() {
@@ -2432,7 +2429,7 @@ mod tests {
             );
         }
 
-        // The single 52px footer band, and the danger face: `.off` until the name matches.
+        // The single 53px footer band, and the danger face: `.off` until the name matches.
         assert!(
             painted
                 .iter()
