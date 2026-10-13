@@ -129,8 +129,9 @@ pub const DIALOG_NARROW_W: f32 = 440.0;
 /// line height of their own). 68 is the mark this app holds to in both places, so the block has to fit
 /// inside it.
 pub const DLG_HEAD_H: f32 = 68.0;
-/// `.tabs`: the strip's hairline under a 32px item. The two pages render the strip 32 and 34 tall for
-/// the same inherited-line-height reason as the head, and 33 is the mark this app holds to.
+/// `.tabs`: the strip's hairline under a 32px item. The two pages render the strip 32 and 34 tall —
+/// `components/dialogs.html` hard-codes `.tab`'s `height: 32px`, `sections/modals.html` reuses the
+/// shell's `--h-tabs` token, which is 34 — and 33 is the mark this app holds to.
 pub const DLG_TAB_H: f32 = 32.0;
 pub const DLG_TABS_H: f32 = DLG_TAB_H + 1.0;
 pub const INPUT_H: f32 = 28.0;
