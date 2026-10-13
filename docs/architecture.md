@@ -137,6 +137,28 @@ implementations:
   skeleton from a flag that is set and cleared inside one frame would be a state nothing can ever show.
   The upgrade path is real asynchrony (a job that reports its own progress); the design's state can be
   added then with the flag it needs.
+- **The workbench pane is flush and each surface carries its own insets.** `app::show` gives the
+  central pane a frame with no margin — the design's `.reg-grid` has none either — so a surface that
+  needs air inside the pane states it itself (`views::welcome`, the query editor and the monitor
+  dashboard have no such rule in the design, so they sit flush and were re-measured rather than
+  padded). Inside the grid, `show` zeroes `item_spacing.y` so its bands stack hairline to hairline.
+- **The grid asks the widget for its head alone on an empty page.** `TableView::height = 0` is the
+  sentinel: `table::show` paints the head and returns, and the caller owns the space under it (the
+  `.empty` block's own `padding:28px`). The reason is egui's scroll areas: one would floor its
+  viewport at `min_scrolled_size` (64px) and reserve the horizontal bar's strip, which put the block
+  72px below the head instead of 28. `ponytail:` a zero-height body is not expressible — nothing asks
+  for one — so the upgrade path is a `Body` enum (`HeadOnly | Scroll(f32)`) if a caller ever wants a
+  body of no height.
+- **The grid's badge and notice marks have one definition each.** The head reserves
+  `theme::pk_badge_width` and paints through `theme::paint_pk_badge`, so the toolbar's `.pkbadge` and
+  the head's cannot drift apart; `theme::notice_band` takes the band's leading `icons::Glyph` and its
+  message `FontId`, which is how the `.errband` gets `.ei` plus a `--t-sm` mono message and the
+  `.robanner` gets `.ri` plus its proportional `--t-xs` paragraph.
+- **The grid prints only the facts it holds.** `.matches` shows the count `grid.countRows` returned;
+  until that command has run there is no match total to print, so the band says what is true of the
+  page in hand (`50 rows on this page`). The `.robanner`'s reason comes from the binding and the
+  schema — not from the page — in the order `GridState::editable` checks them, so a keyless table is
+  never told it has no primary key because a page came back empty.
 - **Bar bands.** `theme::bar_frame` contributes no stroke and no margin, and every panel is built with
   `show_separator_line(false)`, so a bar's height is its token plus the hairline painted inside it.
   The ceiling is that any future panel must paint its own edges to be visible.
@@ -167,7 +189,9 @@ implementations:
 - **One changes surface, two thirds of the design's.** The design draws both the toolbar's `.pend`
   cluster and a drawer with a `.dfoot`; this app keeps the persistent `.pend` cluster (only while the
   buffer is non-empty, as the design's own `0 pending` states do) and the drawer, whose footer now
-  carries `Copy to SQL`, Revert and `Apply n changes`. `ponytail:` the drawer body is still the
+  carries `Copy to SQL`, Revert and `Apply n changes`. `Copy to SQL` writes the statements one per
+  line, because each `edit.sql` already ends in `;` and a `;` separator would leave an empty statement
+  between every pair. `ponytail:` the drawer body is still the
   `CollapsingHeader` of `kind · sql` lines rather than the design's grouped `.dgrp`/`.dchg` list; the
   grouped list needs per-kind headers and a per-change undo, which the engine's `Vec<PendingEdit>` can
   address when the drawer is worth the second pass.

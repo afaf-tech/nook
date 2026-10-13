@@ -1928,7 +1928,12 @@ impl eframe::App for DatacraftApp {
             .frame(t::side_panel_frame(&tokens))
             .show(ui, |ui| self.inspector_panel(ui, &tokens));
 
-        egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui, &tokens));
+        // The design's workbench surfaces sit flush: the pane's bands and cards paint their own
+        // insets, and the grid's hairlines run edge to edge inside it (`.reg-grid` has no margin of
+        // its own), so the central pane carries none.
+        egui::CentralPanel::default_margins()
+            .frame(egui::Frame::new().fill(tokens.panel))
+            .show(ui, |ui| self.central(ui, &tokens));
 
         dialogs::show(ui, &mut self.session, &mut self.state, &tokens);
 

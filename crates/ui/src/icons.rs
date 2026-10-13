@@ -33,6 +33,10 @@ pub enum Glyph {
     Sun,
     /// A table: the object inspector's header, next to the name of what it is describing.
     Table,
+    /// A warning triangle: the `.errband`'s leading mark (the design's `.ei`).
+    Warning,
+    /// A padlock: the `.robanner`'s leading mark (the design's `.ri`), beside a grid it cannot edit.
+    Lock,
 }
 
 /// The design's stroke, in its 14-unit box.
@@ -229,6 +233,30 @@ fn geometry(glyph: Glyph, at: &impl Fn(f32, f32) -> Pos2, scale: f32) -> (Lines,
             vec![(at(7.0, 7.0), Vec2::splat(3.0 * scale))],
             Vec::new(),
         ),
+        Glyph::Warning => (
+            vec![
+                vec![at(7.0, 2.6), at(12.0, 11.0), at(2.0, 11.0), at(7.0, 2.6)],
+                vec![at(7.0, 6.0), at(7.0, 8.4)],
+                vec![at(7.0, 9.8), at(7.0, 9.9)],
+            ],
+            Vec::new(),
+            Vec::new(),
+        ),
+        Glyph::Lock => (
+            vec![{
+                // The shackle: up the left post, over a half-circle of radius 1.75, down the right.
+                let mut shackle = vec![at(5.25, 6.25), at(5.25, 4.9)];
+                shackle.extend((1..CURVE_STEPS).map(|step| {
+                    let angle = std::f32::consts::PI * (1.0 - step as f32 / CURVE_STEPS as f32);
+                    at(7.0 + 1.75 * angle.cos(), 4.9 - 1.75 * angle.sin())
+                }));
+                shackle.push(at(8.75, 4.9));
+                shackle.push(at(8.75, 6.25));
+                shackle
+            }],
+            Vec::new(),
+            vec![(box_of(at, 3.25, 6.25, 7.5, 4.75), 1.0)],
+        ),
     }
 }
 
@@ -254,7 +282,7 @@ fn bounds(paths: &[Vec<Pos2>], rings: &[(Pos2, Vec2)], boxes: &[(Rect, f32)]) ->
 mod tests {
     use super::*;
 
-    const ALL: [Glyph; 9] = [
+    const ALL: [Glyph; 11] = [
         Glyph::Database,
         Glyph::Queries,
         Glyph::Jobs,
@@ -264,6 +292,8 @@ mod tests {
         Glyph::Search,
         Glyph::Sun,
         Glyph::Table,
+        Glyph::Warning,
+        Glyph::Lock,
     ];
 
     /// The invariant that matters: a glyph never paints outside the rectangle it is handed, at any
@@ -306,6 +336,8 @@ mod tests {
             (Glyph::Search, 1, 1, 0),
             (Glyph::Sun, 8, 1, 0),
             (Glyph::Table, 2, 0, 1),
+            (Glyph::Warning, 3, 0, 0),
+            (Glyph::Lock, 1, 0, 1),
         ] {
             let rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(32.0));
             let (paths, ring_list, box_list) = geometry(glyph, &mapper(rect), scale_of(rect));

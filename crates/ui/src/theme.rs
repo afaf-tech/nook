@@ -2,8 +2,8 @@
 //! No screen in `crates/ui` invents a colour, a radius, a spacing value or a font size: it asks here.
 
 use egui::{
-    Color32, CornerRadius, FontId, Frame, Margin, Response, RichText, Sense, Stroke, StrokeKind,
-    Ui, Vec2,
+    Color32, CornerRadius, FontId, Frame, Margin, Rect, Response, RichText, Sense, Stroke,
+    StrokeKind, Ui, Vec2,
 };
 
 /// Spacing scale — the eight steps the design defines. Nothing in the UI invents a value between
@@ -991,45 +991,81 @@ pub fn filter_row_h(chip_h: f32) -> f32 {
     chip_h + 2.0 * FCHIP_AIR
 }
 
-/// One micro tag: the shape `.pkbadge` and `.taglite` share — a 16px box, a pill or 3px radius, a
-/// 1px border and one line of text, sized from its own measurement.
-fn micro_tag(
-    ui: &mut Ui,
-    text: &str,
+/// One micro tag's shape: `.pkbadge` and `.taglite` are the same box in different tokens — a 16px
+/// box, a pill or 3px radius, a 1px border and one line of text, sized from its own measurement.
+#[derive(Clone)]
+struct MicroTag {
     font: FontId,
     ink: Color32,
     fill: Color32,
     border: Color32,
     radius: u8,
-) -> Response {
-    let width = measured(ui, font.clone(), text) + 2.0 * f32::from(S3) + 2.0;
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, MICRO_TAG_H), Sense::hover());
-    let painter = ui.painter();
-    if fill != Color32::TRANSPARENT {
-        painter.rect_filled(rect, CornerRadius::same(radius), fill);
+}
+
+/// The one definition of `.pkbadge`: 11px mono ink, `accent_soft` over an `accent_line` border.
+fn pk_style(tokens: &Tokens) -> MicroTag {
+    MicroTag {
+        font: tokens.mono(T_XS),
+        ink: tokens.text,
+        fill: tokens.accent_dim,
+        border: tokens.accent_line,
+        radius: 3,
     }
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(radius),
-        Stroke::new(1.0, border),
-        StrokeKind::Inside,
+}
+
+fn micro_tag(ui: &mut Ui, text: &str, tag: &MicroTag) -> Response {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(micro_tag_width(ui, tag, text), MICRO_TAG_H),
+        Sense::hover(),
     );
-    painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, font, ink);
+    paint_micro_tag(ui, rect, text, tag);
     response
 }
 
-/// `.pkbadge`: the primary-key mark the design puts beside a table's name and in the grid head — a
-/// 16px box, a 3px radius, an `accent_line` border over `accent_soft`, 11px mono ink.
-pub fn pk_badge(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
-    micro_tag(
-        ui,
+/// The width a micro tag measures for `text`: the design's padding either side, plus its 1px border.
+fn micro_tag_width(ui: &Ui, tag: &MicroTag, text: &str) -> f32 {
+    measured(ui, tag.font.clone(), text) + 2.0 * f32::from(S3) + 2.0
+}
+
+/// A micro tag painted into a rect the caller has already laid out. The widgets above measure and
+/// allocate one; a surface that lays out its own row — the grid's head does — paints the same shape
+/// through this, so the two can never drift apart.
+fn paint_micro_tag(ui: &Ui, rect: Rect, text: &str, tag: &MicroTag) {
+    let painter = ui.painter();
+    if tag.fill != Color32::TRANSPARENT {
+        painter.rect_filled(rect, CornerRadius::same(tag.radius), tag.fill);
+    }
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(tag.radius),
+        Stroke::new(1.0, tag.border),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
         text,
-        tokens.mono(T_XS),
-        tokens.text,
-        tokens.accent_dim,
-        tokens.accent_line,
-        3,
-    )
+        tag.font.clone(),
+        tag.ink,
+    );
+}
+
+/// `.pkbadge`: the primary-key mark the design puts beside a table's name and in the grid head.
+pub fn pk_badge(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
+    micro_tag(ui, text, &pk_style(tokens))
+}
+
+/// The width `.pkbadge` measures, so a surface that reserves room for one asks here rather than
+/// guessing — the grid head does exactly that before it paints it.
+pub fn pk_badge_width(ui: &Ui, tokens: &Tokens, text: &str) -> f32 {
+    micro_tag_width(ui, &pk_style(tokens), text)
+}
+
+/// `.pkbadge` painted into `rect`: `pk_badge`'s geometry, for a caller that lays the badge out
+/// itself. `rect` is the design's 16px-tall box, so a caller gets it from `pk_badge_width` and
+/// `MICRO_TAG_H`.
+pub fn paint_pk_badge(ui: &Ui, tokens: &Tokens, rect: Rect) {
+    paint_micro_tag(ui, rect, "PK", &pk_style(tokens));
 }
 
 /// `.taglite`: the design's micro tag for one quiet fact about the grid, e.g. `read-only`.
@@ -1037,11 +1073,13 @@ pub fn tag_lite(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
     micro_tag(
         ui,
         text,
-        tokens.font(T_XS),
-        tokens.text_dim,
-        Color32::TRANSPARENT,
-        tokens.stroke_strong,
-        R_CHIP,
+        &MicroTag {
+            font: tokens.font(T_XS),
+            ink: tokens.text_dim,
+            fill: Color32::TRANSPARENT,
+            border: tokens.stroke_strong,
+            radius: R_CHIP,
+        },
     )
 }
 
@@ -1052,7 +1090,8 @@ pub fn notice_band_h() -> f32 {
 }
 
 /// `.errband`: the page that failed to load — an `error_soft` fill, a 1px `--error` bottom border,
-/// the h4, the engine's message in mono, and the caller's actions pinned to the right.
+/// the warning triangle (`.ei`), the h4, the engine's message in mono, and the caller's actions
+/// pinned to the right.
 pub fn error_band(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -1065,6 +1104,8 @@ pub fn error_band(
         tokens,
         tokens.error_fill,
         tokens.error,
+        (crate::icons::Glyph::Warning, tokens.error),
+        tokens.mono(T_SM),
         tokens.error,
         title,
         message,
@@ -1072,7 +1113,8 @@ pub fn error_band(
     )
 }
 
-/// `.robanner`: the same box in `warn_soft`, for the grid that cannot be edited.
+/// `.robanner`: the same box in `warn_soft`, for the grid that cannot be edited. Its paragraph is
+/// the design's proportional `--t-xs`, unlike the error band's mono message.
 pub fn ro_banner(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -1085,6 +1127,8 @@ pub fn ro_banner(
         tokens,
         tokens.warn_fill,
         tokens.warn,
+        (crate::icons::Glyph::Lock, tokens.warn),
+        tokens.font(T_XS),
         tokens.text_dim,
         title,
         text,
@@ -1098,6 +1142,8 @@ fn notice_band(
     tokens: &Tokens,
     fill: Color32,
     edge: Color32,
+    mark: (crate::icons::Glyph, Color32),
+    message_font: FontId,
     message_ink: Color32,
     title: &str,
     message: &str,
@@ -1125,14 +1171,12 @@ fn notice_band(
     );
     child.spacing_mut().item_spacing.y = f32::from(S1);
     child.horizontal(|ui| {
+        // The band's leading mark: the design's `.ei`/`.ri` beside the h4, 1px down from its cap.
+        let (mark_rect, _) = ui.allocate_exact_size(Vec2::splat(GLYPH_BOX), Sense::hover());
+        crate::icons::glyph(ui, mark_rect.translate(Vec2::Y), mark.0, mark.1);
         ui.vertical(|ui| {
             ui.label(RichText::new(title).size(T_MD).color(tokens.text));
-            ui.label(
-                RichText::new(message)
-                    .size(T_SM)
-                    .monospace()
-                    .color(message_ink),
-            );
+            ui.label(RichText::new(message).font(message_font).color(message_ink));
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| add(ui));
     });

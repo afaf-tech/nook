@@ -83,6 +83,11 @@ pub fn show(
         (name.to_owned(), desc)
     };
 
+    // The design stacks its bands with no gap between them — each one's hairline is the next one's
+    // top edge — so the pane's stray default spacing must not add one. Precedent: `tree` and
+    // `inspector` zero it for the same reason.
+    ui.spacing_mut().item_spacing.y = 0.0;
+
     // Context toolbar: what this tab is, how to page it, what to do with it.
     design::band(ui, tokens, |ui| {
         ui.set_min_height(design::TOOLBAR_H);
@@ -169,14 +174,16 @@ pub fn show(
             }
 
             design::divider(ui, tokens);
-            if design::ghost_button(ui, tokens, "+ Row", true)
+            // The three mutating actions follow the same `editable` flag the widget does: on a grid
+            // the engine would refuse, the design's read-only frame keeps only Filter and Export.
+            if design::ghost_button(ui, tokens, "+ Row", editable)
                 .on_hover_text("Append an empty row")
                 .clicked()
             {
                 command = Some(("grid.insertRow", serde_json::json!({"values": {}})));
             }
             let selected_row = state.table(tab_index).selected.map(|(r, _)| r);
-            if design::ghost_button(ui, tokens, "Duplicate", selected_row.is_some())
+            if design::ghost_button(ui, tokens, "Duplicate", editable && selected_row.is_some())
                 .on_hover_text("Copy the selected row")
                 .clicked()
             {
@@ -184,7 +191,7 @@ pub fn show(
                     command = Some(("grid.duplicateRow", serde_json::json!({"row": row})));
                 }
             }
-            if design::ghost_button(ui, tokens, "Delete", selected_row.is_some())
+            if design::ghost_button(ui, tokens, "Delete", editable && selected_row.is_some())
                 .on_hover_text("Mark the selected row for deletion")
                 .clicked()
             {
@@ -288,7 +295,7 @@ pub fn show(
                     command = Some(("grid.clearFilter", serde_json::json!({})));
                 }
                 ui.label(
-                    RichText::new(design::matches_label(total.unwrap_or(rows.len() as u64)))
+                    RichText::new(matches_note(total, rows.len()))
                         .size(design::T_XS)
                         .monospace()
                         .color(tokens.text_dim),
@@ -325,7 +332,11 @@ pub fn show(
 
     // `.robanner`: the grid is on screen but the engine would refuse every edit.
     if !editable {
-        let (title, text) = read_only_note(&primary_key, error.is_some(), columns.len());
+        let (title, text) = read_only_note(
+            error.is_some(),
+            tab.grid.table.is_some(),
+            tab.grid.columns.len(),
+        );
         design::ro_banner(ui, tokens, title, text, |ui| {
             if design::ghost_button(ui, tokens, "Reload", true).clicked() {
                 reload = true;
@@ -354,11 +365,13 @@ pub fn show(
         (name, desc)
     });
     // The design keeps the head of an empty page: the `.empty` block below it says which of the two
-    // empty states this is, so the widget only needs room for its header.
+    // empty states this is. `height: 0` asks the widget for the head alone — with no body there is
+    // nothing to scroll, and a scroll area would floor itself at egui's 64px minimum and push the
+    // block 72px below the head instead of the design's 28.
     let empty = empty_state(rows.len(), filter_count);
     let available = match empty {
         EmptyState::None => (ui.available_height() - 96.0).max(140.0),
-        _ => design::HEAD_H,
+        _ => 0.0,
     };
     let (title, body) = empty_copy(&empty, &table_name);
     // The widget's own line only appears when it has no columns to head — a tab with no table
@@ -368,6 +381,11 @@ pub fn show(
     } else {
         title.clone()
     };
+    // A grid the engine would refuse holds no editor: a reload that fails clears the result under an
+    // open one, and a stale `editing` would bring the editor back if the next load succeeds.
+    if !editable {
+        state.table(tab_index).stop_edit();
+    }
     let view = TableView {
         columns: &specs,
         rows: &rows,
@@ -396,23 +414,29 @@ pub fn show(
             state.table(tab_index).stop_edit();
         }
         TableEvent::BeginEdit(row, column) => {
-            let value = rows
-                .get(row)
-                .and_then(|r| r.get(column))
-                .cloned()
-                .unwrap_or(datacraft_core::Value::Null);
-            state.table(tab_index).selected = Some((row, column));
-            state
-                .table(tab_index)
-                .begin_edit(row, column, value.as_text());
+            // A grid that became read-only under the pointer — a reload that failed clears the
+            // result — opens no editor: the engine would refuse the edit it staged.
+            if editable {
+                let value = rows
+                    .get(row)
+                    .and_then(|r| r.get(column))
+                    .cloned()
+                    .unwrap_or(datacraft_core::Value::Null);
+                state.table(tab_index).selected = Some((row, column));
+                state
+                    .table(tab_index)
+                    .begin_edit(row, column, value.as_text());
+            }
         }
         TableEvent::Commit(row, column, text) => {
             let name = columns.get(column).cloned().unwrap_or_default();
             state.table(tab_index).stop_edit();
-            command = Some((
-                "grid.editCell",
-                serde_json::json!({"row": row, "column": name, "value": text}),
-            ));
+            if editable {
+                command = Some((
+                    "grid.editCell",
+                    serde_json::json!({"row": row, "column": name, "value": text}),
+                ));
+            }
         }
         TableEvent::Cancel => state.table(tab_index).stop_edit(),
         TableEvent::Sort(name) => {
@@ -439,7 +463,7 @@ pub fn show(
                 }
             }),
             EmptyState::NoRows => empty_block(ui, tokens, &title, body, |ui| {
-                if design::accent_button(ui, tokens, "+ Row", true).clicked() {
+                if design::accent_button(ui, tokens, "+ Row", editable).clicked() {
                     command = Some(("grid.insertRow", serde_json::json!({"values": {}})));
                 }
                 if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
@@ -577,7 +601,9 @@ pub fn show(
                             .on_hover_text("Copy the pending statements to the clipboard")
                             .clicked()
                         {
-                            ui.ctx().copy_text(pending_sql.join(";\n"));
+                            // Every statement already ends in `;`, so they are joined by a newline:
+                            // a `;` separator would leave an empty statement between each pair.
+                            ui.ctx().copy_text(copy_sql(&pending_sql));
                         }
                     });
                 },
@@ -686,33 +712,57 @@ fn empty_block(
         });
 }
 
-/// `.robanner`'s title and body: the reason `GridState::editable` is false, in the same order the
-/// engine checks them, so the banner never blames the primary key for a page that failed to load.
+/// The clipboard text for `Copy to SQL`: the staged statements in order, one per line. Each
+/// `edit.sql` already ends in `;` (`record_edit` stores what it was handed), so nothing separates
+/// them — a `;` here would add an empty statement between every pair.
+fn copy_sql(statements: &[String]) -> String {
+    statements.join("\n")
+}
+
+/// `.robanner`'s title and body: the reason `GridState::editable` is false, in the order it checks
+/// them — bound to a table, a page that loaded, known columns, a primary key — and fed the same two
+/// facts it decides on (the binding and the schema), so the banner never blames the primary key for
+/// a page that failed to load or for a table whose shape is unknown. It is painted only when
+/// `editable()` is false, so by the last branch the primary key is what is left standing.
 fn read_only_note(
-    primary_key: &[String],
     failed: bool,
-    columns: usize,
+    bound: bool,
+    schema_columns: usize,
 ) -> (&'static str, &'static str) {
-    if failed {
-        (
-            "Editing is disabled — the page did not load",
-            "DataCraft will not edit rows it has not read. Retry the page, or check the connection.",
-        )
-    } else if columns == 0 {
-        (
-            "Editing is disabled — the table's columns are unknown",
-            "Reopen the table from the tree so DataCraft can read its shape, then edit it.",
-        )
-    } else if primary_key.is_empty() {
-        (
-            "Editing is disabled — this table has no primary key",
-            "Without a unique key DataCraft cannot identify the single row to update or delete. Selection, copy and export stay available; run an UPDATE in the query editor if you really mean it.",
-        )
-    } else {
+    if !bound {
         (
             "Editing is disabled — the grid is not bound to a table",
             "Open a table from the tree to edit its rows; this page has no table behind it.",
         )
+    } else if failed {
+        (
+            "Editing is disabled — the page did not load",
+            "DataCraft will not edit rows it has not read. Retry the page, or check the connection.",
+        )
+    } else if schema_columns == 0 {
+        (
+            "Editing is disabled — the table's columns are unknown",
+            "Reopen the table from the tree so DataCraft can read its shape, then edit it.",
+        )
+    } else {
+        (
+            "Editing is disabled — this table has no primary key",
+            "Without a unique key DataCraft cannot identify the single row to update or delete. Selection, copy and export stay available; run an UPDATE in the query editor if you really mean it.",
+        )
+    }
+}
+
+/// `.fchips`' right-hand fact. `grid.countRows` is the only command that fills `GridState::total_rows`,
+/// so paging and filtering leave it unknown; until the server has counted, the honest fact is the
+/// page in hand rather than a match total that is really just this page's length.
+fn matches_note(total: Option<u64>, rows: usize) -> String {
+    match total {
+        Some(n) => design::matches_label(n),
+        None => format!(
+            "{} {} on this page",
+            crate::table::grouped(rows as u64),
+            crate::table::plural(rows as u64, "row", "rows")
+        ),
     }
 }
 
@@ -760,15 +810,148 @@ mod tests {
 
     #[test]
     fn the_read_only_banner_names_the_reason_the_engine_gave() {
-        let key = vec!["id".to_owned()];
-        assert!(read_only_note(&key, true, 3).0.contains("did not load"));
-        assert!(read_only_note(&key, false, 0)
-            .0
-            .contains("columns are unknown"));
-        assert!(read_only_note(&[], false, 3).0.contains("no primary key"));
-        assert!(read_only_note(&key, false, 3)
+        // The four ways `GridState::editable` comes out false, fed from the schema and the binding —
+        // the two facts the caller has — so each branch is reachable from `grid::show`.
+        assert!(read_only_note(false, false, 3)
             .0
             .contains("not bound to a table"));
+        assert!(read_only_note(true, true, 3).0.contains("did not load"));
+        assert!(read_only_note(false, true, 0)
+            .0
+            .contains("columns are unknown"));
+        assert!(read_only_note(false, true, 3).0.contains("no primary key"));
+    }
+
+    #[test]
+    fn the_copied_statements_keep_one_statement_per_line() {
+        // `record_edit` stores each statement with its own `;`, so joining them on `;` left an empty
+        // statement between every pair.
+        let statements = [
+            "INSERT INTO main.t (id) VALUES (1);".to_owned(),
+            "UPDATE main.t SET a = 2 WHERE id = 1;".to_owned(),
+        ];
+        let sql = copy_sql(&statements);
+        assert_eq!(sql, format!("{}\n{}", statements[0], statements[1]));
+        assert_eq!(
+            sql.split(';')
+                .filter(|part| !part.trim().is_empty())
+                .count(),
+            2,
+            "a separator added here would leave an empty statement behind"
+        );
+    }
+
+    #[test]
+    fn the_match_note_reports_only_what_is_known() {
+        assert_eq!(matches_note(Some(1), 1), "1 match");
+        assert_eq!(matches_note(Some(12_481), 50), "12,481 matches");
+        assert_eq!(matches_note(None, 1), "1 row on this page");
+        assert_eq!(matches_note(None, 50), "50 rows on this page");
+    }
+
+    /// The pane's bands are flush, and an empty page asks the widget for its head alone: the head's
+    /// hairline is the `.empty` block's top edge and the block's own 28px padding is the first ink
+    /// under it. A scroll area around that head would floor its viewport at egui's 64px minimum and
+    /// push the block 72px further down, which is what this measures.
+    ///
+    /// The call shape mirrors `app::show`'s central pane (`CentralPanel::default_margins`) and the
+    /// band stack mirrors this module's `show`, so the numbers here are the ones the app paints.
+    #[test]
+    fn the_pane_bands_are_flush_and_an_empty_page_gets_the_head_alone() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(819.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let columns = [
+            TableColumn::new("id", "INTEGER").pk(true),
+            TableColumn::new("name", "TEXT"),
+        ];
+        let rows: Vec<Vec<datacraft_core::Value>> = Vec::new();
+        let mut marks: Vec<(&str, f32, f32)> = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let toolbar = design::band(ui, &tokens, |ui| {
+                    ui.set_min_height(design::TOOLBAR_H);
+                    ui.horizontal_centered(|ui| {
+                        let _ = design::ghost_button(ui, &tokens, "Refresh", true);
+                    });
+                });
+                let fchips = design::band_fill(
+                    ui,
+                    design::filter_row_h(design::FCHIP_H),
+                    tokens.panel_alt,
+                    design::S4,
+                    egui::Align::Center,
+                    |ui| {
+                        let _ = design::chip(ui, &tokens, "x", tokens.text);
+                    },
+                );
+                design::band_hairline(ui, &tokens, fchips);
+                marks.push(("toolbar_to_fchips", fchips.top() - toolbar.bottom(), 0.0));
+
+                ui.add_space(2.0);
+                let view = TableView {
+                    columns: &columns,
+                    rows: &rows,
+                    pending: Vec::new(),
+                    inserted: Vec::new(),
+                    selected: None,
+                    sort: None,
+                    editable: true,
+                    sortable: true,
+                    gutter: true,
+                    // An empty page asks for the head alone.
+                    height: 0.0,
+                    row_h: design::row_h(datacraft_engine::Density::Compact),
+                    empty_text: "head-only",
+                };
+                let mut state = crate::table::TableState::default();
+                let before = ui.cursor().top();
+                let _ =
+                    crate::table::show(ui, &tokens, &view, &mut state, egui::Id::new("head-only"));
+                let after = ui.cursor().top();
+                marks.push(("head_only", after - before, design::HEAD_H));
+
+                let block = egui::Frame::new()
+                    .inner_margin(egui::Margin {
+                        left: 20,
+                        right: 20,
+                        top: 28,
+                        bottom: 30,
+                    })
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = f32::from(design::S3);
+                            ui.label(
+                                RichText::new("main.customers has no rows yet.")
+                                    .size(design::T_MD)
+                                    .color(tokens.text),
+                            )
+                            .rect
+                            .top()
+                        })
+                        .inner
+                    });
+                // The block starts at the head's hairline, and its own 28px puts the first ink there.
+                marks.push(("empty_block_gap", block.response.rect.top() - after, 0.0));
+                marks.push(("first_ink_below_head", block.inner - after, 28.0));
+            });
+        });
+        // The frame paints into a texture delta the headless context never applies.
+        out.textures_delta.clear();
+        for (name, got, want) in marks {
+            assert!(
+                (got - want).abs() < 0.5,
+                "{name}: measured {got}, the design wants {want}"
+            );
+        }
     }
 
     #[test]

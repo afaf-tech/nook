@@ -8,7 +8,7 @@
 use datacraft_core::Value;
 use egui::{Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
-use crate::theme::{Tokens, HEAD_H};
+use crate::theme::{self as design, Tokens, HEAD_H};
 
 const GUTTER_W: f32 = 54.0;
 const CELL_PAD: f32 = 9.0;
@@ -97,7 +97,8 @@ pub struct TableView<'a> {
     pub sortable: bool,
     /// Row-number column on the left.
     pub gutter: bool,
-    /// Height of the scrolling body.
+    /// Height of the scrolling body. `0` for a table that has no body at all: the head is painted on
+    /// its own and the caller owns the space under it (the grid's `.empty` block does).
     pub height: f32,
     /// Row height: the density setting through `theme::row_h`.
     pub row_h: f32,
@@ -178,6 +179,7 @@ fn numeric_column(rows: &[Vec<Value>], index: usize) -> bool {
 fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
     let header_font = tokens.font(12.5);
     let cell_font = tokens.mono(12.5);
+    let badge = design::pk_badge_width(ui, tokens, "PK");
     view.columns
         .iter()
         .enumerate()
@@ -185,7 +187,8 @@ fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
             let mut width =
                 text_width(ui, &column.name, header_font.clone()) + CELL_PAD * 2.0 + 18.0;
             if column.primary_key {
-                width += 22.0;
+                // The `.pkbadge` itself plus the design's `gap: var(--s2)` before it.
+                width += badge + f32::from(design::S2);
             }
             let longest = view
                 .rows
@@ -238,108 +241,22 @@ pub fn show(
     }
     let gutter_w = if view.gutter { GUTTER_W } else { 0.0 };
     let total_w = total_width(&widths) + gutter_w;
-    let mut event = TableEvent::None;
 
+    if view.height <= 0.0 {
+        // No body, so nothing to scroll: the head is painted on its own. Wrapping it in the scroll
+        // area would floor the viewport at egui's `min_scrolled_size` (64px) and reserve the
+        // horizontal bar's strip, which put a caller's `.empty` block 72px below the head where the
+        // design keeps it 28px below — the head and the rows are the only things a page scrolls.
+        return head(ui, tokens, view, &widths, viewport_w, total_w, id);
+    }
+
+    let mut event = TableEvent::None;
     egui::ScrollArea::horizontal()
         .id_salt(id.with("h"))
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
-
-            // Header: names, sort caret, primary-key tag.
-            let (header_rect, _) =
-                ui.allocate_exact_size(Vec2::new(total_w, HEAD_H), Sense::hover());
-            let header_fill = egui::Rect::from_min_max(
-                header_rect.min,
-                egui::pos2(header_rect.left() + viewport_w, header_rect.bottom()),
-            );
-            ui.painter().rect_filled(
-                header_fill,
-                CornerRadius {
-                    nw: tokens.radius,
-                    ne: tokens.radius,
-                    sw: 0,
-                    se: 0,
-                },
-                tokens.grid_header,
-            );
-            if view.gutter {
-                let gutter_head =
-                    egui::Rect::from_min_size(header_rect.min, Vec2::new(gutter_w, HEAD_H));
-                ui.painter()
-                    .rect_filled(gutter_head, CornerRadius::ZERO, tokens.panel_alt);
-                ui.painter().text(
-                    gutter_head.center(),
-                    Align2::CENTER_CENTER,
-                    "#",
-                    tokens.font(11.0),
-                    tokens.text_faint,
-                );
-            }
-            ui.painter().hline(
-                header_fill.left()..=header_fill.right(),
-                header_rect.bottom() - 0.5,
-                Stroke::new(1.0, tokens.stroke),
-            );
-            let mut x = header_rect.left() + gutter_w;
-            for (index, column) in view.columns.iter().enumerate() {
-                let cell = Rect::from_min_size(
-                    egui::pos2(x, header_rect.top()),
-                    Vec2::new(widths[index], HEAD_H),
-                );
-                let response = ui
-                    .interact(cell, id.with(("head", index)), Sense::click())
-                    .on_hover_text(format!("{}  {}", column.name, column.type_name));
-                if response.hovered() {
-                    ui.painter()
-                        .rect_filled(cell, CornerRadius::ZERO, tokens.hover);
-                }
-                let sorted = view
-                    .sort
-                    .as_ref()
-                    .filter(|(name, _)| name == &column.name)
-                    .map(|(_, desc)| *desc);
-                let label = match sorted {
-                    Some(true) => format!("{} ▼", column.name),
-                    Some(false) => format!("{} ▲", column.name),
-                    None => column.name.clone(),
-                };
-                ui.painter().text(
-                    egui::pos2(cell.left() + CELL_PAD, cell.center().y),
-                    Align2::LEFT_CENTER,
-                    label,
-                    tokens.font(12.5),
-                    if sorted.is_some() {
-                        tokens.accent
-                    } else {
-                        tokens.text
-                    },
-                );
-                if column.primary_key {
-                    let tag = Rect::from_min_size(
-                        egui::pos2(cell.right() - CELL_PAD - 18.0, cell.center().y - 7.0),
-                        Vec2::new(18.0, 14.0),
-                    );
-                    ui.painter()
-                        .rect_filled(tag, CornerRadius::same(3), tokens.accent_dim);
-                    ui.painter().text(
-                        tag.center(),
-                        Align2::CENTER_CENTER,
-                        "PK",
-                        tokens.font(9.5),
-                        tokens.accent,
-                    );
-                }
-                ui.painter().vline(
-                    cell.right() - 0.5,
-                    cell.top()..=cell.bottom(),
-                    Stroke::new(1.0, tokens.grid_line),
-                );
-                if response.clicked() && view.sortable {
-                    event = TableEvent::Sort(column.name.clone());
-                }
-                x += widths[index];
-            }
+            event = head(ui, tokens, view, &widths, viewport_w, total_w, id);
 
             egui::ScrollArea::vertical()
                 .id_salt(id.with("v"))
@@ -425,7 +342,11 @@ pub fn show(
                                 egui::pos2(x, row_rect.top()),
                                 Vec2::new(widths[column_index], view.row_h),
                             );
-                            let editing = state.editing == Some((row_index, column_index));
+                            // An editor only exists while the grid can be edited: a reload that
+                            // fails clears the result under an open editor, and a `Commit` from it
+                            // would be refused by the engine.
+                            let editing =
+                                view.editable && state.editing == Some((row_index, column_index));
                             let dirty = view.editable
                                 && (view.pending.contains(&(row_index, column_index)) || is_new);
                             let value = row.get(column_index).cloned().unwrap_or(Value::Null);
@@ -553,5 +474,110 @@ pub fn show(
                 });
         });
 
+    event
+}
+
+/// The head: names, the sort caret and the `.pkbadge`, painted either inside the scroll area that
+/// carries the body or — when the caller asked for no body — straight into the page.
+fn head(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    view: &TableView<'_>,
+    widths: &[f32],
+    viewport_w: f32,
+    total_w: f32,
+    id: egui::Id,
+) -> TableEvent {
+    let mut event = TableEvent::None;
+    let gutter_w = if view.gutter { GUTTER_W } else { 0.0 };
+    let badge_w = design::pk_badge_width(ui, tokens, "PK");
+    // Header: names, sort caret, primary-key tag.
+    let (header_rect, _) = ui.allocate_exact_size(Vec2::new(total_w, HEAD_H), Sense::hover());
+    let header_fill = egui::Rect::from_min_max(
+        header_rect.min,
+        egui::pos2(header_rect.left() + viewport_w, header_rect.bottom()),
+    );
+    ui.painter().rect_filled(
+        header_fill,
+        CornerRadius {
+            nw: tokens.radius,
+            ne: tokens.radius,
+            sw: 0,
+            se: 0,
+        },
+        tokens.grid_header,
+    );
+    if view.gutter {
+        let gutter_head = egui::Rect::from_min_size(header_rect.min, Vec2::new(gutter_w, HEAD_H));
+        ui.painter()
+            .rect_filled(gutter_head, CornerRadius::ZERO, tokens.panel_alt);
+        ui.painter().text(
+            gutter_head.center(),
+            Align2::CENTER_CENTER,
+            "#",
+            tokens.font(11.0),
+            tokens.text_faint,
+        );
+    }
+    ui.painter().hline(
+        header_fill.left()..=header_fill.right(),
+        header_rect.bottom() - 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+    let mut x = header_rect.left() + gutter_w;
+    for (index, column) in view.columns.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            egui::pos2(x, header_rect.top()),
+            Vec2::new(widths[index], HEAD_H),
+        );
+        let response = ui
+            .interact(cell, id.with(("head", index)), Sense::click())
+            .on_hover_text(format!("{}  {}", column.name, column.type_name));
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(cell, CornerRadius::ZERO, tokens.hover);
+        }
+        let sorted = view
+            .sort
+            .as_ref()
+            .filter(|(name, _)| name == &column.name)
+            .map(|(_, desc)| *desc);
+        let label = match sorted {
+            Some(true) => format!("{} ▼", column.name),
+            Some(false) => format!("{} ▲", column.name),
+            None => column.name.clone(),
+        };
+        ui.painter().text(
+            egui::pos2(cell.left() + CELL_PAD, cell.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            tokens.font(12.5),
+            if sorted.is_some() {
+                tokens.accent
+            } else {
+                tokens.text
+            },
+        );
+        if column.primary_key {
+            // `.pkbadge`, through the same definition the toolbar's badge uses.
+            let tag = Rect::from_min_size(
+                egui::pos2(
+                    cell.right() - CELL_PAD - badge_w,
+                    cell.center().y - design::MICRO_TAG_H / 2.0,
+                ),
+                Vec2::new(badge_w, design::MICRO_TAG_H),
+            );
+            design::paint_pk_badge(ui, tokens, tag);
+        }
+        ui.painter().vline(
+            cell.right() - 0.5,
+            cell.top()..=cell.bottom(),
+            Stroke::new(1.0, tokens.grid_line),
+        );
+        if response.clicked() && view.sortable {
+            event = TableEvent::Sort(column.name.clone());
+        }
+        x += widths[index];
+    }
     event
 }
