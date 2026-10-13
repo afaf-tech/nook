@@ -1,6 +1,7 @@
 //! The command surface. Each module owns one area of the app; every command is a function here,
 //! reachable by id from the ribbon, the CLI, the control channel and MCP.
 
+pub mod ai;
 pub mod app;
 pub mod conn;
 pub mod diagram;

@@ -135,6 +135,7 @@ fn layers() -> i32 {
     const ORDER: &[(&str, usize)] = &[
         ("nook-core", 0),
         ("nook-model", 1),
+        ("nook-ai", 2),
         ("nook-drivers", 2),
         ("nook-engine", 3),
         ("nook-mcp", 4),

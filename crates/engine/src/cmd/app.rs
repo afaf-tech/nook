@@ -13,7 +13,7 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("Report the current preferences."),
         CommandSpec::new("app.setSetting", "Change a preference", "App", set_setting)
             .params(r#"{"key":"theme","value":"light"}"#)
-            .help("Set one preference: theme, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects."),
+            .help("Set one preference: theme, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout."),
         CommandSpec::new("app.log", "Message log", "App", get_log)
             .params(r#"{"limit":50}"#)
             .help("Recent messages, oldest first."),
@@ -54,6 +54,16 @@ fn get_settings(session: &mut Session, _p: &crate::Params) -> Result<serde_json:
         "auto_commit_edits": s.auto_commit_edits,
         "keyword_case": match s.keyword_case { KeywordCase::Upper => "upper", KeywordCase::Lower => "lower", KeywordCase::Preserve => "preserve" },
         "show_system_objects": s.show_system_objects,
+        "ai": {
+            "provider": s.ai.provider.as_str(),
+            "model": s.ai.model(),
+            "base_url": s.ai.base(),
+            "endpoint": nook_ai::endpoint(&s.ai),
+            "max_tokens": s.ai.max_tokens,
+            "temperature": s.ai.temperature,
+            "timeout_secs": s.ai.timeout_secs,
+            "key_set": matches!(crate::profiles::ai_key(s.ai.provider.as_str()), Ok(Some(_))),
+        },
         "config_dir": crate::profiles::config_dir().to_string_lossy(),
         "profiles": session.profiles.list().len(),
         "jobs": session.jobs.jobs.len(),
@@ -95,14 +105,60 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
             session.settings.keyword_case = KeywordCase::parse(&value)
                 .ok_or_else(|| Error::config("keyword_case must be upper, lower or preserve"))?;
         }
+        "ai_provider" => {
+            session.settings.ai.provider = nook_ai::Provider::parse(&value).ok_or_else(|| {
+                Error::config(
+                    "ai_provider must be openai, anthropic, deepseek, kimi, glm, ollama or vllm",
+                )
+            })?;
+            save_ai(session)?;
+        }
+        "ai_model" => {
+            session.settings.ai.model = value.clone();
+            save_ai(session)?;
+        }
+        "ai_base_url" => {
+            session.settings.ai.base_url = value.clone();
+            save_ai(session)?;
+        }
+        "ai_max_tokens" => {
+            session.settings.ai.max_tokens = value
+                .parse::<u32>()
+                .map_err(|_| Error::config("ai_max_tokens must be a whole number"))?
+                .clamp(1, 200_000);
+            save_ai(session)?;
+        }
+        "ai_temperature" => {
+            let temperature: f32 = value
+                .parse()
+                .map_err(|_| Error::config("ai_temperature must be a number"))?;
+            session.settings.ai.temperature = temperature.clamp(0.0, 2.0);
+            save_ai(session)?;
+        }
+        "ai_timeout" => {
+            let seconds: u64 = value
+                .parse()
+                .map_err(|_| Error::config("ai_timeout must be a whole number of seconds"))?;
+            session.settings.ai.timeout_secs = seconds.clamp(1, 3600);
+            save_ai(session)?;
+        }
         other => {
             return Err(Error::config(format!(
-                "unknown preference '{other}'; try theme, density, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects"
+                "unknown preference '{other}'; try theme, density, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout"
             )))
         }
     }
     session.log(Level::Info, format!("{key} = {value}"));
     get_settings(session, p)
+}
+
+/// The AI settings are stored as one nested object and written as a unit, so a preference change
+/// cannot leave the file disagreeing with the running session.
+fn save_ai(session: &mut Session) -> Result<()> {
+    let value = serde_json::to_value(&session.settings.ai)
+        .map_err(|e| Error::internal(format!("serialise ai settings: {e}")))?;
+    session.profiles.set_setting("ai", value);
+    session.profiles.save()
 }
 
 fn clamp_usize(value: &str, min: usize, max: usize) -> Result<usize> {

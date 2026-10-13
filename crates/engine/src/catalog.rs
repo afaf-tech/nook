@@ -969,6 +969,37 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Browser build",
         "not implemented; this is a native tool",
     ),
+    // ---------------------------------------------------------------- AI
+    (
+        "AI",
+        "ai.generate",
+        "Generate SQL",
+        "one sentence in, SQL out; an @table mention pulls in that table's structure",
+    ),
+    (
+        "AI",
+        "ai.providers",
+        "AI providers",
+        "OpenAI, Anthropic, DeepSeek, Kimi, GLM, Ollama and vLLM, each with its own base URL",
+    ),
+    (
+        "AI",
+        "ai.setKey",
+        "AI API key",
+        "stored in the login keychain, never in the profile file",
+    ),
+    (
+        "AI",
+        "ai.clearKey",
+        "Forget an AI key",
+        "removes the keychain entry",
+    ),
+    (
+        "AI",
+        "ai.tables",
+        "Tables for the prompt",
+        "the candidates an @ mention resolves against, from the live catalog",
+    ),
 ];
 
 pub fn catalog() -> &'static [CatalogEntry] {

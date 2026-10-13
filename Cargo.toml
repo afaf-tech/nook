@@ -7,6 +7,7 @@ members = [
   "crates/mcp",
   "apps/nook-cli",
   "crates/core",
+  "crates/ai",
   "crates/model",
   "crates/drivers",
   "crates/engine",
@@ -20,6 +21,7 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 nook-core = { path = "crates/core" }
+nook-ai = { path = "crates/ai" }
 nook-model = { path = "crates/model" }
 nook-drivers = { path = "crates/drivers" }
 nook-engine = { path = "crates/engine" }

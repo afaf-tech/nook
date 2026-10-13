@@ -175,6 +175,44 @@ pub fn ssh_account(id: &str) -> String {
     format!("{id}#ssh")
 }
 
+/// The keychain account that holds a provider's AI key, e.g. `ai.openai`. The `ai.` prefix keeps it
+/// clear of a connection id, the way `#ssh` does for the tunnel password, so deleting a profile can
+/// never take an API key with it.
+pub fn ai_account(provider: &str) -> String {
+    format!("ai.{provider}")
+}
+
+/// The sentence Nook owns for "this platform has no keychain to keep an API key in".
+pub const NO_KEYCHAIN_AI: &str =
+    "this system has no OS keychain, so the AI key cannot be saved; set NOOK_AI_KEY in the \
+environment for the run instead";
+
+/// The key for a provider: `NOOK_AI_KEY` first, then the login keychain.
+///
+/// The environment comes first on purpose — it is the only source on a platform with no keychain,
+/// and it is how a key stays out of every file for a single run. `None` means there is no key,
+/// which is a normal state for a local server and a refusal for a hosted one.
+pub fn ai_key(provider: &str) -> Result<Option<String>> {
+    if let Some(key) = std::env::var("NOOK_AI_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+    {
+        return Ok(Some(key));
+    }
+    if !keychain_available() {
+        return Ok(None);
+    }
+    keychain_lookup(&ai_account(provider))
+}
+
+pub fn save_ai_key(provider: &str, key: &str) -> Result<()> {
+    keychain_store(&ai_account(provider), key)
+}
+
+pub fn clear_ai_key(provider: &str) -> Result<()> {
+    keychain_delete(&ai_account(provider))
+}
+
 /// The one sentence Nook owns for "there is no keychain here": `conn.sshPassword` refuses with
 /// it, the dialog shows it beside its disabled toggle, and `--ssh-askpass` has no source for it. A
 /// `ponytail:` the fallback is ssh's own prompt on the terminal the app was started from — an

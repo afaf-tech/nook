@@ -228,6 +228,7 @@ pub fn registry() -> &'static [CommandSpec] {
     REGISTRY.get_or_init(|| {
         let mut all = Vec::new();
         all.extend(cmd::app::commands());
+        all.extend(cmd::ai::commands());
         all.extend(cmd::conn::commands());
         all.extend(cmd::schema::commands());
         all.extend(cmd::grid::commands());
@@ -544,6 +545,9 @@ pub struct Settings {
     pub keyword_case: sqltext::KeywordCase,
     pub keep_history: usize,
     pub show_system_objects: bool,
+    /// The AI provider, model and endpoint behind `ai.generate`. The key is not here: it lives in
+    /// the keychain, so the profile file never holds a secret.
+    pub ai: nook_ai::AiConfig,
 }
 
 impl Default for Settings {
@@ -559,6 +563,7 @@ impl Default for Settings {
             keyword_case: sqltext::KeywordCase::Upper,
             keep_history: 500,
             show_system_objects: false,
+            ai: nook_ai::AiConfig::default(),
         }
     }
 }
@@ -601,6 +606,13 @@ impl Session {
             .and_then(Density::parse)
         {
             settings.density = density;
+        }
+        // The AI settings are one nested object, so a field added in a later version does not
+        // invalidate a blob an older run wrote — `serde` defaults fill the gaps.
+        if let Some(ai) = profiles.settings().get("ai") {
+            if let Ok(cfg) = serde_json::from_value::<nook_ai::AiConfig>(ai.clone()) {
+                settings.ai = cfg;
+            }
         }
         let mut session = Session {
             conns: Vec::new(),

@@ -54,6 +54,9 @@ fn usage() -> String {
   users <conn> [--grants USER]
   diagram <conn> --out schema.svg [--schema S]
   chart <conn> "<SQL>" [--chart KIND] [--label COL]
+  ai <conn> "<prompt>" [--tables a,b] [--json]   draft SQL with an AI provider
+  ai providers [--json]                  providers, their endpoints and whether a key is set
+  ai key <provider> [--remove]           save a key from stdin, or forget the stored one
   job list | run <id> | serve [--interval S]
   mcp                                    MCP server on stdio
   help
@@ -91,6 +94,7 @@ fn run(args: &[String]) -> CliResult {
         "users" => users(args),
         "diagram" => diagram(args),
         "chart" => chart(args),
+        "ai" => ai(args),
         "job" => job(args),
         "mcp" => nook_mcp::serve_stdio(usage()).map_err(|e| e.to_string()),
         other => Err(format!("unknown command '{other}'\n\n{}", usage())),
@@ -1099,6 +1103,173 @@ fn chart(args: &[String]) -> CliResult {
         }
     }
     Ok(())
+}
+
+/// `ai`: draft SQL with a provider, list the providers, or manage an API key.
+///
+/// A key is read from stdin rather than taken as an argument so it never lands in the process table.
+fn ai(args: &[String]) -> CliResult {
+    let positionals = positional(args, 1);
+    match positionals.first().map(String::as_str).unwrap_or("") {
+        "providers" => ai_providers(args),
+        "key" => ai_key(args),
+        _ => ai_generate(args),
+    }
+}
+
+fn ai_generate(args: &[String]) -> CliResult {
+    let positionals = positional(args, 1);
+    let conn = positionals
+        .first()
+        .ok_or("pass a connection: nook-cli ai <conn> \"<prompt>\"")?;
+    let prompt = positionals
+        .get(1)
+        .ok_or("pass a prompt: nook-cli ai <conn> \"<prompt>\"")?;
+    let mut session = Session::new();
+    let index = open_connection(&mut session, conn).map_err(|e| e.to_string())?;
+    let mut params = serde_json::Map::new();
+    params.insert("conn".into(), json!(session.conns[index].cfg.id));
+    params.insert("prompt".into(), json!(prompt));
+    if let Some(list) = opt(args, "--tables") {
+        let names: Vec<String> = list
+            .split(',')
+            .map(|table| table.trim().to_string())
+            .filter(|table| !table.is_empty())
+            .collect();
+        if !names.is_empty() {
+            params.insert("tables".into(), json!(names));
+        }
+    }
+    // The app reads the session log itself; a shell has nothing else to read it from, and a mention
+    // that matched no table is only ever reported here.
+    let logged = session.messages.len();
+    let out = run_command(
+        &mut session,
+        "ai.generate",
+        serde_json::Value::Object(params),
+    )
+    .map_err(|e| e.to_string())?;
+    warn_from_log(&session, logged);
+    if flag(args, "--json") {
+        return print_json(&out);
+    }
+    // The SQL alone goes to stdout so it can be piped onward; where it came from goes to stderr.
+    println!("{}", out["sql"].as_str().unwrap_or(""));
+    let tables: Vec<&str> = out["tables"]
+        .as_array()
+        .map(|list| list.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    eprintln!(
+        "-- {} via {} · {}",
+        out["model"].as_str().unwrap_or(""),
+        out["endpoint"].as_str().unwrap_or(""),
+        if tables.is_empty() {
+            "no table structure".to_string()
+        } else {
+            format!("tables: {}", tables.join(", "))
+        }
+    );
+    Ok(())
+}
+
+fn ai_providers(args: &[String]) -> CliResult {
+    let mut session = Session::new();
+    let out = run_command(&mut session, "ai.providers", json!({})).map_err(|e| e.to_string())?;
+    if flag(args, "--json") {
+        return print_json(&out);
+    }
+    println!(
+        "active {} · model {} · {}{}",
+        out["active"].as_str().unwrap_or(""),
+        out["model"].as_str().unwrap_or(""),
+        out["endpoint"].as_str().unwrap_or(""),
+        if out["keychain"].as_bool().unwrap_or(false) {
+            ""
+        } else {
+            " · no keychain on this platform: set NOOK_AI_KEY"
+        }
+    );
+    for provider in out["providers"].as_array().cloned().unwrap_or_default() {
+        let key = match (
+            provider["key_set"].as_bool().unwrap_or(false),
+            provider["needs_key"].as_bool().unwrap_or(true),
+        ) {
+            (true, _) => "key set",
+            (_, true) => "no key",
+            _ => "no key needed",
+        };
+        println!(
+            "  {:<10} {:<22} {:<15} {}",
+            provider["id"].as_str().unwrap_or(""),
+            provider["label"].as_str().unwrap_or(""),
+            key,
+            if provider["active"].as_bool().unwrap_or(false) {
+                "<- active"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(())
+}
+
+fn ai_key(args: &[String]) -> CliResult {
+    let positionals = positional(args, 1);
+    let provider = positionals
+        .get(1)
+        .ok_or("pass a provider: nook-cli ai key <provider> [--remove]")?;
+    let mut session = Session::new();
+    if flag(args, "--remove") {
+        let out = run_command(&mut session, "ai.clearKey", json!({"provider": provider}))
+            .map_err(|e| e.to_string())?;
+        println!(
+            "{}: key removed",
+            out["provider"].as_str().unwrap_or(provider)
+        );
+        return Ok(());
+    }
+    eprint!("key for {provider} (read from stdin, never from an argument): ");
+    let _ = std::io::stderr().flush();
+    let key = read_secret()?;
+    let out = run_command(
+        &mut session,
+        "ai.setKey",
+        json!({"provider": provider, "key": key}),
+    )
+    .map_err(|e| e.to_string())?;
+    println!(
+        "{}: key saved",
+        out["provider"].as_str().unwrap_or(provider)
+    );
+    Ok(())
+}
+
+/// The warnings and errors a command left in the session log, on stderr. Errors here are not fatal
+/// — the command already returned its result — but they are the only trace of a partly met request.
+fn warn_from_log(session: &Session, since: usize) {
+    for message in session.messages.iter().skip(since) {
+        let level = match message.level {
+            Level::Warn => "warn",
+            Level::Error => "error",
+            _ => continue,
+        };
+        eprintln!("nook: {level}: {}", message.text);
+    }
+}
+
+/// One line from stdin, for a secret that must not show up in `ps`.
+fn read_secret() -> std::result::Result<String, String> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("stdin: {e}"))?;
+    let key = line.trim().to_string();
+    if key.is_empty() {
+        return Err("no key on stdin".into());
+    }
+    Ok(key)
 }
 
 fn job(args: &[String]) -> CliResult {

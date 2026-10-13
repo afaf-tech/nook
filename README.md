@@ -15,6 +15,7 @@ registered command shared by all three surfaces.
 | **Browse** | Catalog read in one pass: schemas, tables, views, columns, types, defaults, comments, indexes, foreign keys, row estimates and sizes |
 | **Data grid** | Paging, sort by any column, `WHERE` filter, inline cell editing with type coercion, insert/duplicate/delete/`NULL`, a pending-changes list showing the exact statements, one-transaction apply with rollback on first failure |
 | **Query editor** | Multi-statement scripts, run statement at cursor, formatter, completion from the live catalog, `EXPLAIN`/`EXPLAIN ANALYZE`, history, snippets, transactions |
+| **AI** | Natural-language prompt to SQL across 7 providers — OpenAI, Anthropic, DeepSeek, Kimi, GLM, Ollama, vLLM — each with its own base URL; `@table` in the prompt expands to that table's columns, keys and indexes; API keys in the login keychain, never in the profile file |
 | **Design** | Create, copy, rename, drop tables; add/drop/rename/retype columns; nullability and defaults; indexes; foreign keys; views; object DDL; object search |
 | **Transfer** | Copy tables between any two connections, across engines (SQLite ↔ PostgreSQL ↔ MySQL), with page-batched transactions and a per-table report |
 | **Synchronize** | Row-level data sync by primary key (dry run first), structure comparison that emits DDL, structure sync with destructive steps gated |
@@ -73,6 +74,9 @@ nook-cli sql postgres://localhost/shop "select status, count(*) from orders grou
 nook-cli dump postgres://localhost/shop --out backup.sql
 nook-cli transfer --from sqlite:./shop.db --to postgres://localhost/stage --tables '*'
 nook-cli datagen sqlite:./shop.db customers --rows 500 --seed 7
+nook-cli ai sqlite:./shop.db "revenue per month for @orders"     # prompt to SQL
+nook-cli ai providers                                            # endpoints and whether a key is set
+printf '%s' "$OPENAI_API_KEY" | nook-cli ai key openai            # the key comes from stdin, not argv
 ```
 
 A connection is a saved profile name or a URI: `sqlite:./app.db`,
@@ -113,6 +117,7 @@ generated coverage report, and a test keeps it above a floor that only rises. `c
 |---|---|---|
 | L0 | `nook-core` | errors, cell type, connection profiles, identifiers and literals per dialect |
 | L1 | `nook-model` | catalog, result sets, grid edit plans, structure diffs, DDL, ER layout |
+| L2 | `nook-ai` | chat client for the 7 providers, two wire formats, `@table` prompt context |
 | L2 | `nook-drivers` | `Driver` trait; SQLite, PostgreSQL, MySQL; transfer, sync, dump, backup |
 | L3 | `nook-engine` | sessions, command registry, feature catalog, parity, jobs, data generation, reports |
 | L4 | `nook-mcp` | MCP server over stdio |

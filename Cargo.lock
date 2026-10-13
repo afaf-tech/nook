@@ -2056,6 +2056,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nook-ai"
+version = "0.1.0"
+dependencies = [
+ "nook-core",
+ "nook-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nook-cli"
 version = "0.1.0"
 dependencies = [
@@ -2094,6 +2104,7 @@ dependencies = [
 name = "nook-engine"
 version = "0.1.0"
 dependencies = [
+ "nook-ai",
  "nook-core",
  "nook-drivers",
  "nook-model",
