@@ -48,6 +48,12 @@ pub const STATUS_H: f32 = 26.0;
 
 /// Panel widths and the small geometry the shell and the lists share.
 pub const TREE_W: f32 = 300.0;
+/// The object inspector, from the design's `--w-inspector`.
+pub const INSPECTOR_W: f32 = 320.0;
+/// Where the tree's, the grid's and the inspector's pane heads all end, from the design's
+/// `--h-panehead` (40 + 24 + 40 + 28). The three panes start their bodies on the same line only if
+/// each one's bands add up to this, so it is one number rather than three sums.
+pub const PANE_HEAD_H: f32 = 132.0;
 pub const INDENT_STEP: f32 = 14.0;
 pub const INDICATOR_W: f32 = 2.0;
 /// Activity rail: a 44px column of 32px workspace buttons.
@@ -414,6 +420,38 @@ pub fn primary_button(ui: &mut Ui, tokens: &Tokens, label: &str, enabled: bool) 
     )
 }
 
+/// The design's `.btn.ba`: a 24px button outlined in `accent_line` with `accent` ink, which fills
+/// with `accent_dim` under the pointer. The quiet half of the pair whose other half is
+/// [`primary_button`], and the one the panes use for "open the thing this panel is describing".
+pub fn accent_button(ui: &mut Ui, tokens: &Tokens, label: &str, enabled: bool) -> Response {
+    let text = RichText::new(label).size(T_SM).color(if enabled {
+        tokens.accent
+    } else {
+        tokens.text_dim
+    });
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new(text)
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(
+                1.0,
+                if enabled {
+                    tokens.accent_line
+                } else {
+                    tokens.stroke
+                },
+            ))
+            .corner_radius(CornerRadius::same(R_CTL))
+            .min_size(Vec2::new(0.0, CHIP_H)),
+    );
+    if response.hovered() && enabled {
+        let rect = response.rect;
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(R_CTL), tokens.accent_dim);
+    }
+    response
+}
+
 /// Quiet button for toolbars: nothing painted until the pointer is over it.
 pub fn ghost_button(ui: &mut Ui, tokens: &Tokens, label: &str, enabled: bool) -> Response {
     // Disabled has to read as "not now", not as "not drawn".
@@ -516,6 +554,104 @@ pub fn segmented(ui: &mut Ui, tokens: &Tokens, options: &[(&str, bool)]) -> Opti
             *label,
             font.clone(),
             if *selected {
+                tokens.text
+            } else {
+                tokens.text_dim
+            },
+        );
+        if response.clicked() {
+            clicked = Some(index);
+        }
+    }
+    clicked
+}
+
+/// The item rounding inside a pane's segmented control: the design's 3px, one less than `R_CTL`.
+const SEG_ITEM_RADIUS: u8 = 3;
+
+/// The design's other segmented control: the one its panes use (`.tabs .seg` in the inspector,
+/// `.filterblk .seg` in the tree). Same container as [`segmented`], but the items are equal widths
+/// across `width`, `inset` is both the inner padding and the gap between items, and the selection is
+/// marked with an `accent_line` ring rather than the top bar's bottom indicator. `height` and `inset`
+/// are the caller's literals because the design states them per pane: 28 with a 1px inset in the
+/// tree, 26 with a 2px inset in the inspector. The items take what is left over, so the selected
+/// item's ink stays the caller's choice — the inspector names it in `accent`, the tree in `text`.
+/// The room the items of a pane segmented control share: the container less its 1px border and its
+/// inset, less the gaps between the items, split equally. `None` when that leaves under a pixel for
+/// an item — the caller asked for a strip its labels cannot fit, and an inverted child rect panics.
+pub fn segment_item(outer: Vec2, inset: f32, count: usize) -> Option<(f32, f32)> {
+    if count == 0 {
+        return None;
+    }
+    let inner = Vec2::new(
+        (outer.x - 2.0 * (1.0 + inset)).max(0.0),
+        (outer.y - 2.0 * (1.0 + inset)).max(0.0),
+    );
+    let count = count as f32;
+    let item_width = ((inner.x - inset * (count - 1.0)) / count).max(0.0);
+    if item_width < 1.0 || inner.y < 1.0 {
+        return None;
+    }
+    Some((item_width, inner.y))
+}
+
+pub fn pane_segmented(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    options: &[(&str, bool)],
+    width: f32,
+    height: f32,
+    inset: f32,
+    selected_ink: Color32,
+) -> Option<usize> {
+    if options.is_empty() {
+        return None;
+    }
+    let font = tokens.font(T_XS);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let radius = CornerRadius::same(R_CTL);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+
+    // The border row and the padding are spent before the items get their share.
+    let inner = rect.shrink(1.0 + inset);
+    let (item_width, item_height) = segment_item(rect.size(), inset, options.len())?;
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.spacing_mut().item_spacing.x = inset;
+    let mut clicked = None;
+    for (index, (label, selected)) in options.iter().enumerate() {
+        let (item, response) =
+            child.allocate_exact_size(Vec2::new(item_width, item_height), Sense::click());
+        let painter = child.painter();
+        if *selected {
+            painter.rect_filled(item, CornerRadius::same(SEG_ITEM_RADIUS), tokens.accent_dim);
+            painter.rect_stroke(
+                item,
+                CornerRadius::same(SEG_ITEM_RADIUS),
+                Stroke::new(1.0, tokens.accent_line),
+                StrokeKind::Inside,
+            );
+        } else if response.hovered() {
+            painter.rect_filled(item, CornerRadius::same(SEG_ITEM_RADIUS), tokens.panel_high);
+        }
+        painter.text(
+            item.center(),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            if *selected {
+                selected_ink
+            } else if response.hovered() {
                 tokens.text
             } else {
                 tokens.text_dim
@@ -692,9 +828,12 @@ pub fn segmented_width(ui: &Ui, tokens: &Tokens, labels: &[&str]) -> f32 {
 }
 
 /// Width of an `.engine` tag: uppercase mono with 6px of padding each side and a 1px border.
+///
+/// The text is upper-cased here because that is what [`paint_tag`] draws: measuring the string as
+/// passed under-reserves for a lowercase caller.
 pub fn tag_width(ui: &Ui, tokens: &Tokens, text: &str) -> f32 {
     ui.painter()
-        .layout_no_wrap(text.to_owned(), tokens.mono(T_XS), Color32::PLACEHOLDER)
+        .layout_no_wrap(text.to_uppercase(), tokens.mono(T_XS), Color32::PLACEHOLDER)
         .size()
         .x
         + 2.0 * f32::from(S3)
@@ -843,6 +982,34 @@ pub fn outlined(ui: &Ui, rect: egui::Rect, tokens: &Tokens, radius: CornerRadius
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_pane_head_adds_up_to_the_same_line() {
+        // The tree, the grid and the inspector start their bodies on one line only while each head
+        // adds up to the design's `--h-panehead`. The tree is 34 + its filter block; the inspector is
+        // its object header, its tab strip and the list head.
+        assert_eq!(
+            crate::tree::HEADER_H + crate::tree::FILTER_BLOCK_H,
+            PANE_HEAD_H
+        );
+        assert_eq!(
+            crate::inspector::HEADER_H + TOOLBAR_H + HEAD_H,
+            PANE_HEAD_H,
+            "the inspector's bands no longer add up to the pane head"
+        );
+    }
+
+    #[test]
+    fn a_pane_segmented_control_shares_its_inner_width_and_refuses_the_impossible() {
+        let (width, height) =
+            segment_item(Vec2::new(124.0, 28.0), 1.0, 4).expect("four items fit in a 124px strip");
+        assert_eq!(width, (124.0 - 4.0 - 3.0) / 4.0);
+        assert_eq!(height, 24.0);
+        // 28 minus the 1px border and the 1px inset on each side.
+        assert!(segment_item(Vec2::new(6.0, 28.0), 2.0, 4).is_none());
+        assert!(segment_item(Vec2::new(124.0, 2.0), 1.0, 4).is_none());
+        assert!(segment_item(Vec2::new(124.0, 28.0), 1.0, 0).is_none());
+    }
 
     /// WCAG 2.1 relative luminance of an sRGB colour.
     fn luminance(colour: Color32) -> f32 {

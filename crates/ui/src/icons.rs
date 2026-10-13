@@ -31,6 +31,8 @@ pub enum Glyph {
     Search,
     /// A sun: the theme toggle, which the design pairs with the name of the theme it switches to.
     Sun,
+    /// A table: the object inspector's header, next to the name of what it is describing.
+    Table,
 }
 
 /// The design's stroke, in its 14-unit box.
@@ -205,6 +207,14 @@ fn geometry(glyph: Glyph, at: &impl Fn(f32, f32) -> Pos2, scale: f32) -> (Lines,
             vec![(at(6.2, 6.2), Vec2::splat(4.2 * scale))],
             Vec::new(),
         ),
+        Glyph::Table => (
+            vec![
+                vec![at(1.5, 5.5), at(12.5, 5.5)],
+                vec![at(6.0, 5.5), at(6.0, 11.5)],
+            ],
+            Vec::new(),
+            vec![(box_of(at, 1.5, 2.5, 11.0, 9.0), 1.5)],
+        ),
         Glyph::Sun => (
             vec![
                 vec![at(7.0, 1.4), at(7.0, 3.0)],
@@ -244,7 +254,7 @@ fn bounds(paths: &[Vec<Pos2>], rings: &[(Pos2, Vec2)], boxes: &[(Rect, f32)]) ->
 mod tests {
     use super::*;
 
-    const ALL: [Glyph; 8] = [
+    const ALL: [Glyph; 9] = [
         Glyph::Database,
         Glyph::Queries,
         Glyph::Jobs,
@@ -253,6 +263,7 @@ mod tests {
         Glyph::Chevron,
         Glyph::Search,
         Glyph::Sun,
+        Glyph::Table,
     ];
 
     /// The invariant that matters: a glyph never paints outside the rectangle it is handed, at any
@@ -294,6 +305,7 @@ mod tests {
             (Glyph::Chevron, 1, 0, 0),
             (Glyph::Search, 1, 1, 0),
             (Glyph::Sun, 8, 1, 0),
+            (Glyph::Table, 2, 0, 1),
         ] {
             let rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(32.0));
             let (paths, ring_list, box_list) = geometry(glyph, &mapper(rect), scale_of(rect));

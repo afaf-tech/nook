@@ -28,6 +28,7 @@ A bad key is refused with `{"id":…,"error":"bad key; read …"}`.
 | `engine.run` | `{"command":"<id>","params":{…}}` | `{"ok":true,"result":{…}}` or `{"ok":false,"error":"…"}` |
 | `ui.state` | `{}` | active tab and connection, the connection list with open state and table counts, the tab list with row and pending counts, the control key path |
 | `ui.selectTab` | `{"index":0}` | `{"ok":true,"active_tab":0}` |
+| `ui.selectTable` | `{"conn":0,"schema":"main","table":"customers","tab":"columns"}` | points the object inspector at a table; `conn` defaults to the active connection and `tab` (`columns`, `indexes`, `foreign keys`, `preview`) to the one already showing |
 | `ui.setEditorText` | `{"sql":"select 1"}` | replaces the active tab's editor text |
 | `ui.setTheme` | `{"theme":"light"}` | sets the preference through `app.setSetting`, so `dark`, `light` and `system` are accepted and anything else answers the command's own error; returns the settings list |
 | `ui.messages` | `{}` | the last 50 messages, newest first, with their level |

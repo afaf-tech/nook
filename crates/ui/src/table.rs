@@ -108,6 +108,28 @@ fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
         .x
 }
 
+/// `12481` reads as `12,481`: counts are set in tabular figures everywhere the design shows them.
+pub fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// `1 column` but `2 columns`.
+pub fn plural(n: u64, one: &str, many: &str) -> String {
+    if n == 1 {
+        one.to_owned()
+    } else {
+        many.to_owned()
+    }
+}
+
 /// Truncate to `max` characters with an ellipsis; used by the tree and the tab strip.
 pub fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {

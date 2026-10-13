@@ -142,6 +142,10 @@ fn menu_button(
     });
 }
 
+/// How many rows the inspector's Preview tab asks for: enough to recognise the data, few enough
+/// that a wide table on a slow link does not stall the panel.
+const PREVIEW_ROWS: usize = 50;
+
 /// Everything the UI itself remembers between frames.
 pub struct UiState {
     /// Inline-editor state, one entry per tab (data grid and query results).
@@ -173,6 +177,10 @@ pub struct UiState {
     pub want_demo: bool,
     pub apply_after_edit: bool,
     pub editor_dirty: bool,
+    /// The object inspector: what the tree has selected and what it has fetched about it.
+    pub inspector: crate::inspector::Inspector,
+    /// Which objects the tree lists: the design's All/Connections/Tables/Views control.
+    pub tree_scope: crate::tree::Scope,
     /// Log drawer: collapsed by default so the data gets the room.
     pub log_open: bool,
     pub control: Option<Control>,
@@ -214,6 +222,8 @@ impl Default for UiState {
             want_demo: false,
             apply_after_edit: false,
             editor_dirty: false,
+            inspector: crate::inspector::Inspector::default(),
+            tree_scope: crate::tree::Scope::default(),
             log_open: false,
             control: None,
             shot: None,
@@ -495,6 +505,80 @@ impl DatacraftApp {
                         serde_json::json!({"ok": true, "active_tab": index})
                     } else {
                         serde_json::json!({"ok": false, "error": "no such tab"})
+                    }
+                }
+                "ui.selectTable" => {
+                    let table = request
+                        .params
+                        .get("table")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let schema = request
+                        .params
+                        .get("schema")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_owned());
+                    // The connection is resolved once. `close_conn` leaves the catalog behind, so
+                    // "this connection can name the table" is a weaker question than "it can be
+                    // described"; a connection that is gone or closed is refused before the tab or the
+                    // selection is touched, and the panel is not left claiming a success it cannot
+                    // show.
+                    match DatacraftApp::inspector_target(&self.session, request.params.get("conn"))
+                    {
+                        Err(error) => serde_json::json!({"ok": false, "error": error}),
+                        Ok(conn_index) => {
+                            let known = match self.session.conns[conn_index].catalog.as_ref() {
+                                None => true,
+                                Some(catalog) => {
+                                    catalog.find_table(schema.as_deref(), &table).is_some()
+                                }
+                            };
+                            if table.is_empty() {
+                                serde_json::json!({"ok": false, "error": "a table is required"})
+                            } else if !known {
+                                serde_json::json!({"ok": false, "error": "no such object"})
+                            } else {
+                                let tab = match request.params.get("tab").and_then(|t| t.as_str()) {
+                                    None => Ok(self.state.inspector.tab),
+                                    Some(name) => {
+                                        let wanted = name.to_ascii_lowercase();
+                                        crate::inspector::Tab::ALL
+                                            .into_iter()
+                                            .find(|candidate| {
+                                                candidate.label().to_ascii_lowercase() == wanted
+                                            })
+                                            .ok_or_else(|| {
+                                                let names = crate::inspector::Tab::ALL
+                                                    .map(|tab| tab.label().to_ascii_lowercase())
+                                                    .join(", ");
+                                                format!("unknown tab '{name}'; try {names}")
+                                            })
+                                    }
+                                };
+                                match tab {
+                                    Err(error) => {
+                                        serde_json::json!({"ok": false, "error": error})
+                                    }
+                                    Ok(tab) => {
+                                        self.state.inspector.tab = tab;
+                                        self.select_table(
+                                            conn_index,
+                                            TableRef {
+                                                schema,
+                                                table: table.clone(),
+                                            },
+                                        );
+                                        self.refresh_inspector();
+                                        serde_json::json!({
+                                            "ok": true,
+                                            "selected": table,
+                                            "tab": self.state.inspector.tab.label(),
+                                        })
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 "ui.setEditorText" => {
@@ -1513,6 +1597,9 @@ impl DatacraftApp {
                     self.session.log(Level::Error, e.to_string());
                 }
             }
+            TreeAction::SelectTable(index, reference) => {
+                self.select_table(index, reference);
+            }
             TreeAction::OpenData(index, reference) => {
                 tree::open_data_tab(&mut self.session, index, reference);
             }
@@ -1574,6 +1661,149 @@ impl DatacraftApp {
                 let tab = self.session.add_tab(TabKind::Users, "Users", Some(index));
                 self.state.active_tab_override = Some(tab);
                 self.state.request_users(&mut self.session, index);
+            }
+        }
+    }
+
+    /// Resolve the connection a control request points at: the index it names, or the active one when
+    /// it names none. `close_conn` leaves the catalog behind, so naming a table is not evidence the
+    /// connection can be described — a connection that is missing, not numeric or closed is refused
+    /// here, before the request touches the tab or the selection.
+    fn inspector_target(session: &Session, conn: Option<&Value>) -> Result<usize, String> {
+        let index = match conn {
+            None => session.active_conn,
+            Some(value) => value.as_u64().and_then(|value| usize::try_from(value).ok()),
+        }
+        .filter(|index| *index < session.conns.len())
+        .ok_or_else(|| "no such connection (pass a numeric 'conn' index)".to_string())?;
+        if !session.conns[index].is_open() {
+            return Err(format!(
+                "connection '{}' is not open",
+                session.conns[index].cfg.name
+            ));
+        }
+        Ok(index)
+    }
+
+    /// A single click in the tree: the inspector describes the object and nothing else happens.
+    fn select_table(&mut self, index: usize, reference: TableRef) {
+        // The connection is remembered by id: `conn.delete` removes an element and shifts every later
+        // connection down, so a stored index would come to mean a different server.
+        let Some(conn_id) = self
+            .session
+            .conns
+            .get(index)
+            .map(|conn| conn.cfg.id.clone())
+        else {
+            return;
+        };
+        let key = format!("{conn_id}:{}", reference.key());
+        if self.state.inspector.key == key {
+            return;
+        }
+        let table = self
+            .session
+            .conns
+            .get(index)
+            .and_then(|conn| conn.catalog.as_ref())
+            .and_then(|catalog| catalog.find_table(reference.schema.as_deref(), &reference.table))
+            .cloned();
+        let engine = self
+            .session
+            .conns
+            .get(index)
+            .map(|conn| conn.cfg.kind.label().to_owned())
+            .unwrap_or_default();
+        let inspector = &mut self.state.inspector;
+        inspector.key = key;
+        inspector.selected = Some((conn_id, reference));
+        inspector.engine = engine;
+        inspector.cache = Default::default();
+        inspector.preview = None;
+        // A newly described object must not open on the row and column the previous one's table left
+        // selected.
+        inspector.preview_state = Default::default();
+        inspector.total_rows = table
+            .as_ref()
+            .and_then(|table| table.row_estimate)
+            .and_then(|rows| u64::try_from(rows).ok());
+        inspector.meta = crate::inspector::meta(
+            inspector.total_rows,
+            table
+                .as_ref()
+                .and_then(|table| table.size_bytes)
+                .and_then(|bytes| u64::try_from(bytes).ok()),
+            table.as_ref().map(|table| table.columns.len()).unwrap_or(0),
+        );
+    }
+
+    /// Fetch whatever the inspector's tab needs, once per object and tab. A fetch that fails is
+    /// kept: the panel shows the message instead of asking again every frame.
+    fn refresh_inspector(&mut self) {
+        let Some((conn_id, reference)) = self.state.inspector.selected.clone() else {
+            return;
+        };
+        // Resolved from the id every frame, so a connection that was deleted — or reshuffled — clears
+        // the panel instead of being described with another connection's caches.
+        let Some(index) = self
+            .session
+            .conns
+            .iter()
+            .position(|conn| conn.cfg.id == conn_id)
+        else {
+            self.state.inspector.clear();
+            return;
+        };
+        let Some(conn) = self.session.conns.get(index) else {
+            self.state.inspector.clear();
+            return;
+        };
+        if !conn.is_open() {
+            self.state.inspector.clear();
+            return;
+        }
+        let id = conn.cfg.id.clone();
+        let slot = self.state.inspector.tab.cache_slot();
+        let needs_json = slot.is_some_and(|slot| self.state.inspector.cache[slot].is_none());
+        if needs_json {
+            if let Some(command) = self.state.inspector.tab.command() {
+                let result = self
+                    .session
+                    .run(
+                        command,
+                        serde_json::json!({"conn": id, "table": reference.key()}),
+                    )
+                    .map_err(|error| error.to_string());
+                if let Some(slot) = slot {
+                    self.state.inspector.cache[slot] = Some(result);
+                }
+            }
+        } else if slot.is_none() && self.state.inspector.preview.is_none() {
+            let result = datacraft_engine::cmd::preview_table(
+                &mut self.session,
+                index,
+                &reference,
+                PREVIEW_ROWS,
+            )
+            .map_err(|error| error.to_string());
+            self.state.inspector.preview = Some(result);
+        }
+    }
+
+    /// The right-hand panel: the object inspector, shown while an object is selected.
+    fn inspector_panel(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
+        if let crate::inspector::Action::OpenData =
+            crate::inspector::show(ui, &mut self.state, tokens)
+        {
+            if let Some((conn_id, reference)) = self.state.inspector.selected.clone() {
+                if let Some(index) = self
+                    .session
+                    .conns
+                    .iter()
+                    .position(|conn| conn.cfg.id == conn_id)
+                {
+                    tree::open_data_tab(&mut self.session, index, reference);
+                }
             }
         }
     }
@@ -1687,6 +1917,16 @@ impl eframe::App for DatacraftApp {
             .frame(t::side_panel_frame(&tokens))
             .show(ui, |ui| self.sidebar(ui, &tokens));
 
+        self.refresh_inspector();
+        if self.state.inspector.selected.is_some() {
+            egui::Panel::right("inspector")
+                .exact_size(t::INSPECTOR_W)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(t::side_panel_frame(&tokens))
+                .show(ui, |ui| self.inspector_panel(ui, &tokens));
+        }
+
         egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui, &tokens));
 
         dialogs::show(ui, &mut self.session, &mut self.state, &tokens);
@@ -1772,6 +2012,39 @@ mod tests {
         assert_eq!(rows[1].0, session.conns[1].cfg.id);
         assert_eq!(rows[0].1, "first");
         assert!(!rows[0].2 && rows[1].2);
+    }
+
+    #[test]
+    fn a_control_request_refuses_a_connection_it_cannot_describe() {
+        // One open connection (the demo's SQLite) and one that was never opened: `close_conn` leaves
+        // the catalog behind, so a connection that can name a table is not necessarily one that can
+        // be read, and the request must be refused rather than answered `ok`.
+        let mut session = crate::demo_session();
+        session
+            .conns
+            .push(Conn::new(datacraft_core::ConnectionConfig::new(
+                "closed",
+                datacraft_core::DriverKind::Sqlite,
+            )));
+        assert!(session.conns[0].is_open());
+        assert_eq!(
+            DatacraftApp::inspector_target(&session, Some(&serde_json::json!(0))),
+            Ok(0)
+        );
+        assert_eq!(
+            DatacraftApp::inspector_target(&session, Some(&serde_json::json!(1))),
+            Err("connection 'closed' is not open".to_string())
+        );
+        assert_eq!(
+            DatacraftApp::inspector_target(&session, Some(&serde_json::json!("zero"))),
+            Err("no such connection (pass a numeric 'conn' index)".to_string())
+        );
+        assert!(DatacraftApp::inspector_target(&session, Some(&serde_json::json!(7))).is_err());
+        session.active_conn = Some(1);
+        assert_eq!(
+            DatacraftApp::inspector_target(&session, None),
+            Err("connection 'closed' is not open".to_string())
+        );
     }
 
     #[test]

@@ -41,17 +41,20 @@ fn specs(names: &[&str], types: &[&str]) -> Vec<TableColumn> {
         .collect()
 }
 
-/// What a read-only list in this file needs: the data, the room it has, and its own frame id.
-struct List<'a> {
-    columns: &'a [TableColumn],
-    rows: &'a [Vec<Cell>],
-    height: f32,
-    id: egui::Id,
-    empty: &'a str,
+/// What a read-only list needs: the data, the room it has, and its own frame id. The object
+/// inspector's preview is one of these too, which is why it is `pub(crate)`.
+pub(crate) struct List<'a> {
+    pub columns: &'a [TableColumn],
+    pub rows: &'a [Vec<Cell>],
+    pub height: f32,
+    pub id: egui::Id,
+    pub empty: &'a str,
+    /// The row-number column: the design gives it to the data lists and not to the inspector.
+    pub(crate) gutter: bool,
 }
 
 /// Read-only table: the shape every list in this file uses.
-fn list(
+pub(crate) fn list(
     ui: &mut egui::Ui,
     tokens: &Tokens,
     spec: List<'_>,
@@ -66,7 +69,7 @@ fn list(
         sort: None,
         editable: false,
         sortable: false,
-        gutter: true,
+        gutter: spec.gutter,
         height: spec.height,
         // ponytail: the catalog lists stay compact; density reaches the data grid and the results,
         // where the design demonstrates it (`.reg-grid .gr.cmft`). Thread a row height through
@@ -215,6 +218,7 @@ pub fn design(
                 ui,
                 tokens,
                 List {
+                    gutter: true,
                     columns: &column_specs,
                     rows: &column_rows,
                     height,
@@ -716,6 +720,7 @@ pub fn report(
             ui,
             tokens,
             List {
+                gutter: true,
                 columns: &column_specs,
                 rows: &rows,
                 height,
@@ -771,6 +776,7 @@ pub fn report(
             ui,
             tokens,
             List {
+                gutter: true,
                 columns: &column_specs,
                 rows: &rows,
                 height,
@@ -1132,6 +1138,7 @@ pub fn monitor(
                 ui,
                 tokens,
                 List {
+                    gutter: true,
                     columns: &column_specs,
                     rows: &rows,
                     height,
@@ -1211,6 +1218,7 @@ pub fn monitor(
                 ui,
                 tokens,
                 List {
+                    gutter: true,
                     columns: &column_specs,
                     rows: &rows,
                     height,
@@ -1787,6 +1795,7 @@ pub fn users(
         ui,
         tokens,
         List {
+            gutter: true,
             columns: &column_specs,
             rows: &rows,
             height,

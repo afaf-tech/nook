@@ -789,6 +789,41 @@ mod tests {
         (session, index)
     }
 
+    /// One page of a table is one statement, and it is written in one place: the grid's `SELECT`
+    /// and the inspector's preview must never drift apart.
+    #[test]
+    fn a_page_select_quotes_the_table_and_pages_it() {
+        let table = TableRef {
+            schema: Some("main".into()),
+            table: "customers".into(),
+        };
+        // SQLite has no schemas of its own, so the schema drops out there and stays in Postgres.
+        assert_eq!(
+            crate::cmd::page_select(
+                &table,
+                datacraft_core::Dialect::Sqlite,
+                "  status = 'trial'  ",
+                " id DESC ",
+                50,
+                100,
+            ),
+            "SELECT * FROM \"customers\" WHERE status = 'trial' ORDER BY id DESC LIMIT 50 OFFSET 100"
+        );
+        assert_eq!(
+            crate::cmd::page_select(&table, datacraft_core::Dialect::Postgres, "", "", 50, 100,),
+            "SELECT * FROM \"main\".\"customers\" LIMIT 50 OFFSET 100"
+        );
+        // No filter, no order, no schema: the plain first page.
+        let bare = TableRef {
+            schema: None,
+            table: "users".into(),
+        };
+        assert_eq!(
+            crate::cmd::page_select(&bare, datacraft_core::Dialect::Sqlite, "", "", 0, 0),
+            "SELECT * FROM \"users\" LIMIT 1 OFFSET 0"
+        );
+    }
+
     #[test]
     fn editing_a_cell_records_sql_and_coerces_types() {
         let (mut session, _) = grid_tab();

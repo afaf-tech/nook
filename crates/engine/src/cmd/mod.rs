@@ -165,6 +165,30 @@ pub fn run_sql(
     Ok(rs)
 }
 
+/// The one place the grid's SQL is written: the select behind one page of a table.
+pub fn page_select(
+    table: &TableRef,
+    dialect: datacraft_core::Dialect,
+    filter: &str,
+    order: &str,
+    size: usize,
+    offset: usize,
+) -> String {
+    let mut sql = format!(
+        "SELECT * FROM {}",
+        datacraft_core::quote_qualified(table.schema.as_deref(), &table.table, dialect)
+    );
+    if !filter.trim().is_empty() {
+        sql.push_str(&format!(" WHERE {}", filter.trim()));
+    }
+    if !order.trim().is_empty() {
+        sql.push_str(&format!(" ORDER BY {}", order.trim()));
+    }
+    let size = size.clamp(1, 100_000);
+    sql.push_str(&format!(" LIMIT {size} OFFSET {offset}"));
+    sql
+}
+
 /// `SELECT` for the grid's current page.
 pub fn grid_select(tab: &Tab) -> Result<(String, TableRef)> {
     let table = tab
@@ -178,20 +202,43 @@ pub fn grid_select(tab: &Tab) -> Result<(String, TableRef)> {
         .and_then(|v| v.as_str())
         .and_then(parse_dialect)
         .unwrap_or(datacraft_core::Dialect::Sqlite);
-    let mut sql = format!(
-        "SELECT * FROM {}",
-        datacraft_core::quote_qualified(table.schema.as_deref(), &table.table, dialect)
-    );
-    if !tab.grid.filter.trim().is_empty() {
-        sql.push_str(&format!(" WHERE {}", tab.grid.filter.trim()));
-    }
-    if !tab.grid.order.trim().is_empty() {
-        sql.push_str(&format!(" ORDER BY {}", tab.grid.order.trim()));
-    }
     let size = tab.grid.page_size.clamp(1, 100_000);
     let offset = tab.grid.page.saturating_mul(size);
-    sql.push_str(&format!(" LIMIT {size} OFFSET {offset}"));
+    let sql = page_select(
+        &table,
+        dialect,
+        &tab.grid.filter,
+        &tab.grid.order,
+        size,
+        offset,
+    );
     Ok((sql, table))
+}
+
+/// The first rows of a table, for the object inspector's preview: the grid's own select without the
+/// tab a grid normally needs, and without a history entry — a preview is not a query the user wrote.
+///
+/// ponytail: in-process only. The control channel has no preview verb because no agent has needed
+/// one; add `grid.preview` to `cmd::grid` when one does.
+pub fn preview_table(
+    session: &mut Session,
+    index: usize,
+    table: &TableRef,
+    limit: usize,
+) -> Result<ResultSet> {
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref().map(|d| d.dialect()))
+        .unwrap_or(datacraft_core::Dialect::Sqlite);
+    let limit = limit.clamp(1, 500);
+    let sql = page_select(table, dialect, "", "", limit, 0);
+    let started = std::time::Instant::now();
+    let mut result = session.driver_for(index)?.run_script(&sql, limit)?;
+    if result.elapsed_ms <= 0.0 {
+        result.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    }
+    Ok(result)
 }
 
 pub fn parse_dialect(name: &str) -> Option<datacraft_core::Dialect> {

@@ -191,6 +191,7 @@ pub const METHODS: &[&str] = &[
     "engine.run",
     "ui.state",
     "ui.selectTab",
+    "ui.selectTable",
     "ui.setEditorText",
     "ui.setTheme",
     "ui.messages",

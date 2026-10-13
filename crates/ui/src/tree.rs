@@ -4,7 +4,124 @@ use datacraft_engine::{ConnState, Session, TabKind, TableRef};
 use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
 
 use crate::app::UiState;
+use crate::icons::{self, Glyph};
 use crate::theme::{self as design, Tokens};
+
+/// The design's `.seg` in the tree: which objects the list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    #[default]
+    All,
+    Connections,
+    Tables,
+    Views,
+}
+
+impl Scope {
+    pub const ALL: [Scope; 4] = [Scope::All, Scope::Connections, Scope::Tables, Scope::Views];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Scope::All => "All",
+            Scope::Connections => "Connections",
+            Scope::Tables => "Tables",
+            Scope::Views => "Views",
+        }
+    }
+
+    /// Whether an object of this kind is listed. The table loop and the count share it, so the
+    /// match line can never disagree with the rows under it.
+    fn shows(self, kind: datacraft_model::TableKind) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Connections => false,
+            Scope::Tables => !is_view(kind),
+            Scope::Views => is_view(kind),
+        }
+    }
+}
+
+/// A view is not a table, and both the badge and the scope control say so.
+fn is_view(kind: datacraft_model::TableKind) -> bool {
+    matches!(
+        kind,
+        datacraft_model::TableKind::View | datacraft_model::TableKind::MatView
+    )
+}
+
+/// What the filter currently finds, for the design's `.matchline`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Found {
+    connections: usize,
+    tables: usize,
+    views: usize,
+}
+
+impl Found {
+    /// How many objects the current scope lists. The match line and the rows share this, so the
+    /// count can never disagree with the list under it.
+    pub fn count(self, scope: Scope) -> usize {
+        match scope {
+            Scope::All => self.tables + self.views,
+            Scope::Connections => self.connections,
+            Scope::Tables => self.tables,
+            Scope::Views => self.views,
+        }
+    }
+
+    /// The match line counts what the search finds across every catalog, not only the expanded
+    /// connections: it answers "did my filter match anything", which expansion does not change.
+    /// The design's `.matchline .n` reads "3 objects" for the All scope and "N matches" otherwise.
+    pub fn line(self, scope: Scope) -> String {
+        let count = self.count(scope) as u64;
+        let (one, many) = match scope {
+            Scope::All => ("object", "objects"),
+            _ => ("match", "matches"),
+        };
+        format!(
+            "{} {}",
+            crate::table::grouped(count),
+            crate::table::plural(count, one, many)
+        )
+    }
+}
+
+/// Count what the filter finds for the match line.
+fn counts(session: &Session, needle: &str, scope: Scope) -> Found {
+    let mut found = Found {
+        connections: session.conns.len(),
+        ..Found::default()
+    };
+    if scope == Scope::Connections {
+        return found;
+    }
+    for conn in &session.conns {
+        let Some(catalog) = conn.catalog.as_ref() else {
+            continue;
+        };
+        for schema in &catalog.schemas {
+            for table in &schema.tables {
+                if !haystack(needle, &table.name) && !haystack(needle, &schema.name) {
+                    continue;
+                }
+                if !scope.shows(table.kind) {
+                    continue;
+                }
+                if is_view(table.kind) {
+                    found.views += 1;
+                } else {
+                    found.tables += 1;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The filter matches a name that contains the needle, case-insensitively.
+fn haystack(needle: &str, name: &str) -> bool {
+    needle.is_empty() || name.to_ascii_lowercase().contains(needle)
+}
 
 /// What the tree wants the app to do next, so the tree itself stays read-only.
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +131,8 @@ pub enum TreeAction {
     CloseConnection(usize),
     SelectConnection(usize),
     Refresh(usize),
+    /// A single click on an object: the inspector describes it, nothing opens.
+    SelectTable(usize, TableRef),
     OpenData(usize, TableRef),
     OpenDesign(usize, TableRef),
     OpenDdl(usize, TableRef),
@@ -22,6 +141,13 @@ pub enum TreeAction {
     Monitor(usize),
     Users(usize),
 }
+
+/// The tree's title band, from the design's `.reg-tree .panehead`.
+pub const HEADER_H: f32 = 34.0;
+/// `.filterblk`: 6 + 28 (field) + 6 + 28 (scope) + 6 + 16 (match line) + 8, so the pane head —
+/// [`HEADER_H`] + 98 — is the design's `--h-panehead`, the line the inspector also starts its body
+/// on.
+pub const FILTER_BLOCK_H: f32 = 98.0;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -32,7 +158,10 @@ pub fn show(
     let mut action = TreeAction::None;
 
     // Header: title and the one action that starts everything.
-    let header = design::band_h(ui, tokens, 34.0, |ui| {
+    // The pane's bands are contiguous in the design — 34 + 98, rows 32 — so the default
+    // `item_spacing` must not add a gap between them.
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let header = design::band_h(ui, tokens, HEADER_H, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Connections").size(13.0).color(tokens.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -59,26 +188,113 @@ pub fn show(
         Stroke::new(1.0, tokens.stroke),
     );
 
-    let search = design::band_h(ui, tokens, 38.0, |ui| {
-        ui.horizontal(|ui| {
-            ui.add(
+    let needle = state.tree_filter.trim().to_ascii_lowercase();
+    let found = counts(session, &needle, state.tree_scope);
+    // `band_fill` lays its content out left to right, so a child as wide as the band leaves nothing
+    // for the next one: the inner width is measured once, before the band claims it.
+    let inner_width = (ui.available_width() - 2.0 * f32::from(design::S4)).max(0.0);
+    // `.filterblk` stacks its three rows; a band's own layout is left to right, so the block gets a
+    // child of its own rather than a closure that would lay the field and the control out sideways.
+    let (filter, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), FILTER_BLOCK_H),
+        Sense::hover(),
+    );
+    ui.painter()
+        .rect_filled(filter, CornerRadius::ZERO, tokens.panel);
+    let filter_inner = egui::Rect::from_min_max(
+        egui::pos2(filter.left() + f32::from(design::S4), filter.top()),
+        egui::pos2(filter.right() - f32::from(design::S4), filter.bottom()),
+    );
+    {
+        let mut block = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(filter_inner)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        let ui = &mut block;
+        {
+            ui.add_space(f32::from(design::S2 + design::S1));
+            let field = ui.add(
                 egui::TextEdit::singleline(&mut state.tree_filter)
-                    .desired_width(ui.available_width())
-                    .hint_text("Filter connections and tables"),
+                    .hint_text(
+                        RichText::new("Filter connections and objects")
+                            .size(design::T_SM)
+                            .color(tokens.text_faint),
+                    )
+                    .font(tokens.font(design::T_SM))
+                    .text_color(tokens.text)
+                    .desired_width(inner_width)
+                    // `.field` is 28 tall: a 12px galley, 1px of frame each side and 7 above and
+                    // below, with the magnifier inside at the design's 8px lead-in.
+                    .margin(egui::Margin {
+                        left: design::S4 + design::GLYPH_SM as i8 + design::S3,
+                        right: design::S4,
+                        top: 7,
+                        bottom: 7,
+                    }),
             );
-        });
-    });
+            icons::glyph(
+                ui,
+                egui::Rect::from_min_size(
+                    egui::pos2(
+                        field.rect.left() + f32::from(design::S4),
+                        field.rect.center().y - design::GLYPH_SM / 2.0,
+                    ),
+                    Vec2::splat(design::GLYPH_SM),
+                ),
+                Glyph::Search,
+                tokens.text_faint,
+            );
+            ui.add_space(f32::from(design::S2 + design::S1));
+            let options = Scope::ALL.map(|scope| (scope.label(), state.tree_scope == scope));
+            // `.filterblk .seg{height:--h-head(28); padding:1px}`, against the inspector's 26 and 2.
+            if let Some(index) = design::pane_segmented(
+                ui,
+                tokens,
+                &options,
+                inner_width,
+                design::HEAD_H,
+                1.0,
+                tokens.text,
+            ) {
+                state.tree_scope = Scope::ALL[index];
+            }
+            ui.add_space(f32::from(design::S2 + design::S1));
+            let (line, _) = ui.allocate_exact_size(Vec2::new(inner_width, 16.0), Sense::hover());
+            // `.matchline`: the scope label on the left in `--muted`, the count on the right in
+            // `--fg` — or `--warn` when the filter found nothing.
+            let painter = ui.painter();
+            painter.text(
+                egui::pos2(line.left(), line.center().y),
+                Align2::LEFT_CENTER,
+                format!("scope {}", state.tree_scope.label()),
+                tokens.mono(design::T_XS),
+                tokens.text_dim,
+            );
+            painter.text(
+                egui::pos2(line.right(), line.center().y),
+                Align2::RIGHT_CENTER,
+                found.line(state.tree_scope),
+                tokens.mono(design::T_XS),
+                if found.count(state.tree_scope) == 0 {
+                    tokens.warn
+                } else {
+                    tokens.text
+                },
+            );
+            ui.add_space(f32::from(design::S4));
+        }
+    }
     ui.painter().hline(
-        search.left()..=search.right(),
-        search.bottom() - 0.5,
+        filter.left()..=filter.right(),
+        filter.bottom() - 0.5,
         Stroke::new(1.0, tokens.stroke),
     );
-
-    let needle = state.tree_filter.trim().to_ascii_lowercase();
     egui::ScrollArea::vertical()
         .id_salt("connection_tree")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             if session.conns.is_empty() {
                 ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
@@ -238,6 +454,9 @@ pub fn show(
                             );
                         });
                         for schema in &catalog.schemas {
+                            if state.tree_scope == Scope::Connections {
+                                continue;
+                            }
                             let schema_key = format!("schema:{index}:{}", schema.name);
                             let mut schema_open = state.tree_expanded.contains(&schema_key);
                             let (rect, response) = ui.allocate_exact_size(
@@ -288,10 +507,12 @@ pub fn show(
                             }
 
                             for table in &schema.tables {
-                                if !needle.is_empty()
-                                    && !table.name.to_ascii_lowercase().contains(&needle)
-                                    && !schema.name.to_ascii_lowercase().contains(&needle)
+                                if !haystack(&needle, &table.name)
+                                    && !haystack(&needle, &schema.name)
                                 {
+                                    continue;
+                                }
+                                if !state.tree_scope.shows(table.kind) {
                                     continue;
                                 }
                                 let reference = TableRef {
@@ -302,18 +523,28 @@ pub fn show(
                                     Vec2::new(ui.available_width(), design::TREE_H),
                                     Sense::click(),
                                 );
-                                if response.hovered() {
+                                // The design marks the selected row with `--selection`; `.row.sel`
+                                // is declared after `.row:hover`, so a hovered selected row keeps the
+                                // selection ink rather than turning into a hover one.
+                                let selected = state.inspector.selected.as_ref().is_some_and(
+                                    |(conn_id, chosen)| {
+                                        *conn_id == conn.cfg.id && *chosen == reference
+                                    },
+                                );
+                                if selected {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        CornerRadius::ZERO,
+                                        tokens.selection,
+                                    );
+                                } else if response.hovered() {
                                     ui.painter().rect_filled(
                                         rect,
                                         CornerRadius::ZERO,
                                         tokens.hover,
                                     );
                                 }
-                                let is_view = matches!(
-                                    table.kind,
-                                    datacraft_model::TableKind::View
-                                        | datacraft_model::TableKind::MatView
-                                );
+                                let is_view = is_view(table.kind);
                                 let badge = egui::Rect::from_center_size(
                                     egui::pos2(
                                         rect.left() + design::INDENT_STEP + 34.0,
@@ -371,7 +602,13 @@ pub fn show(
                                         tokens.text_faint,
                                     );
                                 }
+                                // A click selects: the inspector is a read, not a navigation. A
+                                // double click opens the object, as the context menu's first
+                                // entry does.
                                 if response.clicked() {
+                                    action = TreeAction::SelectTable(index, reference.clone());
+                                }
+                                if response.double_clicked() {
                                     action = TreeAction::OpenData(index, reference.clone());
                                 }
                                 response
@@ -507,5 +744,43 @@ pub fn value_color(value: &datacraft_core::Value, tokens: &Tokens) -> Color32 {
         | datacraft_core::Value::Float(_) => tokens.accent,
         datacraft_core::Value::Bool(_) => tokens.warn,
         _ => tokens.text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datacraft_model::TableKind;
+
+    #[test]
+    fn a_scope_admits_exactly_the_kinds_it_names() {
+        assert!(Scope::All.shows(TableKind::Table));
+        assert!(Scope::All.shows(TableKind::View));
+        assert!(!Scope::Connections.shows(TableKind::Table));
+        assert!(!Scope::Connections.shows(TableKind::View));
+        assert!(Scope::Tables.shows(TableKind::Table));
+        assert!(!Scope::Tables.shows(TableKind::View));
+        assert!(!Scope::Tables.shows(TableKind::MatView));
+        assert!(Scope::Views.shows(TableKind::View));
+        assert!(Scope::Views.shows(TableKind::MatView));
+        assert!(!Scope::Views.shows(TableKind::Table));
+    }
+
+    #[test]
+    fn the_match_line_counts_what_its_scope_lists() {
+        let found = Found {
+            connections: 2,
+            tables: 3,
+            views: 1,
+        };
+        assert_eq!(found.count(Scope::All), 4);
+        assert_eq!(found.count(Scope::Connections), 2);
+        assert_eq!(found.count(Scope::Tables), 3);
+        assert_eq!(found.count(Scope::Views), 1);
+        assert_eq!(found.line(Scope::All), "4 objects");
+        assert_eq!(found.line(Scope::Tables), "3 matches");
+        assert_eq!(found.line(Scope::Views), "1 match");
+        assert_eq!(Found::default().line(Scope::All), "0 objects");
+        assert_eq!(Found::default().line(Scope::Views), "0 matches");
     }
 }
