@@ -601,6 +601,17 @@ pub fn mentioned_tables(statement: &str) -> Vec<String> {
 
 /// The statement under the caret, for "run statement at cursor".
 pub fn statement_at(sql: &str, offset: usize) -> Option<String> {
+    statement_under_caret(sql, offset).map(|(_, statement)| statement)
+}
+
+/// Index of the caret's statement in `split(sql)`, for "run statement at cursor" from the editor:
+/// the caret's own index instead of a hard-coded zero.
+pub fn statement_index_at(sql: &str, offset: usize) -> Option<usize> {
+    statement_under_caret(sql, offset).map(|(index, _)| index)
+}
+
+/// One walk for both: the caret's statement and its position in the script cannot disagree.
+fn statement_under_caret(sql: &str, offset: usize) -> Option<(usize, String)> {
     let offset = offset.min(sql.len());
     let byte_end = sql
         .char_indices()
@@ -608,13 +619,12 @@ pub fn statement_at(sql: &str, offset: usize) -> Option<String> {
         .rev()
         .find(|i| *i <= offset)
         .unwrap_or(0);
-    let statements = crate::cmd::sql::split(sql);
     let mut cursor = 0usize;
-    for statement in statements {
+    for (index, statement) in crate::cmd::sql::split(sql).into_iter().enumerate() {
         let start = sql[cursor..].find(&statement).map(|i| cursor + i)?;
         let end = start + statement.len();
         if byte_end >= start && byte_end <= end {
-            return Some(statement);
+            return Some((index, statement));
         }
         cursor = end;
     }
@@ -732,5 +742,54 @@ mod tests {
         let at = sql.find("select 2").unwrap_or(0) + 3;
         assert_eq!(statement_at(sql, at).as_deref(), Some("select 2;"));
         assert!(statement_at(sql, 0).is_some());
+    }
+
+    #[test]
+    fn statement_index_at_numbers_the_statement_under_the_caret() {
+        let sql = "select 1;\nselect 2;\nselect 3;";
+        let at = |needle: &str| sql.find(needle).unwrap_or(0) + 3;
+        assert_eq!(statement_index_at(sql, at("select 1")), Some(0));
+        assert_eq!(statement_index_at(sql, at("select 2")), Some(1));
+        assert_eq!(statement_index_at(sql, at("select 3")), Some(2));
+        // A caret past the end sits in the last statement, exactly as `statement_at` reads it.
+        assert_eq!(statement_index_at(sql, sql.len()), Some(2));
+        assert_eq!(statement_at(sql, sql.len()).as_deref(), Some("select 3;"));
+    }
+
+    #[test]
+    fn statement_index_at_reads_a_comment_as_the_statement_it_heads() {
+        // A dump's header has no semicolon of its own, so it travels with the statement under it.
+        let sql = "-- dump of shop\nselect 1;";
+        assert_eq!(statement_index_at(sql, 3), Some(0));
+        assert_eq!(
+            statement_at(sql, 3).as_deref(),
+            Some("-- dump of shop\nselect 1;")
+        );
+        // So does a note between two statements: it heads the one below it.
+        let sql = "select 1;\n-- note\nselect 2;";
+        assert_eq!(
+            statement_index_at(sql, sql.find("-- note").unwrap_or(0) + 1),
+            Some(1)
+        );
+        // A comment chunk that is a statement of its own is dropped by the splitter, so the caret
+        // in it belongs to no statement — and says so rather than guessing.
+        let sql = "select 1;\n/* note */;\nselect 2;";
+        assert_eq!(
+            statement_index_at(sql, sql.find("/* note").unwrap_or(0) + 1),
+            None
+        );
+    }
+
+    #[test]
+    fn statement_index_at_ignores_a_semicolon_inside_a_string() {
+        let sql = "select 'a;b';\nselect 2;";
+        assert_eq!(
+            statement_index_at(sql, sql.find(";b").unwrap_or(0)),
+            Some(0)
+        );
+        assert_eq!(
+            statement_index_at(sql, sql.find("select 2").unwrap_or(0) + 3),
+            Some(1)
+        );
     }
 }

@@ -1,11 +1,12 @@
 //! Query editor commands: run, format, complete, explain, history, transactions.
 
 use datacraft_core::{Error, Result};
+use datacraft_model::ResultSet;
 use serde_json::json;
 
 use crate::cmd::{run_sql, sql_from_params_or_editor};
 use crate::sqltext::{self, Completion};
-use crate::{CommandSpec, Level, Params, Session, TabKind};
+use crate::{CommandSpec, Level, Params, Session, StatementRun, TabKind};
 
 pub fn commands() -> Vec<CommandSpec> {
     vec![
@@ -74,32 +75,134 @@ fn new_query(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     Ok(json!({ "tab": index, "title": session.tabs[index].title }))
 }
 
-fn store_result(
-    session: &mut Session,
-    result: &datacraft_model::ResultSet,
-    statements: Vec<String>,
-) {
+/// Open the tab's SQL state for a run: the previous run's results and the facts describing them go,
+/// because a run replaces the register rather than appending to it.
+fn begin_run(session: &mut Session, statements: Vec<String>) {
     if let Ok(tab) = session.active_tab_mut() {
         if tab.kind == TabKind::Query {
-            tab.sql.last_result = Some(result.clone());
-            tab.sql.error = None;
-            tab.sql.elapsed_ms = result.elapsed_ms;
+            tab.sql.results.clear();
             tab.sql.statements = statements;
-            tab.sql.result_label = format!(
-                "{} rows · {} ms{}",
-                result.row_count(),
-                result.elapsed_ms.round(),
-                if result.truncated {
-                    " · truncated"
-                } else {
-                    ""
-                }
-            );
+            tab.sql.last_result = None;
+            tab.sql.result_label.clear();
+            tab.sql.elapsed_ms = 0.0;
         }
     }
 }
 
-fn summarize(result: &datacraft_model::ResultSet, statements: &[String]) -> serde_json::Value {
+/// One statement's result folded into the run's aggregate, the rule `Driver::run_script` uses: the
+/// latest tabular result wins and a statement with no columns adds its affected count to it.
+fn fold(last: &mut ResultSet, rs: &ResultSet) {
+    if rs.is_tabular() || last.columns.is_empty() {
+        let mut notices = std::mem::take(&mut last.notices);
+        notices.extend(rs.notices.iter().cloned());
+        *last = rs.clone();
+        last.notices = notices;
+    } else {
+        last.affected += rs.affected;
+        last.notices.extend(rs.notices.iter().cloned());
+    }
+}
+
+/// The single writer of a tab's SQL state: appends the statement's run, and keeps `last_result`,
+/// `result_label` and `elapsed_ms` describing the run so far — the aggregate the status bar and the
+/// grid read, built by `fold`. A run with no result (the failure that stopped the run) changes only
+/// `results`.
+fn record_run(session: &mut Session, run: StatementRun, run_so_far: &mut ResultSet) {
+    if let Some(result) = run.result.as_ref() {
+        fold(run_so_far, result);
+    }
+    if let Ok(tab) = session.active_tab_mut() {
+        if tab.kind == TabKind::Query {
+            if run.result.is_some() {
+                tab.sql.last_result = Some(run_so_far.clone());
+                tab.sql.elapsed_ms = run_so_far.elapsed_ms;
+                tab.sql.result_label = format!(
+                    "{} rows · {} ms{}",
+                    run_so_far.row_count(),
+                    run_so_far.elapsed_ms.round(),
+                    if run_so_far.truncated {
+                        " · truncated"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            tab.sql.results.push(run);
+        }
+    }
+}
+
+/// One statement's line of the run's summary: what it was, what it produced, how long it took, and
+/// the driver's own words when it failed. Counts only, so the run never has to be cloned to
+/// summarise it.
+fn statement_summary(
+    index: usize,
+    statement: &str,
+    result: Option<&ResultSet>,
+    elapsed_ms: f64,
+    error: Option<String>,
+) -> serde_json::Value {
+    json!({
+        "index": index,
+        "statement": statement,
+        "rows": result.map(ResultSet::row_count).unwrap_or(0),
+        "affected": result.map(|r| r.affected).unwrap_or(0),
+        "elapsed_ms": elapsed_ms,
+        "error": error,
+    })
+}
+
+/// Run one statement of the script, record it and return its line of the run's summary. `Err` means
+/// the statement failed: the run is already recorded, with `result: None` and the message, so the
+/// caller only has to return the error.
+fn run_and_record(
+    session: &mut Session,
+    conn: usize,
+    index: usize,
+    statement: &str,
+    limit: Option<usize>,
+    run_so_far: &mut ResultSet,
+) -> Result<serde_json::Value> {
+    let started = std::time::Instant::now();
+    let outcome = run_sql(session, conn, statement, limit);
+    let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match outcome {
+        Ok(result) => {
+            let elapsed_ms = result.elapsed_ms;
+            let summary = statement_summary(index, statement, Some(&result), elapsed_ms, None);
+            record_run(
+                session,
+                StatementRun {
+                    statement: statement.to_string(),
+                    result: Some(result),
+                    elapsed_ms,
+                    error: None,
+                },
+                run_so_far,
+            );
+            Ok(summary)
+        }
+        Err(e) => {
+            record_run(
+                session,
+                StatementRun {
+                    statement: statement.to_string(),
+                    result: None,
+                    elapsed_ms: wall_ms,
+                    error: Some(e.to_string()),
+                },
+                run_so_far,
+            );
+            Err(e)
+        }
+    }
+}
+
+fn summarize(
+    result: &ResultSet,
+    statements: &[String],
+    results: Vec<serde_json::Value>,
+) -> serde_json::Value {
     json!({
         "columns": result.columns,
         "types": result.column_types,
@@ -109,6 +212,8 @@ fn summarize(result: &datacraft_model::ResultSet, statements: &[String]) -> serd
         "elapsed_ms": result.elapsed_ms,
         "truncated": result.truncated,
         "statements": statements.len(),
+        // One entry per statement of this run, in run order; the failed one carries the message.
+        "results": results,
         // Arrays, so a CLI or an agent can print them positionally; "objects" keeps the names.
         "data": result.rows.iter().map(|row| {
             serde_json::Value::Array(row.iter().map(|v| v.to_json()).collect())
@@ -124,19 +229,30 @@ fn run(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         n if n > 0 => Some(n.clamp(1, 5_000_000) as usize),
         _ => None,
     };
-    let statements = crate::cmd::sql::split(&sql);
-    let result = run_sql(session, conn, &sql, limit)?;
-    store_result(session, &result, statements.clone());
+    let statements = split(&sql);
+    begin_run(session, statements.clone());
+    let mut run_so_far = ResultSet::default();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for (index, statement) in statements.iter().enumerate() {
+        results.push(run_and_record(
+            session,
+            conn,
+            index,
+            statement,
+            limit,
+            &mut run_so_far,
+        )?);
+    }
     session.log(
         Level::Info,
         format!(
             "{} statement(s) · {} rows · {} ms",
             statements.len(),
-            result.row_count(),
-            result.elapsed_ms.round()
+            run_so_far.row_count(),
+            run_so_far.elapsed_ms.round()
         ),
     );
-    Ok(summarize(&result, &statements))
+    Ok(summarize(&run_so_far, &statements, results))
 }
 
 fn run_statement(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
@@ -156,14 +272,15 @@ fn run_statement(session: &mut Session, p: &Params) -> Result<serde_json::Value>
         })?
         .clone();
     let conn = session.resolve_conn(p)?;
-    let result = run_sql(session, conn, &picked, None)?;
-    store_result(session, &result, vec![picked.clone()]);
+    begin_run(session, vec![picked.clone()]);
+    let mut run_so_far = ResultSet::default();
+    run_and_record(session, conn, 0, &picked, None, &mut run_so_far)?;
     Ok(json!({
         "statement": picked,
-        "rows": result.row_count(),
-        "affected": result.affected,
-        "elapsed_ms": result.elapsed_ms,
-        "data": result.to_json()["rows"],
+        "rows": run_so_far.row_count(),
+        "affected": run_so_far.affected,
+        "elapsed_ms": run_so_far.elapsed_ms,
+        "data": run_so_far.to_json()["rows"],
     }))
 }
 
@@ -297,7 +414,7 @@ fn run_in_transaction(session: &mut Session, p: &Params) -> Result<serde_json::V
     }
     session.driver_for(conn)?.begin()?;
     let mut applied = Vec::new();
-    let mut last = datacraft_model::ResultSet::default();
+    let mut last = ResultSet::default();
     for statement in &statements {
         match run_sql(session, conn, statement, None) {
             Ok(rs) => {
@@ -344,6 +461,180 @@ pub fn split(sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::scratch_config;
+    use datacraft_model::ResultSet;
+
+    /// A real session: one SQLite connection on `:memory:` and a query tab, the editor's own path to
+    /// a run. The guard keeps the scratch config directory to this test for its whole life, and the
+    /// index is the query tab's, since the session starts on its Welcome tab.
+    fn live_session() -> (std::sync::MutexGuard<'static, ()>, Session, usize) {
+        let guard = scratch_config();
+        let mut session = Session::new();
+        session
+            .run(
+                "conn.new",
+                json!({"name": "local", "kind": "sqlite", "file": ":memory:"}),
+            )
+            .expect("new connection");
+        session
+            .run("conn.open", json!({"conn": "local"}))
+            .expect("open connection");
+        let tab = session.run("sql.newQuery", json!({})).expect("query tab")["tab"]
+            .as_u64()
+            .unwrap_or(0) as usize;
+        (guard, session, tab)
+    }
+
+    /// The summary `sql.run` would have returned for the runs the tab holds, so a failed run can be
+    /// read the same way a successful one is.
+    fn summary_of(runs: &[crate::StatementRun], statements: &[String]) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = runs
+            .iter()
+            .enumerate()
+            .map(|(index, run)| {
+                statement_summary(
+                    index,
+                    &run.statement,
+                    run.result.as_ref(),
+                    run.elapsed_ms,
+                    run.error.clone(),
+                )
+            })
+            .collect();
+        summarize(&ResultSet::default(), statements, entries)
+    }
+
+    #[test]
+    fn a_script_records_one_run_per_statement() {
+        let (_guard, mut session, tab) = live_session();
+        let out = session
+            .run(
+                "sql.run",
+                json!({"sql": "select 1;\nselect 2;", "limit": 100}),
+            )
+            .expect("run");
+        let sql = &session.tabs[tab].sql;
+        assert_eq!(sql.results.len(), 2);
+        assert_eq!(sql.results[0].statement, "select 1;");
+        assert_eq!(
+            sql.results[0].result.as_ref().map(ResultSet::row_count),
+            Some(1)
+        );
+        assert!(sql.results[0].error.is_none());
+        assert_eq!(sql.results[1].statement, "select 2;");
+        assert_eq!(
+            sql.results[1].result.as_ref().map(ResultSet::row_count),
+            Some(1)
+        );
+        let sum = sql.results[0].elapsed_ms + sql.results[1].elapsed_ms;
+        assert!((sql.total_ms() - sum).abs() < 1e-9);
+        assert!(sql.error().is_none());
+        // The summary carries one entry per statement, in run order.
+        assert_eq!(out["statements"], 2);
+        let entries = out["results"].as_array().cloned().unwrap_or_default();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["index"], 0);
+        assert_eq!(entries[0]["statement"], "select 1;");
+        assert_eq!(entries[1]["index"], 1);
+        assert_eq!(entries[1]["statement"], "select 2;");
+        assert_eq!(entries[1]["rows"], 1);
+        assert!(entries[1]["error"].is_null());
+        // The run's own aggregate still means what it always meant.
+        assert_eq!(out["rows"], 1);
+        // `sql.history` records one entry per statement, the granularity `sql.runStatement` had.
+        assert_eq!(session.history.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_statement_stops_the_run_and_is_recorded() {
+        let (_guard, mut session, tab) = live_session();
+        let script = "select 1;\nselect from;";
+        let e = session
+            .run("sql.run", json!({"sql": script, "limit": 100}))
+            .expect_err("the second statement is not SQL");
+        assert!(!e.message().is_empty());
+        let sql = &session.tabs[tab].sql;
+        assert_eq!(sql.results.len(), 2);
+        assert_eq!(
+            sql.results[0].result.as_ref().map(ResultSet::row_count),
+            Some(1)
+        );
+        let failed = &sql.results[1];
+        assert_eq!(failed.statement, "select from;");
+        assert!(failed.result.is_none());
+        assert!(failed.error.is_some());
+        assert_eq!(sql.error(), failed.error.as_deref());
+        // The failed run's summary still carries both entries, the last one with the driver's words.
+        let summary = summary_of(&sql.results, &split(script));
+        let entries = summary["results"].as_array().cloned().unwrap_or_default();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0]["error"].is_null());
+        assert_eq!(entries[1]["rows"], 0);
+        assert!(entries[1]["error"].is_string());
+    }
+
+    #[test]
+    fn a_second_run_replaces_the_results() {
+        let (_guard, mut session, tab) = live_session();
+        session
+            .run("sql.run", json!({"sql": "select 1;\nselect 2;"}))
+            .expect("first run");
+        session
+            .run("sql.run", json!({"sql": "select 3;"}))
+            .expect("second run");
+        let sql = &session.tabs[tab].sql;
+        assert_eq!(sql.results.len(), 1);
+        assert_eq!(sql.results[0].statement, "select 3;");
+        assert_eq!(sql.statements, vec!["select 3;".to_string()]);
+        assert_eq!(session.history.len(), 3);
+    }
+
+    #[test]
+    fn a_statement_with_no_columns_keeps_its_affected_count() {
+        let (_guard, mut session, tab) = live_session();
+        let out = session
+            .run(
+                "sql.run",
+                json!({"sql": "create table t (x integer);\ninsert into t values (1);\nupdate t set x = 2;"}),
+            )
+            .expect("run");
+        let sql = &session.tabs[tab].sql;
+        assert_eq!(sql.results.len(), 3);
+        let update = &sql.results[2];
+        let result = update
+            .result
+            .as_ref()
+            .expect("the update produced a result");
+        assert!(result.columns.is_empty());
+        assert_eq!(result.affected, 1);
+        assert_eq!(update.error, None);
+        // The run's aggregate folds the affected counts, the way the driver's own script runner does.
+        assert_eq!(out["affected"], 1);
+    }
+
+    #[test]
+    fn a_run_without_a_query_tab_still_reports_every_statement() {
+        // The CLI and the MCP surface call `sql.run` with no tab open, so the summary is the only
+        // place their caller can read a run from: it must never depend on the tab holding it.
+        let _guard = scratch_config();
+        let mut session = Session::new();
+        session
+            .run(
+                "conn.new",
+                json!({"name": "local", "kind": "sqlite", "file": ":memory:"}),
+            )
+            .expect("new connection");
+        session
+            .run("conn.open", json!({"conn": "local"}))
+            .expect("open connection");
+        let out = session
+            .run("sql.run", json!({"sql": "select 1;\nselect 2;"}))
+            .expect("run");
+        assert_eq!(out["results"].as_array().map(Vec::len), Some(2));
+        assert_eq!(out["results"][1]["statement"], "select 2;");
+        assert_eq!(out["results"][1]["rows"], 1);
+        assert_eq!(out["rows"], 1);
+    }
 
     #[test]
     fn splitting_matches_the_driver_splitter() {

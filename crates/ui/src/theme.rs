@@ -46,6 +46,28 @@ pub const TAB_BAR_H: f32 = TAB_H + 1.0;
 pub const TOOLBAR_H: f32 = 40.0;
 pub const STATUS_H: f32 = 26.0;
 
+/// The query editor's own geometry: `.ed` is the design's 320 — sixteen 20px rows in a 52px gutter —
+/// its `.tb` buttons are 26, its statement strip's chips and the completion popup's items are 20.
+pub const EDITOR_H: f32 = 320.0;
+pub const GUTTER_W: f32 = 52.0;
+pub const EDITOR_ROW_H: f32 = 20.0;
+pub const STMT_H: f32 = 20.0;
+pub const STMT_BAND_H: f32 = 56.0;
+pub const TOOLBAR_BTN_H: f32 = 26.0;
+pub const POP_W: f32 = 456.0;
+pub const POP_HD_H: f32 = 24.0;
+pub const POP_FT_H: f32 = 24.0;
+pub const POP_ITEM_H: f32 = 20.0;
+
+/// The results register's own geometry: `.rtabs` is the tab strip's `34 + 1`, its `.note` pill and the
+/// empty block are 20 and 196, its JSON gutter is 48, and `.eband` is padded with `--s5` on all four
+/// sides.
+pub const REG_TABS_H: f32 = TAB_H + 1.0;
+pub const NOTE_H: f32 = 20.0;
+pub const EMPTY_BLOCK_H: f32 = 196.0;
+pub const JSON_GUTTER_W: f32 = 48.0;
+pub const REG_ERR_PAD: i8 = S5;
+
 /// Panel widths and the small geometry the shell and the lists share.
 pub const TREE_W: f32 = 300.0;
 /// The object inspector, from the design's `--w-inspector`.
@@ -1183,6 +1205,446 @@ fn notice_band(
     rect
 }
 
+/// The design's `.btn`: a 26px control with 8px of padding and 6px between its mark, its label and
+/// whatever the caller appends. `fill` is the sheet's resting fill, because the editor's `.tb` and the
+/// register's `.rbar` state different ones — `panel_high` and `panel_alt`.
+///
+/// `add` runs inside the button, after the label, and the button grows to fit it. The closure paints
+/// before the button's own chrome is laid down — egui has no second pass — so the fill, the pointer's
+/// fill and the border go into shape slots reserved before the caller's content.
+#[allow(clippy::too_many_arguments)]
+pub fn toolbar_button(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    label: &str,
+    mark: Option<Mark>,
+    fill: Color32,
+    emphasis: Emphasis,
+    enabled: bool,
+    add: impl FnOnce(&mut Ui),
+) -> Response {
+    let face = button_face(tokens, fill, emphasis, enabled);
+    let font = tokens.font(T_SM);
+    let (width, lead, label_width) = button_width(ui, tokens, label, mark);
+    let radius = CornerRadius::same(R_CTL);
+    let slots = {
+        let painter = ui.painter();
+        [
+            painter.add(egui::Shape::Noop),
+            painter.add(egui::Shape::Noop),
+            painter.add(egui::Shape::Noop),
+        ]
+    };
+    let (id, placed) = ui.allocate_space(Vec2::new(width, TOOLBAR_BTN_H));
+    // The caller's content starts a gap after the label: `lead` already carries the padding, the
+    // border and the mark's own gap.
+    let trailing = placed.left() + lead + label_width + f32::from(S3);
+    let tail = {
+        let room = Rect::from_min_max(
+            egui::pos2(trailing, placed.top()),
+            egui::pos2(
+                ui.available_rect_before_wrap().right().max(trailing),
+                placed.bottom(),
+            ),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(room)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        add(&mut child);
+        child.min_rect().width()
+    };
+    // The button grows to fit what the caller appended, and answers for the whole of itself: a
+    // response that stopped at the label would leave the caret it drew outside its own hit box.
+    let rect = if tail > 0.0 {
+        let grown = Rect::from_min_max(
+            placed.min,
+            egui::pos2(placed.right() + f32::from(S3) + tail, placed.bottom()),
+        );
+        ui.advance_cursor_after_rect(grown);
+        grown
+    } else {
+        placed
+    };
+    let response = ui.interact(
+        rect,
+        id,
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+
+    let painter = ui.painter();
+    if face.fill != Color32::TRANSPARENT {
+        painter.set(slots[0], egui::Shape::rect_filled(rect, radius, face.fill));
+    }
+    if let Some(hover) = face.hover {
+        if response.hovered() {
+            painter.set(slots[1], egui::Shape::rect_filled(rect, radius, hover));
+        }
+    }
+    painter.set(
+        slots[2],
+        egui::Shape::rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, face.border),
+            StrokeKind::Inside,
+        ),
+    );
+    let mut x = rect.left() + f32::from(S4) + 1.0;
+    if let Some(mark) = mark {
+        let size = mark.size();
+        let box_rect = Rect::from_min_size(egui::pos2(x, rect.center().y - size.y / 2.0), size);
+        match mark {
+            Mark::Glyph(glyph) => {
+                crate::icons::glyph(ui, box_rect, glyph, face.ink);
+            }
+            Mark::Play => {
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        box_rect.left_top(),
+                        egui::pos2(box_rect.right(), box_rect.center().y),
+                        box_rect.left_bottom(),
+                    ],
+                    face.ink,
+                    Stroke::NONE,
+                ));
+            }
+            Mark::Stop => {
+                painter.rect_filled(box_rect, CornerRadius::same(1), face.ink);
+            }
+        }
+        x += size.x + f32::from(S3);
+    }
+    painter.text(
+        egui::pos2(x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        face.ink,
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response
+}
+
+/// The width [`toolbar_button`] takes for `label` and `mark`, so a caller can prove its toolbar fits
+/// inside the pane before the band is laid out.
+pub fn toolbar_button_width(ui: &Ui, tokens: &Tokens, label: &str, mark: Option<Mark>) -> f32 {
+    button_width(ui, tokens, label, mark).0
+}
+
+/// A `.btn`'s total width, the width it spends before its label (a padding, the border, the mark and
+/// its gap) and the label's own width — the caller's trailing content starts after that last one.
+fn button_width(ui: &Ui, tokens: &Tokens, label: &str, mark: Option<Mark>) -> (f32, f32, f32) {
+    let label_width = measured(ui, tokens.font(T_SM), label);
+    let lead = f32::from(S4) + 1.0 + mark.map_or(0.0, |mark| mark.size().x + f32::from(S3));
+    (lead + label_width + f32::from(S4) + 1.0, lead, label_width)
+}
+
+/// The mark a `.btn` carries in front of its label: a stroked [`crate::icons::Glyph`], or one of the
+/// editor's filled marks — the run triangle and the stop square, which are fills and so are not glyphs
+/// (`icons` is a stroked-geometry module, and a fill would change every existing glyph's contract).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Glyph(crate::icons::Glyph),
+    Play,
+    Stop,
+}
+
+impl Mark {
+    /// The box the mark occupies, which is what a button reserves for it.
+    pub fn size(self) -> Vec2 {
+        match self {
+            Mark::Glyph(_) => Vec2::splat(GLYPH_BOX),
+            Mark::Play => Vec2::new(7.0, 10.0),
+            Mark::Stop => Vec2::splat(8.0),
+        }
+    }
+}
+
+/// How much a `.btn` insists on being noticed: the design's plain button on its sheet's fill, or its
+/// `.primary` one on `accent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emphasis {
+    Plain,
+    Primary,
+}
+
+/// What one `.btn` paints: its fill at rest, its 1px border, its ink, and the fill the pointer gets —
+/// `None` when the button does not react to the pointer at all, which is what disabled means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ButtonFace {
+    pub fill: Color32,
+    pub border: Color32,
+    pub ink: Color32,
+    pub hover: Option<Color32>,
+}
+
+/// The design's three `.btn` faces, from the sheet's resting fill: the plain button (`stroke` border,
+/// `text` ink, `hover` under the pointer), `.primary` (`accent` fill, `accent_line` border,
+/// `accent_text` ink) and `.off` (transparent, `text_faint` ink, no pointer reaction). Disabled beats
+/// emphasis, because the only disabled button in these frames is the editor's Stop.
+pub fn button_face(
+    tokens: &Tokens,
+    sheet: Color32,
+    emphasis: Emphasis,
+    enabled: bool,
+) -> ButtonFace {
+    if !enabled {
+        return ButtonFace {
+            fill: Color32::TRANSPARENT,
+            border: tokens.stroke,
+            ink: tokens.text_faint,
+            hover: None,
+        };
+    }
+    match emphasis {
+        Emphasis::Primary => ButtonFace {
+            fill: tokens.accent,
+            border: tokens.accent_line,
+            ink: tokens.accent_text,
+            hover: None,
+        },
+        Emphasis::Plain => ButtonFace {
+            fill: sheet,
+            border: tokens.stroke,
+            ink: tokens.text,
+            hover: Some(tokens.hover),
+        },
+    }
+}
+
+/// The design's `.note`: a 20px `panel_alt` pill inside a `stroke` border, with an optional 5px dot,
+/// carrying one mono fact in `text_dim`.
+pub fn note_pill(ui: &mut Ui, tokens: &Tokens, text: &str, dot: Option<Color32>) -> Response {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(note_pill_width(ui, tokens, text, dot.is_some()), NOTE_H),
+        Sense::hover(),
+    );
+    let radius = CornerRadius::same(R_CHIP);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    let x = if let Some(dot) = dot {
+        let centre = note_dot_centre(rect);
+        painter.circle_filled(centre, NOTE_DOT / 2.0, dot);
+        centre.x + NOTE_DOT / 2.0 + f32::from(S3)
+    } else {
+        rect.left() + f32::from(S4) + 1.0
+    };
+    painter.text(
+        egui::pos2(x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        tokens.mono(T_XS),
+        tokens.text_dim,
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
+    response
+}
+
+/// The width a `.note` takes for `text`, with or without its dot.
+pub fn note_pill_width(ui: &Ui, tokens: &Tokens, text: &str, dot: bool) -> f32 {
+    measured(ui, tokens.mono(T_XS), text)
+        + 2.0 * f32::from(S4)
+        + 2.0
+        + if dot { NOTE_DOT + f32::from(S3) } else { 0.0 }
+}
+
+/// Where the `.note`'s 5px dot sits: one padding and the border in from the pill's left edge, on its
+/// vertical centre.
+pub fn note_dot_centre(pill: Rect) -> egui::Pos2 {
+    egui::pos2(
+        pill.left() + f32::from(S4) + 1.0 + NOTE_DOT / 2.0,
+        pill.center().y,
+    )
+}
+
+/// `.band`: the statement error band under the strip — `error_fill` with a 1px `error` top edge, the
+/// design's `.ico` box beside a 13px title, an 11px mono sub-line, and the caller's actions pinned to
+/// the right. The design's own `.band` carries 8px of padding and its content at the top; the 56 it
+/// measures to is what the register's layout is built on, so the text column is centred in it.
+pub fn statement_band(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    title: &str,
+    message: &str,
+    add: impl FnOnce(&mut Ui),
+) -> egui::Rect {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, STMT_BAND_H), Sense::hover());
+    {
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::ZERO, tokens.error_fill);
+        painter.hline(
+            rect.left()..=rect.right(),
+            rect.top() + 0.5,
+            Stroke::new(1.0, tokens.error),
+        );
+    }
+    let inner = Rect::from_min_max(
+        egui::pos2(rect.left() + f32::from(S5), rect.top() + STMT_BAND_PAD_V),
+        egui::pos2(
+            rect.right() - f32::from(S5),
+            rect.bottom() - STMT_BAND_PAD_V,
+        ),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+    );
+    child.spacing_mut().item_spacing.x = f32::from(S4);
+    child.horizontal(|ui| {
+        let (mark, _) = ui.allocate_exact_size(Vec2::splat(STMT_MARK_BOX), Sense::hover());
+        let mark = mark.translate(Vec2::Y * f32::from(S1));
+        {
+            let painter = ui.painter();
+            painter.rect_filled(mark, CornerRadius::same(3), tokens.error);
+            painter.text(
+                mark.center(),
+                egui::Align2::CENTER_CENTER,
+                "!",
+                tokens.mono(T_XS),
+                tokens.background,
+            );
+        }
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = f32::from(S1);
+            ui.label(RichText::new(title).size(T_MD).color(tokens.text));
+            ui.label(
+                RichText::new(message)
+                    .font(tokens.mono(T_XS))
+                    .color(tokens.text_dim),
+            );
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            add(ui);
+        });
+    });
+    rect
+}
+
+/// `.eband`: the register's own error band, between its `.rbar` and its void. `panel_alt` rather than
+/// the editor band's `error_fill` — the design states both and they differ — with a 1px `error`
+/// hairline under it, `--s5` of padding, the design's 14px `error` mark, the driver's code in an 18px
+/// `error`-ringed tag, the message in `text` and the statement in mono `text_dim`.
+pub fn register_error_band(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    tag: &str,
+    message: &str,
+    statement: &str,
+    add: impl FnOnce(&mut Ui),
+) -> egui::Rect {
+    let width = ui.available_width();
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(width, register_error_band_h()), Sense::hover());
+    {
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::ZERO, tokens.panel_alt);
+        painter.hline(
+            rect.left()..=rect.right(),
+            rect.bottom() - 0.5,
+            Stroke::new(1.0, tokens.error),
+        );
+    }
+    let pad = f32::from(REG_ERR_PAD);
+    let inner = Rect::from_min_max(
+        egui::pos2(rect.left() + pad, rect.top() + pad),
+        egui::pos2(rect.right() - pad, rect.bottom() - pad),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+    );
+    child.spacing_mut().item_spacing.x = f32::from(S5);
+    child.horizontal(|ui| {
+        // The design's `.eband > svg`: a 14px mark 2px down from the body's cap.
+        let (mark, _) = ui.allocate_exact_size(Vec2::splat(REG_ERR_MARK), Sense::hover());
+        crate::icons::glyph(
+            ui,
+            mark.translate(Vec2::Y * f32::from(S1)),
+            crate::icons::Glyph::Warning,
+            tokens.error,
+        );
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = f32::from(S3);
+            let (row, _) = ui.allocate_exact_size(
+                Vec2::new(
+                    measured(ui, tokens.mono(T_XS), tag) + 2.0 * f32::from(S3) + 2.0,
+                    REG_ERR_TAG_H,
+                ),
+                Sense::hover(),
+            );
+            let radius = CornerRadius::same(R_CTL);
+            let painter = ui.painter();
+            painter.rect_stroke(
+                row,
+                radius,
+                Stroke::new(1.0, tokens.error),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                row.center(),
+                egui::Align2::CENTER_CENTER,
+                tag,
+                tokens.mono(T_XS),
+                tokens.error,
+            );
+            ui.label(RichText::new(message).size(T_SM).color(tokens.text));
+            ui.label(
+                RichText::new(statement)
+                    .font(tokens.mono(T_XS))
+                    .color(tokens.text_dim),
+            );
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            add(ui);
+        });
+    });
+    rect
+}
+
+/// `.band`'s text column: a 16px title line, 2px of air and a 16px mono sub-line. The design measures
+/// the whole band at 56, which is what the strip and the register below it are laid out against, so
+/// the padding this leaves — 11px — is derived rather than the design's own 8.
+const STMT_TITLE_H: f32 = 16.0;
+const STMT_SUB_H: f32 = 16.0;
+/// The design's `.ico`: a 16px filled `error` box carrying the bang.
+const STMT_MARK_BOX: f32 = 16.0;
+const STMT_BAND_PAD_V: f32 = (STMT_BAND_H - STMT_TITLE_H - S1 as f32 - STMT_SUB_H) / 2.0;
+
+/// `.eband`'s own parts: the design's 14px mark, its 18px tag row and the message and mono statement
+/// lines, `--s3` apart.
+const REG_ERR_MARK: f32 = 14.0;
+const REG_ERR_TAG_H: f32 = 18.0;
+const REG_ERR_LINE_H: f32 = 16.0;
+
+/// `.eband`'s height: `--s5` of padding, then its three lines.
+pub fn register_error_band_h() -> f32 {
+    2.0 * f32::from(REG_ERR_PAD)
+        + REG_ERR_TAG_H
+        + f32::from(S3)
+        + REG_ERR_LINE_H
+        + f32::from(S3)
+        + REG_ERR_LINE_H
+}
+
+/// `.note`'s dot: 5px, on the pill's vertical centre.
+const NOTE_DOT: f32 = 5.0;
+
 /// `.stalestrip`: the 26px `surface-2` row between the error band and the grid, its note on the
 /// left and one mono fact on the right.
 pub fn stale_strip(ui: &mut Ui, tokens: &Tokens, note: &str, fact: &str) -> egui::Rect {
@@ -1443,6 +1905,279 @@ mod tests {
             (other, one)
         };
         (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// A headless frame the way `table.rs` drives one: no texture uploads, the query pane's own rect.
+    fn query_frame() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::pos2(344.0, 75.0),
+                egui::vec2(776.0, 900.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// The toolbar's `.btn` wears one of the design's three faces, and `off` beats emphasis: a
+    /// disabled `.btn.primary` is the plain disabled button.
+    #[test]
+    fn a_toolbar_button_wears_one_of_the_designs_three_faces() {
+        for tokens in [Tokens::of("dark"), Tokens::of("light")] {
+            let theme = if tokens.dark { "dark" } else { "light" };
+            let sheet = tokens.panel_high;
+
+            let plain = button_face(&tokens, sheet, Emphasis::Plain, true);
+            assert_eq!(plain.fill, sheet, "a plain button sits on its sheet's fill");
+            assert_eq!(plain.border, tokens.stroke);
+            assert_eq!(plain.ink, tokens.text);
+            assert_eq!(plain.hover, Some(tokens.hover));
+
+            let primary = button_face(&tokens, sheet, Emphasis::Primary, true);
+            assert_eq!(primary.fill, tokens.accent);
+            assert_eq!(primary.border, tokens.accent_line);
+            assert_eq!(primary.ink, tokens.accent_text);
+            assert_eq!(
+                primary.hover, None,
+                "the design's primary has no hover fill"
+            );
+
+            for emphasis in [Emphasis::Plain, Emphasis::Primary] {
+                let off = button_face(&tokens, sheet, emphasis, false);
+                assert_eq!(
+                    off.fill,
+                    Color32::TRANSPARENT,
+                    "`.btn.off` paints no fill of its own"
+                );
+                assert_eq!(off.ink, tokens.text_faint);
+                assert_eq!(off.hover, None, "a disabled button ignores the pointer");
+                // A transparent fill means the band's own fill shows through, and those differ: the
+                // editor's `.tb` is `panel_alt` inside the pane, the register's `.rbar` is `panel`.
+                for under in [tokens.panel_alt, tokens.panel, sheet] {
+                    let ratio = contrast(off.ink, under);
+                    assert!(
+                        ratio >= 2.3,
+                        "{theme}: the disabled ink is {ratio:.2}:1 on its band"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The `.btn` reserves room for its mark before it measures itself, and the editor's two marks are
+    /// the design's fills rather than glyphs.
+    #[test]
+    fn a_toolbar_button_reserves_room_for_the_mark_it_carries() {
+        assert_eq!(Mark::Play.size(), Vec2::new(7.0, 10.0));
+        assert_eq!(Mark::Stop.size(), Vec2::splat(8.0));
+        assert_eq!(
+            Mark::Glyph(crate::icons::Glyph::Warning).size(),
+            Vec2::splat(GLYPH_BOX)
+        );
+
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut out = ctx.run_ui(query_frame(), |ui| {
+            let bare = toolbar_button_width(ui, &tokens, "Run", None);
+            let played = toolbar_button_width(ui, &tokens, "Run", Some(Mark::Play));
+            assert_eq!(played - bare, Mark::Play.size().x + f32::from(S3));
+            // The label, a padding and a 1px border each side, and nothing else.
+            assert_eq!(
+                bare,
+                measured(ui, tokens.font(T_SM), "Run") + 2.0 * f32::from(S4) + 2.0
+            );
+
+            // Whatever the caller appends starts a gap after the label and the button grows to fit
+            // it: the design's `Export` carries its caret inside the button.
+            let width = toolbar_button_width(ui, &tokens, "Export", None);
+            let mut placed = Rect::NOTHING;
+            let button = toolbar_button(
+                ui,
+                &tokens,
+                "Export",
+                None,
+                tokens.panel_high,
+                Emphasis::Plain,
+                true,
+                |ui| {
+                    placed = ui
+                        .allocate_exact_size(Vec2::new(10.0, 10.0), Sense::hover())
+                        .0;
+                },
+            );
+            assert_eq!(
+                placed.left(),
+                button.rect.left() + width - f32::from(S4) - 1.0 + f32::from(S3),
+                "the trailing content starts one padding and border short of the right edge"
+            );
+            assert_eq!(button.rect.width(), width + f32::from(S3) + 10.0);
+            assert_eq!(button.rect.height(), TOOLBAR_BTN_H);
+        });
+        out.textures_delta.clear();
+    }
+
+    /// The chrome reaches the frame even though the caller's content is painted first: the fill, the
+    /// pointer's fill and the border go into slots reserved before it.
+    #[test]
+    fn a_toolbar_button_paints_the_face_it_chose() {
+        let tokens = Tokens::of("dark");
+        let painted = |emphasis: Emphasis, enabled: bool| -> Vec<egui::Shape> {
+            let ctx = egui::Context::default();
+            tokens.apply(&ctx);
+            let mut out = ctx.run_ui(query_frame(), |ui| {
+                let _ = toolbar_button(
+                    ui,
+                    &tokens,
+                    "Run",
+                    Some(Mark::Play),
+                    tokens.panel_high,
+                    emphasis,
+                    enabled,
+                    |ui| {
+                        ui.allocate_exact_size(Vec2::new(10.0, 10.0), Sense::hover());
+                    },
+                );
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .into_iter()
+                .map(|clipped| clipped.shape)
+                .collect()
+        };
+        let filled = |shapes: &[egui::Shape], colour: Color32| {
+            shapes
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect) if rect.fill == colour))
+        };
+        let outlined = |shapes: &[egui::Shape], colour: Color32| {
+            shapes.iter().any(
+                |shape| matches!(shape, egui::Shape::Rect(rect) if rect.stroke.color == colour),
+            )
+        };
+
+        let primary = painted(Emphasis::Primary, true);
+        assert!(
+            filled(&primary, tokens.accent),
+            "the primary's fill has to reach the frame"
+        );
+        assert!(outlined(&primary, tokens.accent_line));
+
+        let off = painted(Emphasis::Plain, false);
+        assert!(
+            !filled(&off, tokens.panel_high),
+            "a disabled button paints no sheet fill"
+        );
+        assert!(!filled(&off, tokens.accent));
+        assert!(outlined(&off, tokens.stroke));
+    }
+
+    /// `.note` is 20 tall and its 5px dot sits inside it, one padding in from the left edge.
+    #[test]
+    fn a_note_pill_centres_its_dot_inside_its_twenty() {
+        assert_eq!(NOTE_H, 20.0);
+        let pill = Rect::from_min_size(egui::pos2(344.0, 507.0), Vec2::new(214.0, NOTE_H));
+        let centre = note_dot_centre(pill);
+        assert_eq!(centre.y, pill.center().y);
+        assert_eq!(centre.x, 344.0 + f32::from(S4) + 1.0 + NOTE_DOT / 2.0);
+        assert!(
+            centre.x - NOTE_DOT / 2.0 >= pill.left() && centre.x + NOTE_DOT / 2.0 <= pill.right(),
+            "the dot's box has to sit inside the pill"
+        );
+        const {
+            assert!(
+                NOTE_DOT < NOTE_H,
+                "the dot has to sit inside the pill's height"
+            )
+        };
+    }
+
+    /// Both error bands: their parts add up to the height the register's layout spends on them, and
+    /// every inner slot fits inside that height.
+    #[test]
+    fn both_error_bands_add_up_to_their_constants() {
+        assert_eq!(STMT_BAND_H, 56.0, "the design's `.band` is 56");
+        // 56 = a 16px title, 2px of air, a 16px mono sub-line, and what that leaves above and below.
+        assert_eq!(
+            2.0 * STMT_BAND_PAD_V + STMT_TITLE_H + f32::from(S1) + STMT_SUB_H,
+            STMT_BAND_H
+        );
+        const { assert!(STMT_BAND_PAD_V > 0.0) };
+        // The `.ico` box and its 2px drop have to fit beside the text column.
+        assert!(STMT_MARK_BOX + f32::from(S1) <= STMT_TITLE_H + f32::from(S1) + STMT_SUB_H);
+
+        assert_eq!(REG_ERR_PAD, S5, "the design pads `.eband` with `--s5`");
+        assert_eq!(
+            register_error_band_h(),
+            86.0,
+            "12 + 18 + 6 + 16 + 6 + 16 + 12"
+        );
+        assert_eq!(
+            register_error_band_h(),
+            2.0 * f32::from(REG_ERR_PAD)
+                + REG_ERR_TAG_H
+                + f32::from(S3)
+                + REG_ERR_LINE_H
+                + f32::from(S3)
+                + REG_ERR_LINE_H
+        );
+        // The body's own height: the tag row, the message and the statement, `--s3` apart.
+        let body = register_error_band_h() - 2.0 * f32::from(REG_ERR_PAD);
+        assert!(REG_ERR_TAG_H + f32::from(S3) + 2.0 * REG_ERR_LINE_H <= body);
+        // The design's 14px mark, dropped 2px, has to fit in the same body.
+        assert!(REG_ERR_MARK + f32::from(S1) <= body);
+    }
+
+    /// The four widgets allocate exactly the heights their constants claim.
+    #[test]
+    fn the_query_workspaces_bands_are_the_heights_their_constants_claim() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut heights = [0.0_f32; 4];
+        let mut out = ctx.run_ui(query_frame(), |ui| {
+            heights[0] = statement_band(
+                ui,
+                &tokens,
+                "near \"FROMM\": syntax error",
+                "SQLITE_ERROR · Ln 3, Col 1 · statement 1 · nothing was executed",
+                |_| {},
+            )
+            .height();
+            heights[1] = register_error_band(
+                ui,
+                &tokens,
+                "SQLITE_ERROR",
+                "no such column: statuss",
+                "SELECT id, statuss FROM main.customers;",
+                |_| {},
+            )
+            .height();
+            heights[2] = note_pill(
+                ui,
+                &tokens,
+                "statement 2 of 2 · no result set",
+                Some(tokens.info),
+            )
+            .rect
+            .height();
+            heights[3] = toolbar_button(
+                ui,
+                &tokens,
+                "Run",
+                Some(Mark::Play),
+                tokens.panel_high,
+                Emphasis::Primary,
+                true,
+                |_| {},
+            )
+            .rect
+            .height();
+        });
+        out.textures_delta.clear();
+        assert_eq!(heights[0], STMT_BAND_H);
+        assert_eq!(heights[1], register_error_band_h());
+        assert_eq!(heights[2], NOTE_H);
+        assert_eq!(heights[3], TOOLBAR_BTN_H);
     }
 
     /// Every foreground/background pair the interface paints, in both themes, against the floors this

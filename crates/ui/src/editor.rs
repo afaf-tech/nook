@@ -23,7 +23,7 @@ pub fn show(
         .and_then(|i| session.conns.get(i))
         .map(|c| c.cfg.name.clone())
         .unwrap_or_else(|| "no connection".into());
-    let error = session.tabs[tab_index].sql.error.clone();
+    let error = session.tabs[tab_index].sql.error().map(str::to_string);
     let result = session.tabs[tab_index].sql.last_result.clone();
     let result_label = session.tabs[tab_index].sql.result_label.clone();
 

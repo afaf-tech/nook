@@ -411,16 +411,39 @@ impl GridState {
     }
 }
 
+/// One statement of a run: what it was, what it produced, how long it took, and why it failed.
+/// `sql.run` keeps one per statement, so the results register can show each statement's own rows.
+#[derive(Debug, Clone)]
+pub struct StatementRun {
+    pub statement: String,
+    pub result: Option<ResultSet>,
+    pub elapsed_ms: f64,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SqlState {
     pub text: String,
     pub last_result: Option<ResultSet>,
     pub result_label: String,
-    pub error: Option<String>,
     pub elapsed_ms: f64,
     /// Statements of the last run, so `sql.explainStatement` and history can refer to them.
     pub statements: Vec<String>,
+    /// One entry per statement of the last run, in run order. The next run replaces them.
+    pub results: Vec<StatementRun>,
     pub history_cursor: Option<usize>,
+}
+
+impl SqlState {
+    /// The failed run's message. At most one, because a run stops at the first failure.
+    pub fn error(&self) -> Option<&str> {
+        self.results.iter().find_map(|run| run.error.as_deref())
+    }
+
+    /// What the last run cost: the sum of its statements' own timings.
+    pub fn total_ms(&self) -> f64 {
+        self.results.iter().map(|run| run.elapsed_ms).sum()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
