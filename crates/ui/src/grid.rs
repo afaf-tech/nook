@@ -281,6 +281,7 @@ pub fn show(
         sortable: true,
         gutter: true,
         height: available,
+        row_h: design::row_h(session.settings.density),
         empty_text: "No rows on this page. Change the filter, turn the page, or insert a row.",
     };
     ui.add_space(2.0);

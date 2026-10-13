@@ -1,7 +1,7 @@
 //! The application shell: app bar with real menus, tab strip, status bar, log drawer, sidebar,
 //! dialogs, control channel and the scheduled-job tick.
 
-use datacraft_engine::{Conn, Level, Session, TabKind, TableRef};
+use datacraft_engine::{Conn, Density, Level, Session, TabKind, TableRef};
 use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::Value;
 
@@ -86,6 +86,60 @@ impl Default for DatagenForm {
             overrides: std::collections::BTreeMap::new(),
         }
     }
+}
+
+/// One top-bar menu: the design keeps six of them, each opening the command groups the registry
+/// already publishes.
+fn menu_button(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    menu: &str,
+    groups: &[&str],
+    state: &mut UiState,
+) {
+    // The design's `.menu` is a bare label: no fill, no border, 28px tall and 6px of padding, with a
+    // fill only while the pointer is on it. egui's default button paints chrome in every state, so
+    // the visuals are scoped here rather than faked with an explicit fill that would kill the hover.
+    ui.scope(|ui| {
+        let widgets = &mut ui.style_mut().visuals.widgets;
+        widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+        widgets.inactive.bg_stroke = Stroke::NONE;
+        widgets.hovered.weak_bg_fill = tokens.hover;
+        widgets.hovered.bg_stroke = Stroke::NONE;
+        widgets.active.weak_bg_fill = tokens.panel_high;
+        widgets.active.bg_stroke = Stroke::NONE;
+        ui.style_mut().spacing.button_padding = Vec2::new(f32::from(t::S3), 0.0);
+        let button = egui::Button::new(RichText::new(menu).size(t::T_SM).color(tokens.text_dim))
+            .corner_radius(CornerRadius::same(t::R_CTL))
+            .min_size(Vec2::new(0.0, t::MENU_H));
+        egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+            ui.set_min_width(280.0);
+            for group in groups {
+                let specs: Vec<&'static datacraft_engine::CommandSpec> =
+                    datacraft_engine::registry()
+                        .iter()
+                        .filter(|c| c.group == *group)
+                        .collect();
+                if specs.is_empty() {
+                    continue;
+                }
+                ui.menu_button(RichText::new(*group).size(t::T_SM), |ui| {
+                    ui.set_min_width(340.0);
+                    for spec in specs {
+                        let response =
+                            ui.button(RichText::new(spec.label).size(t::T_SM).color(tokens.text));
+                        if response.clicked() {
+                            state.open_command(spec.id.to_string());
+                            ui.close();
+                        }
+                        if !spec.help.is_empty() {
+                            response.on_hover_text(spec.help);
+                        }
+                    }
+                });
+            }
+        });
+    });
 }
 
 /// Everything the UI itself remembers between frames.
@@ -191,6 +245,12 @@ impl UiState {
             Some((id, rest)) => (id.to_string(), rest.to_string()),
             None => (spec, String::new()),
         };
+        // Preferences is a form, not a JSON runner: the top bar has no Settings button any more
+        // (the design does not), so its one entry in the File menu opens the dialog.
+        if id == "app.settings" {
+            self.settings_open = true;
+            return;
+        }
         self.command_id = id.clone();
         let base = datacraft_engine::find(&id)
             .map(|s| s.params.to_string())
@@ -542,112 +602,295 @@ impl DatacraftApp {
     }
 
     /// Application bar: identity, menu bar, search, and the state cluster on the right.
+    /// Top bar, in the design's order: brand, workspace, menus, palette field and keycap, then the
+    /// state cluster (pending, control channel, density, theme) pinned to the right edge.
     fn app_bar(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
         let band = t::band_h(ui, tokens, APP_BAR_H, |ui| {
             ui.horizontal(|ui| {
-                let (mark_rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::hover());
+                ui.spacing_mut().item_spacing.x = f32::from(t::S4);
+
+                let (mark, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
                 ui.painter()
-                    .rect_filled(mark_rect, CornerRadius::same(6), tokens.accent);
+                    .rect_filled(mark, CornerRadius::same(t::R_BOX), tokens.accent);
                 ui.painter().text(
-                    mark_rect.center(),
+                    mark.center(),
                     Align2::CENTER_CENTER,
                     "DC",
-                    tokens.font(11.5),
+                    tokens.font(t::T_XS),
                     tokens.accent_text,
                 );
-                ui.add_space(2.0);
-                ui.label(RichText::new("DataCraft").size(13.5).color(tokens.text));
-                ui.add_space(6.0);
+                ui.label(RichText::new("DataCraft").size(t::T_MD).color(tokens.text));
+
+                self.workspace_button(ui, tokens);
                 t::divider(ui, tokens);
 
-                for (menu, groups) in MENUS {
-                    ui.menu_button(RichText::new(*menu).size(12.5), |ui| {
-                        ui.set_min_width(280.0);
-                        for group in *groups {
-                            let specs: Vec<&'static datacraft_engine::CommandSpec> =
-                                datacraft_engine::registry()
-                                    .iter()
-                                    .filter(|c| c.group == *group)
-                                    .collect();
-                            if specs.is_empty() {
-                                continue;
-                            }
-                            ui.menu_button(RichText::new(*group).size(12.5), |ui| {
-                                ui.set_min_width(340.0);
-                                for spec in specs {
-                                    let response = ui.button(
-                                        RichText::new(spec.label).size(12.5).color(tokens.text),
-                                    );
-                                    if response.clicked() {
-                                        self.state.open_command(spec.id.to_string());
-                                        ui.close();
-                                    }
-                                    if !spec.help.is_empty() {
-                                        response.on_hover_text(spec.help);
-                                    }
-                                }
-                            });
-                        }
-                    });
+                ui.scope(|ui| {
+                    // The design's `.menus` is one flex block, so the six labels sit flush.
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (menu, groups) in MENUS {
+                        menu_button(ui, tokens, menu, groups, &mut self.state);
+                    }
+                });
+
+                // The palette is a real field: clicking it opens the overlay, which then owns the
+                // focus, so the bar reads like a search box and behaves like one.
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.state.palette_query)
+                        .hint_text(
+                            RichText::new("Search or run a command")
+                                .size(t::T_SM)
+                                .color(tokens.text_faint),
+                        )
+                        .font(tokens.font(t::T_SM))
+                        .text_color(tokens.text)
+                        .desired_width(230.0)
+                        // The design's field is 26 tall: a 12px galley, 1px of frame on each side and
+                        // 6 above and below to make up the rest, with the magnifier inside.
+                        .margin(egui::Margin {
+                            left: t::S4 + t::GLYPH_SM as i8 + t::S3,
+                            right: t::S4,
+                            top: 6,
+                            bottom: 6,
+                        }),
+                );
+                if field.gained_focus() || field.clicked() {
+                    self.state.palette_open = true;
                 }
+                let field_rect = field.rect;
+                field.on_hover_text("Command palette (Cmd K)");
+                icons::glyph(
+                    ui,
+                    egui::Rect::from_min_size(
+                        egui::pos2(
+                            field_rect.left() + f32::from(t::S4) + 1.0,
+                            field_rect.center().y - t::GLYPH_SM / 2.0,
+                        ),
+                        Vec2::splat(t::GLYPH_SM),
+                    ),
+                    Glyph::Search,
+                    tokens.text_faint,
+                );
+                t::keycap(ui, tokens, "Cmd K");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if t::ghost_button(ui, tokens, "Settings", true)
-                        .on_hover_text("Preferences")
-                        .clicked()
-                    {
-                        self.state.settings_open = true;
-                    }
                     let theme = self.session.settings.theme.clone();
                     let next = if theme == "dark" { "light" } else { "dark" };
-                    if t::ghost_button(
-                        ui,
-                        tokens,
-                        if theme == "dark" { "Light" } else { "Dark" },
-                        true,
-                    )
-                    .on_hover_text(format!("Switch to the {next} theme"))
-                    .clicked()
+                    let label = if theme == "dark" { "Light" } else { "Dark" };
+                    if t::icon_button(ui, tokens, label, Some(Glyph::Sun), true)
+                        .on_hover_text(format!("Switch to the {next} theme"))
+                        .clicked()
                     {
                         let _ = self.session.run(
                             "app.setSetting",
                             serde_json::json!({"key": "theme", "value": next}),
                         );
                     }
-                    // Scheduled jobs moved to the activity rail; the palette stays the fallback.
-
-                    // The palette is a real field: clicking it opens the overlay, which then owns the
-                    // focus, so the bar reads like a search box and behaves like one.
-                    ui.spacing_mut().interact_size.y = t::ICON_BUTTON_H;
-                    let field = ui.add(
-                        egui::TextEdit::singleline(&mut self.state.palette_query)
-                            .hint_text(
-                                RichText::new("Search or run a command")
-                                    .size(t::T_SM)
-                                    .color(tokens.text_faint),
-                            )
-                            .font(tokens.font(t::T_SM))
-                            .text_color(tokens.text)
-                            .desired_width(230.0)
-                            // The design's field is 26 tall: a 12px galley, 1px of frame on each
-                            // side, and 6 above and below to make up the rest.
-                            .margin(egui::Margin {
-                                left: t::S4,
-                                right: t::S4,
-                                top: 6,
-                                bottom: 6,
+                    // The design's density switch, between the agent chip and the theme toggle.
+                    let density = self.session.settings.density;
+                    let options = [
+                        ("Compact", density == Density::Compact),
+                        ("Comfortable", density == Density::Comfortable),
+                    ];
+                    if let Some(index) = t::segmented(ui, tokens, &options) {
+                        let _ = self.session.run(
+                            "app.setSetting",
+                            serde_json::json!({
+                                "key": "density",
+                                "value": if index == 0 { "compact" } else { "comfortable" },
                             }),
-                    );
-                    if field.gained_focus() || field.clicked() {
-                        self.state.palette_open = true;
+                        );
                     }
-                    field.on_hover_text("Command palette (Cmd+K)");
-                    t::keycap(ui, tokens, "Cmd K");
-                    t::divider(ui, tokens);
+                    // The control channel is the agent surface, so it reports here rather than twice.
+                    let mut line = "agent idle".to_string();
+                    let mut ink = tokens.text_dim;
+                    let mut dot = tokens.text_faint;
+                    let mut stroke = tokens.stroke;
+                    if let Some(control) = &self.state.control {
+                        line = format!("control channel :{}", control.port);
+                        ink = tokens.text;
+                        dot = tokens.info;
+                        stroke = tokens.accent_line;
+                    }
+                    let response = t::state_chip(ui, tokens, &line, None, ink, dot);
+                    ui.painter().rect_stroke(
+                        response.rect,
+                        CornerRadius::same(t::R_CHIP),
+                        Stroke::new(1.0, stroke),
+                        egui::StrokeKind::Inside,
+                    );
+                    response.on_hover_text("Headless callers talk to the app over this channel");
+
+                    let pending: usize = self
+                        .session
+                        .tabs
+                        .iter()
+                        .map(|tab| tab.grid.pending.len())
+                        .sum();
+                    let text = format!("{pending} pending");
+                    if pending > 0 {
+                        t::state_chip(
+                            ui,
+                            tokens,
+                            &text,
+                            Some(tokens.dirty),
+                            tokens.dirty_text,
+                            tokens.warn,
+                        );
+                    } else {
+                        t::state_chip(ui, tokens, &text, None, tokens.text_dim, tokens.text_faint);
+                    }
                 });
             });
         });
         t::band_hairline(ui, tokens, band);
+    }
+
+    /// The design's `.ws`: the active workspace with its engine tag and the chevron that opens the
+    /// list of the others. Switching a workspace is switching the connection the app is talking to.
+    fn workspace_button(&mut self, ui: &mut egui::Ui, tokens: &Tokens) {
+        let font = tokens.font(t::T_SM);
+        let (name, engine) = match self
+            .session
+            .active_conn
+            .and_then(|index| self.session.conns.get(index))
+        {
+            Some(conn) => (
+                conn.cfg.name.clone(),
+                Some(conn.cfg.kind.label().to_uppercase()),
+            ),
+            None => ("No connection".to_string(), None),
+        };
+        let name_width = ui
+            .painter()
+            .layout_no_wrap(name.clone(), font.clone(), Color32::PLACEHOLDER)
+            .size()
+            .x;
+        let engine_width = engine
+            .as_ref()
+            .map(|label| {
+                ui.painter()
+                    .layout_no_wrap(label.clone(), tokens.mono(t::T_XS), Color32::PLACEHOLDER)
+                    .size()
+                    .x
+                    + 2.0 * f32::from(t::S3)
+                    + 2.0
+                    + f32::from(t::S3)
+            })
+            .unwrap_or(0.0);
+        let width = 1.0
+            + f32::from(t::S4)
+            + t::GLYPH_BOX
+            + f32::from(t::S3)
+            + name_width
+            + engine_width
+            + t::GLYPH_SM
+            + f32::from(t::S3)
+            + f32::from(t::S3)
+            + 1.0;
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, t::ICON_BUTTON_H), Sense::click());
+        let radius = CornerRadius::same(t::R_CTL);
+        let painter = ui.painter();
+        painter.rect_filled(rect, radius, tokens.panel_alt);
+        painter.rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, tokens.stroke),
+            egui::StrokeKind::Inside,
+        );
+        if response.hovered() {
+            painter.rect_filled(rect, radius, tokens.hover);
+        }
+        let mut x = rect.left() + f32::from(t::S4) + 1.0;
+        icons::glyph(
+            ui,
+            egui::Rect::from_min_size(
+                egui::pos2(x, rect.center().y - t::GLYPH_BOX / 2.0),
+                Vec2::splat(t::GLYPH_BOX),
+            ),
+            Glyph::Database,
+            tokens.text_dim,
+        );
+        x += t::GLYPH_BOX + f32::from(t::S3);
+        painter.text(
+            egui::pos2(x, rect.center().y),
+            Align2::LEFT_CENTER,
+            &name,
+            font,
+            tokens.text,
+        );
+        x += name_width;
+        if let Some(engine) = engine {
+            x += f32::from(t::S3);
+            let tag = egui::Rect::from_min_size(
+                egui::pos2(x, rect.center().y - t::TAG_H / 2.0),
+                Vec2::new(engine_width - f32::from(t::S3), t::TAG_H),
+            );
+            let tag_radius = CornerRadius::same(t::R_CTL);
+            painter.rect_filled(tag, tag_radius, tokens.hover);
+            painter.rect_stroke(
+                tag,
+                tag_radius,
+                Stroke::new(1.0, tokens.stroke),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                tag.center(),
+                Align2::CENTER_CENTER,
+                &engine,
+                tokens.mono(t::T_XS),
+                tokens.text_dim,
+            );
+            x += engine_width - f32::from(t::S3);
+        }
+        icons::glyph(
+            ui,
+            egui::Rect::from_min_size(
+                egui::pos2(x + f32::from(t::S3), rect.center().y - t::GLYPH_SM / 2.0),
+                Vec2::splat(t::GLYPH_SM),
+            ),
+            Glyph::Chevron,
+            tokens.text_dim,
+        );
+
+        // Which connection the app talks to is the app's own verb, so the list is the real one.
+        let open: Vec<(usize, String)> = self
+            .session
+            .conns
+            .iter()
+            .enumerate()
+            .map(|(index, conn)| (index, conn.cfg.name.clone()))
+            .collect();
+        let mut select: Option<usize> = None;
+        egui::Popup::menu(&response).show(|ui| {
+            ui.set_min_width(200.0);
+            if open.is_empty() {
+                ui.label(
+                    RichText::new("No connections yet")
+                        .size(t::T_SM)
+                        .color(tokens.text_dim),
+                );
+            }
+            for (index, name) in open {
+                let active = self.session.active_conn == Some(index);
+                let label = if active { format!("· {name}") } else { name };
+                if ui
+                    .button(RichText::new(label).size(t::T_SM).color(tokens.text))
+                    .clicked()
+                {
+                    select = Some(index);
+                    ui.close();
+                }
+            }
+        });
+        if let Some(index) = select {
+            if let Err(e) = self
+                .session
+                .run("conn.select", serde_json::json!({"conn": index}))
+            {
+                self.session.log(Level::Warn, e.to_string());
+            }
+        }
     }
 
     /// Activity rail: the five workspaces the design shows, each wired to a destination the app
@@ -682,7 +925,7 @@ impl DatacraftApp {
             .position(|tab| tab.kind == TabKind::Report);
 
         let entries = [
-            (Glyph::Connections, "Connections", true, on_welcome, 0),
+            (Glyph::Database, "Connections", true, on_welcome, 0),
             (
                 Glyph::Queries,
                 "New query",
@@ -1495,4 +1738,27 @@ fn save_png(path: &str, image: &egui::ColorImage) -> Result<usize, String> {
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
     writer.write_image_data(&bytes).map_err(|e| e.to_string())?;
     Ok(bytes.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferences_opens_the_dialog_and_everything_else_the_runner() {
+        let mut state = UiState::default();
+        state.open_command("app.settings".to_string());
+        assert!(
+            state.settings_open,
+            "File ▸ App ▸ Preferences opens the dialog"
+        );
+        assert!(
+            !state.command_open,
+            "Preferences is a form, not a JSON runner"
+        );
+
+        state.open_command("sql.run".to_string());
+        assert!(state.command_open);
+        assert_eq!(state.command_id, "sql.run");
+    }
 }

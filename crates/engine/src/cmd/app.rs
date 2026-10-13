@@ -4,7 +4,7 @@ use datacraft_core::{Error, Result};
 use serde_json::json;
 
 use crate::sqltext::KeywordCase;
-use crate::{CommandSpec, Level, Session, Snippet, TabKind};
+use crate::{CommandSpec, Density, Level, Session, Snippet, TabKind};
 
 pub fn commands() -> Vec<CommandSpec> {
     vec![
@@ -46,6 +46,7 @@ fn get_settings(session: &mut Session, _p: &crate::Params) -> Result<serde_json:
     let s = &session.settings;
     Ok(json!({
         "theme": s.theme,
+        "density": s.density.as_str(),
         "page_size": s.page_size,
         "max_rows": s.max_rows,
         "font_size": s.font_size,
@@ -69,6 +70,16 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
             }
             session.settings.theme = value.clone();
         }
+        "density" => {
+            let density = Density::parse(&value)
+                .ok_or_else(|| Error::config("density must be compact or comfortable"))?;
+            session.settings.density = density;
+            // A preference, so it is written to the store and read back on the next run.
+            session
+                .profiles
+                .set_setting("density", serde_json::json!(density.as_str()));
+            session.profiles.save()?;
+        }
         "page_size" => session.settings.page_size = clamp_usize(&value, 1, 100_000)?,
         "max_rows" => session.settings.max_rows = clamp_usize(&value, 1, 5_000_000)?,
         "font_size" => {
@@ -86,7 +97,7 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
         }
         other => {
             return Err(Error::config(format!(
-                "unknown preference '{other}'; try theme, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects"
+                "unknown preference '{other}'; try theme, density, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects"
             )))
         }
     }
@@ -294,4 +305,42 @@ fn delete_snippet(session: &mut Session, p: &crate::Params) -> Result<serde_json
         return Err(Error::not_found(format!("no snippet named '{name}'")));
     }
     Ok(json!({ "removed": name }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::scratch_config;
+
+    fn params(value: serde_json::Value) -> crate::Params {
+        crate::Params::from_json(value).expect("params")
+    }
+
+    #[test]
+    fn density_is_a_preference_that_survives_a_restart() {
+        let _guard = scratch_config();
+        let mut session = Session::new();
+        assert_eq!(session.settings.density, crate::Density::Compact);
+
+        let out = set_setting(
+            &mut session,
+            &params(json!({"key": "density", "value": "comfortable"})),
+        )
+        .expect("set density");
+        assert_eq!(out["density"], "comfortable");
+
+        let restarted = Session::new();
+        assert_eq!(restarted.settings.density, crate::Density::Comfortable);
+
+        let bad = set_setting(
+            &mut session,
+            &params(json!({"key": "density", "value": "spacious"})),
+        )
+        .expect_err("spacious is not a density");
+        assert!(bad.to_string().contains("compact or comfortable"), "{bad}");
+
+        let unknown = set_setting(&mut session, &params(json!({"key": "nope", "value": "1"})))
+            .expect_err("unknown key");
+        assert!(unknown.to_string().contains("density"), "{unknown}");
+    }
 }

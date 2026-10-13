@@ -459,9 +459,35 @@ pub enum Level {
     Success,
 }
 
+/// Row density, the design's Compact / Comfortable switch. `Compact` is `--h-row`, `Comfortable`
+/// `--h-row-comfort`; the UI turns it into pixels, so this stays a preference and not a measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Density {
+    Compact,
+    Comfortable,
+}
+
+impl Density {
+    pub fn parse(value: &str) -> Option<Density> {
+        match value {
+            "compact" => Some(Density::Compact),
+            "comfortable" => Some(Density::Comfortable),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Density::Compact => "compact",
+            Density::Comfortable => "comfortable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub theme: String,
+    pub density: Density,
     pub page_size: usize,
     pub max_rows: usize,
     pub font_size: f32,
@@ -476,6 +502,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             theme: "dark".into(),
+            density: Density::Compact,
             page_size: 200,
             max_rows: datacraft_drivers::MAX_ROWS,
             font_size: 13.0,
@@ -516,6 +543,17 @@ impl Session {
         let home = profiles::config_dir();
         let profiles = ProfileStore::load().unwrap_or_default();
         let jobs = JobStore::load().unwrap_or_default();
+        // The store is the settings file too: preferences written by `app.setSetting` are read back
+        // here on the next run.
+        let mut settings = Settings::default();
+        if let Some(density) = profiles
+            .settings()
+            .get("density")
+            .and_then(|value| value.as_str())
+            .and_then(Density::parse)
+        {
+            settings.density = density;
+        }
         let mut session = Session {
             conns: Vec::new(),
             active_conn: None,
@@ -526,7 +564,7 @@ impl Session {
             history: Vec::new(),
             snippets: default_snippets(),
             messages: Vec::new(),
-            settings: Settings::default(),
+            settings,
             next_tab_id: 1,
             home,
         };

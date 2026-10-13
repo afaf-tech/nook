@@ -133,3 +133,8 @@ implementations:
 - **Bar bands.** `theme::bar_frame` contributes no stroke and no margin, and every panel is built with
   `show_separator_line(false)`, so a bar's height is its token plus the hairline painted inside it.
   The ceiling is that any future panel must paint its own edges to be visible.
+- **Density reaches the data grid and the results, not the catalog lists.** `theme::row_h` turns the
+  persisted `density` preference into 26px compact or 30px comfortable rows, and only the two call
+  sites that render a real grid decide per frame (`grid.rs`, `editor.rs`); `views::list` pins
+  `theme::ROW_H`. The design demonstrates comfortable rows on its grid register, so the lists keep the
+  compact measure until an explore register asks otherwise — then `list` takes a row height too.

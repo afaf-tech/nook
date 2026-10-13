@@ -818,6 +818,21 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
                         serde_json::json!({"key": "theme", "value": next}),
                     );
                 }
+                ui.add_space(6.0);
+                let compact = session.settings.density == datacraft_engine::Density::Compact;
+                if let Some(index) = design::segmented(
+                    ui,
+                    tokens,
+                    &[("Compact", compact), ("Comfortable", !compact)],
+                ) {
+                    let _ = session.run(
+                        "app.setSetting",
+                        serde_json::json!({
+                            "key": "density",
+                            "value": if index == 0 { "compact" } else { "comfortable" },
+                        }),
+                    );
+                }
             });
             ui.add_space(8.0);
             design::card_frame(tokens).show(ui, |ui| {

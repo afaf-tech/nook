@@ -68,6 +68,10 @@ fn list(
         sortable: false,
         gutter: true,
         height: spec.height,
+        // ponytail: the catalog lists stay compact; density reaches the data grid and the results,
+        // where the design demonstrates it (`.reg-grid .gr.cmft`). Thread a row height through
+        // `list` when an explore register needs comfortable rows.
+        row_h: design::ROW_H,
         empty_text: spec.empty,
     };
     table::show(ui, tokens, &view, state, spec.id)

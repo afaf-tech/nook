@@ -86,6 +86,22 @@ impl ProfileStore {
         Ok(())
     }
 
+    /// The whole-app settings blob.
+    pub fn settings(&self) -> &serde_json::Value {
+        &self.settings
+    }
+
+    /// Remember one preference. The blob is JSON so the schema can grow without a migration; keys
+    /// nobody knows about are left alone.
+    pub fn set_setting(&mut self, key: &str, value: serde_json::Value) {
+        if !self.settings.is_object() {
+            self.settings = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let Some(map) = self.settings.as_object_mut() {
+            map.insert(key.to_owned(), value);
+        }
+    }
+
     pub fn list(&self) -> &[ConnectionConfig] {
         &self.profiles
     }

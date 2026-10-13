@@ -25,6 +25,14 @@ pub const TREE_H: f32 = 32.0;
 pub const BUTTON_H: f32 = 28.0;
 /// The top bar's bordered controls, as the design's `.iconbtn` and `.ws` are 26.
 pub const ICON_BUTTON_H: f32 = 26.0;
+/// The 12px glyph the design's `.sm` icons use inside a 26px control.
+pub const GLYPH_SM: f32 = 12.0;
+/// The design's `.menu`: a 28px label button with 6px of padding and no chrome of its own.
+pub const MENU_H: f32 = 28.0;
+/// The design's `.keycap`: an 11px line, 4px of padding and a 1px border.
+pub const KEYCAP_H: f32 = 21.0;
+/// The design's `.engine` tag: the same 11px line with 4px of padding and a 1px border.
+pub const TAG_H: f32 = 21.0;
 /// The box every bar control gives its 14-unit glyph.
 pub const GLYPH_BOX: f32 = 14.0;
 pub const SEG_H: f32 = 26.0;
@@ -317,10 +325,9 @@ pub fn card_frame(tokens: &Tokens) -> Frame {
 
 /// Vertical separator between toolbar clusters.
 pub fn divider(ui: &mut Ui, tokens: &Tokens) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(11.0, 18.0), Sense::hover());
-    let x = rect.center().x;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 16.0), Sense::hover());
     ui.painter().vline(
-        x,
+        rect.center().x,
         rect.top()..=rect.bottom(),
         Stroke::new(1.0, tokens.stroke),
     );
@@ -598,25 +605,196 @@ pub fn meter(ui: &mut Ui, tokens: &Tokens, fraction: f32, width: f32, colour: Co
 }
 
 /// Key cap, e.g. `Enter`, `Esc`.
-pub fn keycap(ui: &mut Ui, tokens: &Tokens, text: &str) {
-    Frame::new()
-        .fill(tokens.panel_alt)
-        .stroke(Stroke::new(1.0, tokens.stroke))
-        .corner_radius(CornerRadius::same(R_CTL))
-        .inner_margin(Margin {
-            left: S2,
-            right: S2,
-            top: S1,
-            bottom: S1,
-        })
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(text)
-                    .size(T_XS)
-                    .monospace()
-                    .color(tokens.text_dim),
-            )
-        });
+pub fn keycap(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
+    let font = tokens.mono(T_XS);
+    let width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x
+        + 2.0 * f32::from(S3)
+        + 2.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, KEYCAP_H), Sense::hover());
+    let radius = CornerRadius::same(R_CTL);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    // The design's `box-shadow: 0 1px 0 --border`: a hairline under the key, not a blur.
+    painter.hline(
+        rect.left()..=rect.right(),
+        rect.bottom() + 0.5,
+        Stroke::new(1.0, tokens.stroke),
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        font,
+        tokens.text,
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
+    response
+}
+
+/// The design's `.iconbtn` and `.ws`: a 26px bordered control on `surface-2` with an optional 12px
+/// glyph, an 8px padding and a 6px gap.
+/// The row height a density preference asks for: the design's `--h-row` or `--h-row-comfort`.
+pub fn row_h(density: datacraft_engine::Density) -> f32 {
+    match density {
+        datacraft_engine::Density::Compact => ROW_H,
+        datacraft_engine::Density::Comfortable => ROW_COMFORT_H,
+    }
+}
+
+pub fn icon_button(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    label: &str,
+    glyph: Option<crate::icons::Glyph>,
+    enabled: bool,
+) -> Response {
+    let font = tokens.font(T_XS);
+    let label_width = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x;
+    let glyph_width = if glyph.is_some() {
+        GLYPH_SM + f32::from(S3)
+    } else {
+        0.0
+    };
+    let width = label_width + glyph_width + 2.0 * f32::from(S4) + 2.0;
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width, ICON_BUTTON_H),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let radius = CornerRadius::same(R_CTL);
+    let ink = if enabled {
+        tokens.text_dim
+    } else {
+        tokens.text_faint
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    if response.hovered() && enabled {
+        painter.rect_filled(rect, radius, tokens.hover);
+    }
+    let mut x = rect.left() + f32::from(S4) + 1.0;
+    if let Some(glyph) = glyph {
+        crate::icons::glyph(
+            ui,
+            egui::Rect::from_min_size(
+                egui::pos2(x, rect.center().y - GLYPH_SM / 2.0),
+                Vec2::splat(GLYPH_SM),
+            ),
+            glyph,
+            ink,
+        );
+        x += GLYPH_SM + f32::from(S3);
+    }
+    painter.text(
+        egui::pos2(x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        ink,
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response
+}
+
+/// The design's `.engine`: an uppercase mono tag on `surface-3` with the control radius.
+pub fn mono_tag(ui: &mut Ui, tokens: &Tokens, text: &str) -> egui::Rect {
+    let font = tokens.mono(T_XS);
+    let width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x
+        + 2.0 * f32::from(S3)
+        + 2.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, TAG_H), Sense::hover());
+    let radius = CornerRadius::same(R_CTL);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.hover);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text.to_uppercase(),
+        font,
+        tokens.text_dim,
+    );
+    rect
+}
+
+/// The design's `.chip` and `.agent`: a 24px pill with a leading 6px dot, filled or outlined.
+pub fn state_chip(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    text: &str,
+    fill: Option<Color32>,
+    ink: Color32,
+    dot: Color32,
+) -> Response {
+    let font = tokens.font(T_XS);
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x;
+    let width = text_width + 6.0 + f32::from(S3) + 2.0 * f32::from(S4) + 2.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, CHIP_H), Sense::hover());
+    let radius = CornerRadius::same(R_CHIP);
+    let painter = ui.painter();
+    let fill = fill.unwrap_or(tokens.panel_alt);
+    painter.rect_filled(rect, radius, fill);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    painter.circle_filled(
+        egui::pos2(rect.left() + f32::from(S4) + 1.0 + 3.0, rect.center().y),
+        3.0,
+        dot,
+    );
+    painter.text(
+        egui::pos2(
+            rect.left() + f32::from(S4) + 1.0 + 6.0 + f32::from(S3),
+            rect.center().y,
+        ),
+        egui::Align2::LEFT_CENTER,
+        text,
+        font,
+        ink,
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
+    response
 }
 
 /// Filled rectangle with a hairline border.

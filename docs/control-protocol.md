@@ -38,6 +38,14 @@ A bad key is refused with `{"id":…,"error":"bad key; read …"}`.
 Anything else answers
 `{"error":"unknown method 'x'; try engine.run, ui.state, …"}`.
 
+## Preferences
+
+`app.setSetting` takes `{"key":…,"value":…}` and answers the whole settings object. `theme`,
+`page_size`, `max_rows`, `font_size`, `confirm_destructive`, `auto_commit_edits`, `keyword_case` and
+`show_system_objects` are set for the run; `density` (`compact` or `comfortable`, the design's row
+height switch) is written to `profiles.json` as well and is read back on the next start, so a
+scripted change outlives the process. `app.settings` echoes the same object.
+
 ## Driving it end to end
 
 ```sh

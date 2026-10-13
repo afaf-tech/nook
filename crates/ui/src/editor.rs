@@ -240,6 +240,7 @@ pub fn show(
                 sortable: false,
                 gutter: true,
                 height: (ui.available_height() - 30.0).max(120.0),
+                row_h: design::row_h(session.settings.density),
                 empty_text: "no rows",
             };
             crate::table::show(

@@ -6,16 +6,17 @@
 //! painting them is cheaper than the dependency. The coordinates below are the design's own, in its
 //! 14-unit box, mapped onto whatever rectangle the caller offers.
 //!
-//! Only the five glyphs the activity rail needs are here. Add the next one from the same design
-//! markup rather than inventing a shape.
+//! Only the glyphs the shell chrome needs are here. Add the next one from the same design markup
+//! rather than inventing a shape.
 
 use egui::{pos2, Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2};
 
 /// The glyphs the shell draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
-    /// A database cylinder: the Connections workspace.
-    Connections,
+    /// A database cylinder: the Connections workspace and the top bar's active workspace, which the
+    /// design draws with the same path data.
+    Database,
     /// A terminal window: the Queries workspace.
     Queries,
     /// A clock face: scheduled jobs.
@@ -24,6 +25,12 @@ pub enum Glyph {
     Reports,
     /// A pulse trace: the monitor.
     Monitor,
+    /// A downward chevron: the workspace button's "there is more behind this".
+    Chevron,
+    /// A magnifier: the command palette's field.
+    Search,
+    /// A sun: the theme toggle, which the design pairs with the name of the theme it switches to.
+    Sun,
 }
 
 /// The design's stroke, in its 14-unit box.
@@ -118,7 +125,7 @@ type Boxes = Vec<(Rect, f32)>;
 /// stroked rounded boxes.
 fn geometry(glyph: Glyph, at: &impl Fn(f32, f32) -> Pos2, scale: f32) -> (Lines, Rings, Boxes) {
     match glyph {
-        Glyph::Connections => {
+        Glyph::Database => {
             // Body: down the left wall, along the bottom, up the right wall. The `s` command in the
             // design's path mirrors the previous control point, which is what the second cubic does.
             let mut body = vec![at(2.4, 3.6), at(2.4, 10.4)];
@@ -188,6 +195,30 @@ fn geometry(glyph: Glyph, at: &impl Fn(f32, f32) -> Pos2, scale: f32) -> (Lines,
             Vec::new(),
             Vec::new(),
         ),
+        Glyph::Chevron => (
+            vec![vec![at(3.8, 5.6), at(7.0, 8.8), at(10.2, 5.6)]],
+            Vec::new(),
+            Vec::new(),
+        ),
+        Glyph::Search => (
+            vec![vec![at(9.4, 9.4), at(12.4, 12.4)]],
+            vec![(at(6.2, 6.2), Vec2::splat(4.2 * scale))],
+            Vec::new(),
+        ),
+        Glyph::Sun => (
+            vec![
+                vec![at(7.0, 1.4), at(7.0, 3.0)],
+                vec![at(7.0, 11.0), at(7.0, 12.6)],
+                vec![at(1.4, 7.0), at(3.0, 7.0)],
+                vec![at(11.0, 7.0), at(12.6, 7.0)],
+                vec![at(3.0, 3.0), at(4.2, 4.2)],
+                vec![at(9.8, 9.8), at(11.0, 11.0)],
+                vec![at(11.0, 3.0), at(9.8, 4.2)],
+                vec![at(4.2, 9.8), at(3.0, 11.0)],
+            ],
+            vec![(at(7.0, 7.0), Vec2::splat(3.0 * scale))],
+            Vec::new(),
+        ),
     }
 }
 
@@ -213,12 +244,15 @@ fn bounds(paths: &[Vec<Pos2>], rings: &[(Pos2, Vec2)], boxes: &[(Rect, f32)]) ->
 mod tests {
     use super::*;
 
-    const ALL: [Glyph; 5] = [
-        Glyph::Connections,
+    const ALL: [Glyph; 8] = [
+        Glyph::Database,
         Glyph::Queries,
         Glyph::Jobs,
         Glyph::Reports,
         Glyph::Monitor,
+        Glyph::Chevron,
+        Glyph::Search,
+        Glyph::Sun,
     ];
 
     /// The invariant that matters: a glyph never paints outside the rectangle it is handed, at any
@@ -252,11 +286,14 @@ mod tests {
     #[test]
     fn every_glyph_has_geometry() {
         for (glyph, arms, rings, boxes) in [
-            (Glyph::Connections, 2, 1, 0),
+            (Glyph::Database, 2, 1, 0),
             (Glyph::Queries, 2, 0, 1),
             (Glyph::Jobs, 1, 1, 0),
             (Glyph::Reports, 3, 0, 1),
             (Glyph::Monitor, 1, 0, 0),
+            (Glyph::Chevron, 1, 0, 0),
+            (Glyph::Search, 1, 1, 0),
+            (Glyph::Sun, 8, 1, 0),
         ] {
             let rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(32.0));
             let (paths, ring_list, box_list) = geometry(glyph, &mapper(rect), scale_of(rect));

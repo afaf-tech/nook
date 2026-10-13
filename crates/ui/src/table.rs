@@ -8,7 +8,7 @@
 use datacraft_core::Value;
 use egui::{Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
-use crate::theme::{Tokens, HEAD_H, ROW_H};
+use crate::theme::{Tokens, HEAD_H};
 
 const GUTTER_W: f32 = 54.0;
 const CELL_PAD: f32 = 9.0;
@@ -96,6 +96,8 @@ pub struct TableView<'a> {
     pub gutter: bool,
     /// Height of the scrolling body.
     pub height: f32,
+    /// Row height: the density setting through `theme::row_h`.
+    pub row_h: f32,
     pub empty_text: &'a str,
 }
 
@@ -322,7 +324,7 @@ pub fn show(
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                     for (row_index, row) in view.rows.iter().enumerate() {
                         let (row_rect, row_response) =
-                            ui.allocate_exact_size(Vec2::new(total_w, ROW_H), Sense::click());
+                            ui.allocate_exact_size(Vec2::new(total_w, view.row_h), Sense::click());
                         let full = egui::Rect::from_min_max(
                             row_rect.min,
                             egui::pos2(row_rect.left() + viewport_w, row_rect.bottom()),
@@ -349,8 +351,10 @@ pub fn show(
                                 .rect_filled(full, CornerRadius::ZERO, tokens.hover);
                         }
                         if view.gutter {
-                            let gutter =
-                                egui::Rect::from_min_size(row_rect.min, Vec2::new(gutter_w, ROW_H));
+                            let gutter = egui::Rect::from_min_size(
+                                row_rect.min,
+                                Vec2::new(gutter_w, view.row_h),
+                            );
                             ui.painter().rect_filled(
                                 gutter,
                                 CornerRadius::ZERO,
@@ -359,7 +363,7 @@ pub fn show(
                         }
                         if is_new {
                             ui.painter().rect_filled(
-                                Rect::from_min_size(row_rect.min, Vec2::new(2.0, ROW_H)),
+                                Rect::from_min_size(row_rect.min, Vec2::new(2.0, view.row_h)),
                                 CornerRadius::ZERO,
                                 tokens.accent,
                             );
@@ -368,7 +372,7 @@ pub fn show(
                         // Gutter: row number, plus a dot when the row has pending edits.
                         if view.gutter {
                             let gutter =
-                                Rect::from_min_size(row_rect.min, Vec2::new(gutter_w, ROW_H));
+                                Rect::from_min_size(row_rect.min, Vec2::new(gutter_w, view.row_h));
                             ui.painter().text(
                                 egui::pos2(gutter.right() - CELL_PAD, gutter.center().y),
                                 Align2::RIGHT_CENTER,
@@ -394,7 +398,7 @@ pub fn show(
                         for (column_index, column) in view.columns.iter().enumerate() {
                             let cell = Rect::from_min_size(
                                 egui::pos2(x, row_rect.top()),
-                                Vec2::new(widths[column_index], ROW_H),
+                                Vec2::new(widths[column_index], view.row_h),
                             );
                             let editing = state.editing == Some((row_index, column_index));
                             let dirty = view.pending.contains(&(row_index, column_index)) || is_new;
