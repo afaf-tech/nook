@@ -1,15 +1,19 @@
-//! Modal windows: connection editor, command runner, data generation, export, preferences, palette.
-//! They all share one frame so a dialog looks like a dialog everywhere.
+//! Modal windows: the connection editor and its confirmation on the design's own modal shell, and the
+//! command runner, data generation, export, preferences and palette still on their `egui::Window`
+//! frame. The redesign rebuilt the connection editor and nothing else, so two chromes stand side by
+//! side until the next slice moves the rest.
 
 use datacraft_core::{DriverKind, SslMode};
 use datacraft_engine::{Level, Session};
-use egui::{CornerRadius, RichText, Stroke};
+use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind};
 
-use crate::app::UiState;
+use crate::app::{Confirm, ConnStep, ConnectionForm, SshAuth, TestOutcome, UiState};
 use crate::table;
 use crate::theme::{self as design, Tokens};
 
-/// The one frame every dialog uses.
+/// The frame the command runner, data generation, export, preferences and the palette still use. The
+/// connection editor and its confirmation use [`dialog_shell`] instead — the design's own `.dlg`, with
+/// the scrim, the 6px radius and its `--s7`/`--s6` bands.
 fn dialog(ctx: &egui::Context, tokens: &Tokens) -> egui::Frame {
     egui::Frame::window(&ctx.style_of(ctx.theme()))
         .fill(tokens.panel)
@@ -20,6 +24,7 @@ fn dialog(ctx: &egui::Context, tokens: &Tokens) -> egui::Frame {
 
 pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
     connection_editor(ui, session, state, tokens);
+    confirmation(ui, session, state, tokens);
     command_runner(ui, session, state, tokens);
     datagen_dialog(ui, session, state, tokens);
     export_dialog(ui, session, state, tokens);
@@ -27,319 +32,1175 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
     palette(ui, session, state, tokens);
 }
 
-/// One labelled field row, so the connection form reads like a form and not like a grid.
-fn field(ui: &mut egui::Ui, tokens: &Tokens, label: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.label(RichText::new(label).size(11.5).color(tokens.text_dim));
-    ui.horizontal(|ui| add(ui));
-    ui.add_space(2.0);
+// ------------------------------------------------------------------ the connection editor
+
+/// `.dlg-b`'s content width: the dialog less its `--s7` padding either side.
+const BODY_W: f32 = design::DIALOG_W - 2.0 * design::S7 as f32;
+/// The confirmation's, at the design's narrow width.
+const BODY_W_NARROW: f32 = design::DIALOG_NARROW_W - 2.0 * design::S7 as f32;
+/// `.row`'s and `.dlg-b`'s gap.
+const ROW_GAP: f32 = design::S5 as f32;
+/// `.badge`'s box.
+const BADGE: f32 = 14.0;
+
+/// The engines the editor offers: the four with a driver, then the catalogued ones the registry knows
+/// and no driver opens yet.
+const ENGINES: [DriverKind; 8] = [
+    DriverKind::Sqlite,
+    DriverKind::Postgres,
+    DriverKind::MySql,
+    DriverKind::MariaDb,
+    DriverKind::SqlServer,
+    DriverKind::Oracle,
+    DriverKind::Mongo,
+    DriverKind::Redis,
+];
+
+/// The TLS step's honest line. The design's sentence promises a CA certificate file, which this app
+/// has no field for and no driver reads: `verify-ca`/`verify-full` check against the OS trust store.
+const TLS_HELPER: &str = "verify-ca and verify-full check the chain and the host name against this \
+system's trust store on every connect. The design's certificate paths have no field in this version.";
+
+/// What the footer's buttons asked the frame to do.
+#[derive(Default)]
+struct EditorAction {
+    test: bool,
+    save: bool,
+    close: bool,
 }
 
+/// `.dlg`: one centred modal — the whole window under `tokens.scrim`, on the design's frame at the
+/// design's width. `should_close()` is the backdrop click and Esc, so the × and both keys end the
+/// dialog the same way.
+fn dialog_shell(
+    ctx: &egui::Context,
+    tokens: &Tokens,
+    id: &str,
+    width: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) -> egui::ModalResponse<()> {
+    egui::Modal::new(egui::Id::new(("datacraft-dialog", id)))
+        .backdrop_color(tokens.scrim)
+        .frame(design::dialog_frame(tokens))
+        .show(ctx, |ui| {
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            add(ui);
+        })
+}
+
+/// `.dlg-b`: the step's body — `--s7` each side, `--s6` above and below, the step's children `--s5`
+/// apart. The band is content-sized, so every step's dialog is as tall as its own fields.
+fn dialogue_body(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(design::S7, design::S6))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = ROW_GAP;
+            add(ui);
+        });
+}
+
+/// `.row`: the step's fields `--s5` apart.
+fn conn_row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        add(ui);
+    });
+}
+
+/// `.fld`: the `--s6` label box, the `--s3` gap the caller's stack spends, and the 28px control, in a
+/// column of exactly `width` — which is what makes a field the 50 the design's arithmetic names.
+fn field_col(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            ui.spacing_mut().item_spacing.y = f32::from(design::S3);
+            add(ui);
+        },
+    );
+}
+
+/// The text inside an `.inp`: egui's own editor with no chrome of its own, so the box's fill, border
+/// and `--s4` padding are the only ones painted, and the placeholder is `text_faint` as the design has
+/// it — egui's default hint ink is not.
+fn input_text(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    value: &mut String,
+    width: f32,
+    hint: &str,
+    secret: bool,
+) -> egui::Response {
+    ui.visuals_mut().weak_text_color = Some(tokens.text_faint);
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .desired_width(width)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .font(tokens.font(design::T_MD))
+            .text_color(tokens.text)
+            .password(secret)
+            .hint_text(hint.to_owned()),
+    )
+}
+
+/// One `.inp` text field, its label and all.
+fn text_field(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    label: &str,
+    width: f32,
+    value: &mut String,
+    hint: &str,
+    error: bool,
+    enabled: bool,
+) -> egui::Response {
+    let mut painted = None;
+    field_col(ui, width, |ui| {
+        design::field_label(ui, tokens, label);
+        painted = Some(design::input(ui, tokens, width, error, enabled, |ui| {
+            input_text(
+                ui,
+                tokens,
+                value,
+                width - 2.0 * f32::from(design::S4),
+                hint,
+                false,
+            )
+        }));
+    });
+    painted.expect("the field painted")
+}
+
+/// A password `.inp`, with the design's `keychain` chip inside its right edge when the password is
+/// kept in the keychain. The chip takes its width first and the text gets what is left, which is what
+/// the design's `margin-left:auto` does.
+fn password_field(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    label: &str,
+    width: f32,
+    value: &mut String,
+    hint: &str,
+    error: bool,
+    enabled: bool,
+    chip: bool,
+) -> egui::Response {
+    let mut painted = None;
+    field_col(ui, width, |ui| {
+        design::field_label(ui, tokens, label);
+        painted = Some(design::input(ui, tokens, width, error, enabled, |ui| {
+            let text_width = width - 2.0 * f32::from(design::S4);
+            if chip {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    design::tag_of(ui, tokens, "keychain", design::KEYCHIP_H);
+                    let room = ui.available_width();
+                    input_text(ui, tokens, value, room, hint, true)
+                })
+                .inner
+            } else {
+                input_text(ui, tokens, value, text_width, hint, true)
+            }
+        }));
+    });
+    painted.expect("the field painted")
+}
+
+/// A numeric `.inp` with an optional trailing unit, which is how the design draws Timeout's `s` and
+/// the local port's `auto`.
+fn number_field(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    label: &str,
+    width: f32,
+    value: &mut u16,
+    max: u16,
+    suffix: &str,
+    enabled: bool,
+) -> egui::Response {
+    let mut painted = None;
+    field_col(ui, width, |ui| {
+        design::field_label(ui, tokens, label);
+        painted = Some(design::input(ui, tokens, width, false, enabled, |ui| {
+            let mut number = i64::from(*value);
+            let response = ui.add(
+                egui::DragValue::new(&mut number)
+                    .range(0..=i64::from(max))
+                    .speed(1.0),
+            );
+            if response.changed() {
+                *value = number.clamp(0, i64::from(max)) as u16;
+            }
+            if !suffix.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(suffix)
+                            .size(design::T_MD)
+                            .color(tokens.text_dim),
+                    );
+                });
+            }
+            response
+        }));
+    });
+    painted.expect("the field painted")
+}
+
+/// The design's `.inp.ui-font` with its chevron: a combo wearing the token layer's own control fill,
+/// stroke and radius, so it is the design's 28px control rather than a second visual language.
+fn select_field<T: PartialEq + Clone>(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    label: &str,
+    width: f32,
+    id: &str,
+    options: &[(T, String)],
+    value: &mut T,
+    enabled: bool,
+) -> egui::Response {
+    let mut painted = None;
+    field_col(ui, width, |ui| {
+        design::field_label(ui, tokens, label);
+        painted = Some(
+            ui.add_enabled_ui(enabled, |ui| {
+                let selected = options
+                    .iter()
+                    .find(|(option, _)| option == value)
+                    .map(|(_, text)| text.clone())
+                    .unwrap_or_default();
+                egui::ComboBox::from_id_salt(id)
+                    .selected_text(selected)
+                    .width(width)
+                    .show_ui(ui, |ui| {
+                        for (option, text) in options {
+                            ui.selectable_value(value, option.clone(), text);
+                        }
+                    })
+                    .response
+            })
+            .inner,
+        );
+    });
+    painted.expect("the field painted")
+}
+
+/// `.msg`: the design's badge and its sentence, in the state's own ink.
+fn msg_line(ui: &mut egui::Ui, tokens: &Tokens, ink: Color32, mark: &str, text: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = f32::from(design::S3);
+        let (badge, _) = ui.allocate_exact_size(egui::vec2(BADGE, BADGE), Sense::hover());
+        let painter = ui.painter();
+        painter.rect_stroke(
+            badge,
+            CornerRadius::same(2),
+            Stroke::new(1.0, ink),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            mark,
+            tokens.mono(9.0),
+            ink,
+        );
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .size(design::T_SM)
+                    .color(ink)
+                    .line_height(Some(design::T_SM * 1.45)),
+            )
+            .wrap(),
+        );
+    });
+}
+
+/// `.para`: the confirmation's one explanatory sentence.
+fn para(ui: &mut egui::Ui, tokens: &Tokens, text: &str) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .size(design::T_MD)
+                .color(tokens.text_dim)
+                .line_height(Some(design::T_MD * 1.5)),
+        )
+        .wrap(),
+    );
+}
+
+/// `.helper` for the database password: the design's sentence where there is a keychain, and the
+/// truth about where the password goes where there is not.
+fn password_helper(keychain: bool) -> &'static str {
+    if keychain {
+        "The password stays in the login keychain; the profile file keeps only a reference to it."
+    } else {
+        "This system has no OS keychain, so the password is kept in the profile file (mode 0600)."
+    }
+}
+
+/// `.helper` for the tunnel: one sentence owned here, per authentication mode, and the engine's own
+/// refusal where there is no keychain to promise.
+fn ssh_helper(keychain: bool, auth: SshAuth) -> &'static str {
+    if !keychain {
+        return datacraft_engine::profiles::NO_KEYCHAIN;
+    }
+    match auth {
+        SshAuth::Password => {
+            "The jump host signs in with this password instead of a key: the tunnel feeds it to ssh \
+through an askpass helper, and the profile file keeps only a reference. Unticked, you are asked on \
+every connect."
+        }
+        SshAuth::KeyFile => "The tunnel signs in with this key file; the profile keeps its path.",
+        SshAuth::Agent => {
+            "The tunnel signs in through your ssh agent and ~/.ssh/config; nothing is stored here."
+        }
+    }
+}
+
+/// The editor's `.dlg-sub`: the connection and its engine.
+fn connection_subtitle(state: &UiState) -> String {
+    let form = &state.connection_form;
+    if state.connection_editing.is_some() {
+        format!("{} · {}", form.name, form.kind.label())
+    } else {
+        format!("New profile · {}", form.kind.label())
+    }
+}
+
+/// The window this slice exists for: the design's `.dlg` with its four steps, its pinned test row and
+/// its two-row action band.
 fn connection_editor(
     ui: &mut egui::Ui,
     session: &mut Session,
     state: &mut UiState,
     tokens: &Tokens,
 ) {
-    if !state.connection_open {
+    if !state.connection_open || state.confirm.is_some() {
         return;
     }
-    let editing = state.connection_editing;
-    let title = if editing.is_some() {
-        "Edit connection"
-    } else {
-        "New connection"
-    };
-    let frame = dialog(ui.ctx(), tokens);
-    let mut open = true;
-    let mut close = false;
-    egui::Window::new(title)
-        .open(&mut open)
-        .frame(frame)
-        .collapsible(false)
-        .resizable(true)
-        .default_width(540.0)
-        .show(ui.ctx(), |ui| {
-            ui.set_min_width(500.0);
-            let form = &mut state.connection_form;
+    // The form is rebuilt once per open: an edit dialog that kept the previous form would show — and
+    // save — another connection's fields.
+    let key = Some(state.connection_editing);
+    if state.connection_form_id != key {
+        state.connection_form = match state
+            .connection_editing
+            .and_then(|index| session.conns.get(index))
+        {
+            Some(conn) => ConnectionForm::from_config(&conn.cfg),
+            None => ConnectionForm::default(),
+        };
+        state.connection_form_id = key;
+        state.test_state = None;
+    }
 
-            design::card_frame(tokens).show(ui, |ui| {
-                field(ui, tokens, "Name", |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.name)
-                            .desired_width(320.0)
-                            .hint_text("shop production"),
-                    );
-                });
-                field(ui, tokens, "Engine", |ui| {
-                    egui::ComboBox::from_id_salt("connection-kind")
-                        .selected_text(form.kind.label())
-                        .width(320.0)
-                        .show_ui(ui, |ui| {
-                            for kind in [
-                                DriverKind::Sqlite,
-                                DriverKind::Postgres,
-                                DriverKind::MySql,
-                                DriverKind::MariaDb,
-                            ] {
-                                ui.selectable_value(&mut form.kind, kind, kind.label());
-                            }
-                            ui.separator();
-                            for kind in [
-                                DriverKind::SqlServer,
-                                DriverKind::Oracle,
-                                DriverKind::Mongo,
-                                DriverKind::Redis,
-                            ] {
-                                ui.selectable_value(
-                                    &mut form.kind,
-                                    kind,
-                                    format!("{} (catalogued, no driver)", kind.label()),
-                                );
-                            }
-                        });
-                    if form.kind.is_file_based() {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut form.file)
-                                .desired_width(220.0)
-                                .hint_text("/path/to/file.db"),
-                        );
-                        if design::ghost_button(ui, tokens, "…", true).clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_title("SQLite database")
-                                .save_file()
-                            {
-                                form.file = path.to_string_lossy().into_owned();
-                            }
-                        }
-                    }
-                });
-                field(ui, tokens, "Group", |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.group)
-                            .desired_width(320.0)
-                            .hint_text("production, staging, local"),
-                    );
-                });
+    let mut action = EditorAction::default();
+    let response = dialog_shell(
+        ui.ctx(),
+        tokens,
+        "connection-editor",
+        design::DIALOG_W,
+        |ui| {
+            let title = if state.connection_editing.is_some() {
+                "Edit connection"
+            } else {
+                "New connection"
+            };
+            let subtitle = connection_subtitle(state);
+            if design::dialogue_head(ui, tokens, None, title, &subtitle, false).clicked() {
+                action.close = true;
+            }
+            let labels: Vec<&str> = ConnStep::ALL.iter().map(|step| step.label()).collect();
+            let active = ConnStep::ALL
+                .iter()
+                .position(|step| *step == state.connection_form.step)
+                .unwrap_or(0);
+            if let Some(clicked) = design::dialogue_tabs(ui, tokens, &labels, active) {
+                state.connection_form.step = ConnStep::ALL[clicked];
+            }
+            dialogue_body(ui, |ui| match state.connection_form.step {
+                ConnStep::General => general_step(ui, session, state, tokens),
+                ConnStep::Tls => tls_step(ui, tokens, state),
+                ConnStep::Tunnel => tunnel_step(ui, tokens, state),
+                ConnStep::Advanced => advanced_step(ui, session, state, tokens),
             });
+            editor_footer(ui, tokens, state, &mut action);
+        },
+    );
 
-            if !form.kind.is_file_based() {
-                ui.add_space(8.0);
-                design::card_frame(tokens).show(ui, |ui| {
-                    ui.label(RichText::new("Server").size(11.5).color(tokens.text_dim));
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut form.host)
-                                .desired_width(220.0)
-                                .hint_text("127.0.0.1"),
-                        );
-                        let mut port = form.port as i32;
-                        if ui
-                            .add(egui::DragValue::new(&mut port).range(1..=65535))
-                            .changed()
-                        {
-                            form.port = port.clamp(1, 65535) as u16;
-                        }
-                        egui::ComboBox::from_id_salt("connection-ssl")
-                            .selected_text(format!("SSL {}", form.ssl.label()))
-                            .width(150.0)
-                            .show_ui(ui, |ui| {
-                                for mode in [
-                                    SslMode::Disable,
-                                    SslMode::Prefer,
-                                    SslMode::Require,
-                                    SslMode::VerifyCa,
-                                    SslMode::VerifyFull,
-                                ] {
-                                    ui.selectable_value(&mut form.ssl, mode, mode.label());
-                                }
-                            });
-                    });
-                    ui.add_space(4.0);
-                    field(ui, tokens, "User", |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut form.user).desired_width(180.0));
-                        ui.label(RichText::new("Password").size(11.5).color(tokens.text_dim));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut form.password)
-                                .password(true)
-                                .desired_width(180.0),
-                        );
-                    });
-                    field(ui, tokens, "Database", |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut form.database).desired_width(320.0));
+    if action.test {
+        test_connection(session, state);
+    }
+    if action.save {
+        match save_connection(session, state) {
+            Ok(()) => {
+                session.log(
+                    Level::Success,
+                    format!("connection '{}' saved", state.connection_form.name.trim()),
+                );
+                action.close = true;
+            }
+            Err(error) => {
+                state.test_state = Some(TestOutcome {
+                    ok: false,
+                    line: format!("failed · {error}"),
+                });
+                session.log(Level::Error, error.to_string());
+            }
+        }
+    }
+    if action.close || response.should_close() {
+        state.connection_open = false;
+        state.connection_form_id = None;
+        state.test_state = None;
+    }
+}
+
+/// The design's General step: the profile's own fields, in the design's rows and widths.
+fn general_step(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
+    let editing = state.connection_editing.is_some();
+    let file_based = state.connection_form.kind.is_file_based();
+    let keychain =
+        state.connection_form.keychain && datacraft_engine::profiles::keychain_available();
+    let form = &mut state.connection_form;
+
+    // Connection name (`.fld.grow`) and the engine at the design's 180.
+    let name_w = BODY_W - ROW_GAP - 180.0;
+    conn_row(ui, |ui| {
+        text_field(
+            ui,
+            tokens,
+            "Connection name",
+            name_w,
+            &mut form.name,
+            "shop production",
+            false,
+            true,
+        );
+        let engines: Vec<(DriverKind, String)> = ENGINES
+            .iter()
+            .map(|kind| {
+                let text = if kind.implemented() {
+                    kind.label().to_string()
+                } else {
+                    format!("{} (catalogued, no driver)", kind.label())
+                };
+                (*kind, text)
+            })
+            .collect();
+        let engine = select_field(
+            ui,
+            tokens,
+            "Engine",
+            180.0,
+            "connection-kind",
+            &engines,
+            &mut form.kind,
+            !editing,
+        );
+        if editing {
+            engine.on_hover_text(
+                "the engine is part of the profile's identity; create a new connection to change it",
+            );
+        }
+    });
+
+    if file_based {
+        // A SQLite profile's target: the design draws host/port/database because its frame is
+        // PostgreSQL, so the file takes that row.
+        let file_w = BODY_W - ROW_GAP - 28.0;
+        conn_row(ui, |ui| {
+            let file = text_field(
+                ui,
+                tokens,
+                "File",
+                file_w,
+                &mut form.file,
+                "/path/to/file.db",
+                false,
+                !editing,
+            );
+            if editing {
+                file.on_hover_text("the file is the profile's identity once saved");
+            }
+            field_col(ui, 28.0, |ui| {
+                ui.add_space(f32::from(design::S6) + f32::from(design::S3));
+                if design::ghost_button(ui, tokens, "…", !editing).clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("SQLite database")
+                        .save_file()
+                    {
+                        form.file = path.to_string_lossy().into_owned();
+                    }
+                }
+            });
+        });
+    } else {
+        let grow = (BODY_W - 2.0 * ROW_GAP - 110.0) / 2.0;
+        conn_row(ui, |ui| {
+            text_field(
+                ui,
+                tokens,
+                "Host",
+                grow,
+                &mut form.host,
+                "db.internal",
+                false,
+                true,
+            );
+            number_field(ui, tokens, "Port", 110.0, &mut form.port, 65535, "", true);
+            text_field(
+                ui,
+                tokens,
+                "Database",
+                grow,
+                &mut form.database,
+                "analytics",
+                false,
+                true,
+            );
+        });
+        let half = (BODY_W - ROW_GAP) / 2.0;
+        conn_row(ui, |ui| {
+            text_field(
+                ui,
+                tokens,
+                "User",
+                half,
+                &mut form.user,
+                "analytics_ro",
+                false,
+                true,
+            );
+            let password = password_field(
+                ui,
+                tokens,
+                "Password",
+                half,
+                &mut form.password,
+                "••••••••",
+                false,
+                true,
+                keychain,
+            );
+            if !keychain {
+                password.on_hover_text(password_helper(keychain));
+            }
+        });
+        design::helper_line(ui, tokens, password_helper(keychain));
+    }
+
+    // Group (`.fld.grow`) and Timeout at the design's 120. The design's Colour picker is the fourth
+    // control of this row and is not shipped: nothing in the app paints `cfg.color` yet, so a picker
+    // here would change nothing (recorded in `docs/architecture.md`).
+    let group_w = BODY_W - ROW_GAP - 120.0;
+    let mut groups: Vec<String> = session
+        .conns
+        .iter()
+        .map(|conn| conn.cfg.group.clone())
+        .filter(|group| !group.is_empty())
+        .collect();
+    groups.sort();
+    groups.dedup();
+    if !form.group.trim().is_empty() && !groups.contains(&form.group) {
+        groups.push(form.group.clone());
+    }
+    let mut options: Vec<(String, String)> = vec![(String::new(), "No group".to_string())];
+    options.extend(groups.into_iter().map(|group| (group.clone(), group)));
+    conn_row(ui, |ui| {
+        select_field(
+            ui,
+            tokens,
+            "Group",
+            group_w,
+            "connection-group",
+            &options,
+            &mut form.group,
+            true,
+        );
+        number_field(
+            ui,
+            tokens,
+            "Timeout",
+            120.0,
+            &mut form.timeout,
+            300,
+            "s",
+            true,
+        );
+    });
+
+    design::checkbox(
+        ui,
+        tokens,
+        "Read-only — never write through this connection",
+        &mut form.read_only,
+        true,
+    );
+}
+
+/// The design's TLS step: the five modes and the truth about what this app verifies. The design's
+/// three certificate paths are a ceiling, not a task — `ConnectionConfig` has no field for them and
+/// the drivers verify against the OS trust store.
+fn tls_step(ui: &mut egui::Ui, tokens: &Tokens, state: &mut UiState) {
+    let form = &mut state.connection_form;
+    field_col(ui, BODY_W, |ui| {
+        design::field_label(ui, tokens, "SSL mode");
+        let options: Vec<(&str, bool)> = SslMode::ALL
+            .iter()
+            .map(|mode| (mode.label(), *mode == form.ssl))
+            .collect();
+        if let Some(clicked) = design::dialogue_segmented(ui, tokens, &options) {
+            form.ssl = SslMode::ALL[clicked];
+        }
+    });
+    design::helper_line(ui, tokens, TLS_HELPER);
+}
+
+/// The design's Tunnel step: the jump host, the authentication control, the secret and the local
+/// port. Where there is no keychain the password field and its toggle wear the engine's own refusal.
+fn tunnel_step(ui: &mut egui::Ui, tokens: &Tokens, state: &mut UiState) {
+    let keychain = datacraft_engine::profiles::keychain_available();
+    let form = &mut state.connection_form;
+    let auth = form.ssh_auth();
+
+    let host_w = BODY_W - 2.0 * ROW_GAP - 110.0 - 150.0;
+    conn_row(ui, |ui| {
+        text_field(
+            ui,
+            tokens,
+            "SSH host",
+            host_w,
+            &mut form.ssh_host,
+            "jump.example.com",
+            false,
+            true,
+        );
+        number_field(
+            ui,
+            tokens,
+            "Port",
+            110.0,
+            &mut form.ssh_port,
+            65535,
+            "",
+            true,
+        );
+        text_field(
+            ui,
+            tokens,
+            "SSH user",
+            150.0,
+            &mut form.ssh_user,
+            "ops",
+            false,
+            true,
+        );
+    });
+
+    field_col(ui, BODY_W, |ui| {
+        design::field_label(ui, tokens, "Authentication");
+        let options: Vec<(&str, bool)> = SshAuth::ALL
+            .iter()
+            .map(|mode| (mode.label(), *mode == auth))
+            .collect();
+        if let Some(clicked) = design::dialogue_segmented(ui, tokens, &options) {
+            form.ssh_auth = SshAuth::ALL[clicked];
+        }
+    });
+
+    let secret_w = BODY_W - ROW_GAP - 150.0;
+    conn_row(ui, |ui| {
+        match auth {
+            SshAuth::KeyFile => {
+                text_field(
+                    ui,
+                    tokens,
+                    "Key file",
+                    secret_w,
+                    &mut form.ssh_key,
+                    "~/.ssh/id_ed25519",
+                    false,
+                    true,
+                );
+            }
+            SshAuth::Agent => {
+                field_col(ui, secret_w, |ui| {
+                    design::field_label(ui, tokens, "Key");
+                    design::input(ui, tokens, secret_w, false, false, |ui| {
+                        ui.label(
+                            RichText::new("the ssh agent and ~/.ssh/config")
+                                .size(design::T_MD)
+                                .color(tokens.text_dim),
+                        )
                     });
                 });
             }
-
-            ui.add_space(8.0);
-            design::card_frame(tokens).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut form.ssh_enabled, "SSH tunnel");
-                    ui.label(
-                        RichText::new("through an ssh jump host, using your ssh config and agent")
-                            .size(11.0)
-                            .color(tokens.text_faint),
-                    );
-                });
-                if form.ssh_enabled {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut form.ssh_host)
-                                .hint_text("jump.example.com")
-                                .desired_width(200.0),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut form.ssh_user)
-                                .hint_text("user")
-                                .desired_width(100.0),
-                        );
-                        let mut ssh_port = form.ssh_port as i32;
-                        if ui
-                            .add(egui::DragValue::new(&mut ssh_port).range(1..=65535))
-                            .changed()
-                        {
-                            form.ssh_port = ssh_port.clamp(1, 65535) as u16;
-                        }
-                    });
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.ssh_key)
-                            .hint_text("~/.ssh/id_ed25519 (empty: agent and config)")
-                            .desired_width(340.0),
-                    );
-                }
-            });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut form.read_only, "read-only");
-                ui.checkbox(
-                    &mut form.keychain,
-                    "keep the password in the macOS keychain",
+            SshAuth::Password => {
+                let password = password_field(
+                    ui,
+                    tokens,
+                    "SSH password",
+                    secret_w,
+                    &mut form.ssh_password,
+                    "••••••••",
+                    false,
+                    keychain,
+                    keychain,
                 );
-                if !form.kind.implemented() {
-                    design::chip(ui, tokens, "no driver yet — catalogued only", tokens.warn);
+                if !keychain {
+                    password.on_hover_text(datacraft_engine::profiles::NO_KEYCHAIN);
                 }
-            });
+            }
+        }
+        number_field(
+            ui,
+            tokens,
+            "Local port",
+            150.0,
+            &mut form.ssh_local_port,
+            65535,
+            "auto",
+            true,
+        );
+    });
 
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if design::primary_button(ui, tokens, "Save", true).clicked() {
-                    let name = form.name.clone();
-                    let mut params = serde_json::json!({
-                        "name": name,
-                        "kind": format!("{:?}", form.kind).to_lowercase(),
-                        "host": form.host,
-                        "port": form.port,
-                        "user": form.user,
-                        "database": form.database,
-                        "file": form.file,
-                        "group": form.group,
-                        "ssl": form.ssl.label(),
-                        "read_only": form.read_only,
-                        "keychain": form.keychain,
-                        "ssh": {
-                            "enabled": form.ssh_enabled,
-                            "host": form.ssh_host,
-                            "port": form.ssh_port,
-                            "user": form.ssh_user,
-                            "key_file": form.ssh_key,
-                        },
-                    });
-                    if !form.password.is_empty() {
-                        params["password"] = serde_json::json!(form.password.clone());
+    if auth == SshAuth::Password {
+        let toggle = design::checkbox(
+            ui,
+            tokens,
+            "Save the SSH password in the login keychain",
+            &mut form.ssh_save_password,
+            keychain,
+        );
+        if !keychain {
+            toggle.on_hover_text(datacraft_engine::profiles::NO_KEYCHAIN);
+        }
+    }
+    design::helper_line(ui, tokens, ssh_helper(keychain, auth));
+}
+
+/// The design's Advanced step. The mockup paints the tab and never opens it, so there is no body to
+/// build from: it carries the one control the editor cannot do without — the destructive action — and
+/// nothing else. A new profile has nothing to delete yet.
+fn advanced_step(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
+    let Some(index) = state.connection_editing else {
+        design::helper_line(
+            ui,
+            tokens,
+            "These options appear once the connection is saved.",
+        );
+        return;
+    };
+    let Some(conn) = session.conns.get(index) else {
+        return;
+    };
+    let (id, name, engine, open, group) = (
+        conn.cfg.id.clone(),
+        conn.cfg.name.clone(),
+        conn.cfg.kind.label(),
+        conn.is_open(),
+        conn.cfg.group.clone(),
+    );
+    let mut facts = vec![
+        engine.to_string(),
+        if open {
+            "connected".into()
+        } else {
+            "not connected".into()
+        },
+    ];
+    if !group.is_empty() {
+        facts.push(format!("group {group}"));
+    }
+
+    design::helper_line(
+        ui,
+        tokens,
+        "Deleting a connection removes its profile and the passwords saved with it. The database server is not touched.",
+    );
+    let danger = design::dialogue_button(
+        ui,
+        tokens,
+        "Delete connection",
+        design::Emphasis::Danger,
+        true,
+    );
+    if danger.clicked() {
+        state.confirm = Some(Confirm {
+            command: "conn.delete".to_string(),
+            params: serde_json::json!({ "conn": id }),
+            title: "Delete connection".to_string(),
+            subject: name.clone(),
+            sentence: format!(
+                "Deleting {name} removes the profile and the passwords saved with it. The database \
+server is not touched."
+            ),
+            facts,
+            action: "Delete".to_string(),
+            typed: String::new(),
+            expected: name,
+        });
+        // The confirmation takes over the window: one scrim, never two.
+        state.connection_open = false;
+    }
+}
+
+/// The editor's pinned footer: the test row, then the reason, Cancel and Save.
+fn editor_footer(ui: &mut egui::Ui, tokens: &Tokens, state: &UiState, action: &mut EditorAction) {
+    let blocked = state.connection_form.blocker();
+    let editing = state.connection_editing.is_some();
+    let outcome = state.test_state.clone();
+    design::dialogue_foot(ui, tokens, design::DLG_FOOT_H, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = f32::from(design::S3);
+            let (ink, line) = match &outcome {
+                Some(outcome) if outcome.ok => (tokens.ok, outcome.line.clone()),
+                Some(outcome) => (tokens.error, outcome.line.clone()),
+                None => (tokens.text_faint, "not tested yet".to_string()),
+            };
+            design::status_dot(ui, ink, design::STATUS_DOT);
+            ui.label(RichText::new(line).size(design::T_SM).color(ink));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let retry = matches!(&outcome, Some(outcome) if !outcome.ok);
+                let label = if retry { "Retry" } else { "Test connection" };
+                let test =
+                    design::dialogue_button(ui, tokens, label, design::Emphasis::Ghost, editing);
+                if editing {
+                    if test.clicked() {
+                        action.test = true;
                     }
-                    if let Some(index) = editing {
-                        if let Some(conn) = session.conns.get_mut(index) {
-                            if let Some(obj) = params.as_object_mut() {
-                                obj.insert("conn".into(), serde_json::json!(conn.cfg.id.clone()));
-                            }
-                        }
-                        match session.run("conn.edit", params.clone()) {
-                            Ok(_) => {
-                                if !form.ssh_host.is_empty() {
-                                    let _ = session.run("conn.setSshTunnel", params["ssh"].clone());
-                                }
-                                if form.ssh_enabled {
-                                    let id = session.conns[index].cfg.id.clone();
-                                    let _ = session.run(
-                                        "conn.setSshTunnel",
-                                        serde_json::json!({"conn": id, "enabled": true}),
-                                    );
-                                }
-                                session.log(Level::Success, "connection updated");
-                                close = true;
-                            }
-                            Err(e) => session.log(Level::Error, e.to_string()),
-                        }
-                    } else {
-                        match session.run("conn.new", params.clone()) {
-                            Ok(_) => {
-                                if form.ssh_enabled {
-                                    let id = session
-                                        .conns
-                                        .last()
-                                        .map(|c| c.cfg.id.clone())
-                                        .unwrap_or_default();
-                                    let _ = session.run(
-                                        "conn.setSshTunnel",
-                                        serde_json::json!({"conn": id, "enabled": true}),
-                                    );
-                                }
-                                session.log(Level::Success, format!("connection '{name}' saved"));
-                                // Connect straight away: that is what the user asked for.
-                                let index = session.conns.len().saturating_sub(1);
-                                if let Err(e) = datacraft_engine::cmd::open_now(session, index) {
-                                    session.log(Level::Warn, format!("saved, not connected: {e}"));
-                                }
-                                close = true;
-                            }
-                            Err(e) => session.log(Level::Error, e.to_string()),
-                        }
-                    }
+                } else {
+                    test.on_hover_text(
+                        "save the connection first — conn.test names a saved profile",
+                    );
                 }
-                if let Some(index) = editing {
-                    if design::ghost_button(ui, tokens, "Connect", true).clicked() {
-                        if let Err(e) = datacraft_engine::cmd::open_now(session, index) {
-                            session.log(Level::Warn, e.to_string());
-                        }
-                    }
-                    if design::ghost_button(ui, tokens, "Test", true).clicked() {
-                        let params =
-                            serde_json::json!({"conn": session.conns[index].cfg.id.clone()});
-                        match session.run("conn.test", params) {
-                            Ok(value) => session.log(
-                                Level::Success,
-                                format!(
-                                    "ok: {} · {} tables · {} ms",
-                                    value["version"].as_str().unwrap_or(""),
-                                    value["tables"].as_u64().unwrap_or(0),
-                                    value["elapsed_ms"].as_u64().unwrap_or(0)
-                                ),
-                            ),
-                            Err(e) => session.log(Level::Error, e.to_string()),
-                        }
-                    }
-                    if design::ghost_button(ui, tokens, "Delete", true)
-                        .on_hover_text("Remove the profile")
-                        .clicked()
-                    {
-                        let params =
-                            serde_json::json!({"conn": session.conns[index].cfg.id.clone()});
-                        match session.run("conn.delete", params) {
-                            Ok(_) => close = true,
-                            Err(e) => session.log(Level::Error, e.to_string()),
-                        }
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if design::ghost_button(ui, tokens, "Cancel", true).clicked() {
-                        close = true;
-                    }
-                });
             });
         });
-    if close || !open {
-        state.connection_open = false;
+        ui.horizontal(|ui| {
+            let reason = blocked
+                .clone()
+                .unwrap_or_else(|| "The profile is complete.".to_string());
+            ui.label(
+                RichText::new(reason)
+                    .size(design::T_XS)
+                    .color(tokens.text_dim),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let save = design::dialogue_button(
+                    ui,
+                    tokens,
+                    "Save",
+                    design::Emphasis::Primary,
+                    blocked.is_none(),
+                );
+                if let Some(reason) = &blocked {
+                    save.clone().on_hover_text(reason.clone());
+                }
+                if save.clicked() {
+                    action.save = true;
+                }
+                if design::dialogue_button(ui, tokens, "Cancel", design::Emphasis::Plain, true)
+                    .clicked()
+                {
+                    action.close = true;
+                }
+            });
+        });
+    });
+}
+
+/// Run `conn.test` and keep its facts for the pinned row: a test is a fact about the connection, not a
+/// log line, which is why it survives the frame that produced it.
+fn test_connection(session: &mut Session, state: &mut UiState) {
+    let Some(index) = state.connection_editing else {
+        state.test_state = Some(TestOutcome {
+            ok: false,
+            line: "save the connection first — conn.test names a saved profile".to_string(),
+        });
+        return;
+    };
+    let Some(id) = session.conns.get(index).map(|conn| conn.cfg.id.clone()) else {
+        return;
+    };
+    state.test_state = Some(
+        match session.run("conn.test", serde_json::json!({ "conn": id })) {
+            Ok(value) => TestOutcome {
+                ok: true,
+                line: test_line(&value),
+            },
+            Err(error) => TestOutcome {
+                ok: false,
+                line: format!("failed · {error}"),
+            },
+        },
+    );
+}
+
+/// The pinned row's sentence from `conn.test`'s summary: the design states the hop when a tunnel ran,
+/// and the server otherwise.
+fn test_line(value: &serde_json::Value) -> String {
+    let ms = value["elapsed_ms"].as_u64().unwrap_or(0);
+    match value.get("tunnel").filter(|tunnel| !tunnel.is_null()) {
+        Some(tunnel) => format!(
+            "tunnel ok · {}:{} · local {} · {} ms",
+            tunnel["host"].as_str().unwrap_or(""),
+            tunnel["port"].as_u64().unwrap_or(0),
+            tunnel["local_port"].as_u64().unwrap_or(0),
+            ms
+        ),
+        None => format!(
+            "ok · {} {} · {} ms",
+            value["driver"].as_str().unwrap_or(""),
+            value["version"].as_str().unwrap_or(""),
+            ms
+        ),
+    }
+}
+
+/// Save the form, addressing every call to the connection it edits. The profile's id is resolved once
+/// and then carried by `conn.edit`, `conn.setSshTunnel` and both password commands, so editing
+/// connection 1 while connection 0 is active can never write to the active one — which is the defect
+/// review 3 found at the old `dialogs.rs:260`.
+fn save_connection(session: &mut Session, state: &mut UiState) -> datacraft_core::Result<()> {
+    let form = state.connection_form.clone();
+    let editing = state.connection_editing;
+    let name = form.name.trim().to_string();
+    let mut params = serde_json::json!({
+        "name": name,
+        "kind": format!("{:?}", form.kind).to_lowercase(),
+        "host": form.host,
+        "port": form.port,
+        "user": form.user,
+        "database": form.database,
+        "file": form.file,
+        "group": form.group,
+        "ssl": form.ssl.label(),
+        "read_only": form.read_only,
+        "timeout": form.timeout,
+        "color": form.color,
+        "keychain": form.keychain,
+    });
+    if !form.password.is_empty() {
+        params["password"] = serde_json::json!(form.password);
+    }
+
+    let id = match editing {
+        Some(index) => {
+            let id = session
+                .conns
+                .get(index)
+                .map(|conn| conn.cfg.id.clone())
+                .ok_or_else(|| datacraft_core::Error::config("the connection is gone"))?;
+            params["conn"] = serde_json::json!(id);
+            session.run("conn.edit", params)?;
+            id
+        }
+        None => {
+            session.run("conn.new", params)?;
+            session
+                .conns
+                .iter()
+                .find(|conn| conn.cfg.name == name)
+                .map(|conn| conn.cfg.id.clone())
+                .ok_or_else(|| datacraft_core::Error::config("the connection was not saved"))?
+        }
+    };
+
+    // One addressed `setSshTunnel` with all six fields: a new profile's typed tunnel is written where
+    // the dialog says it is instead of being dropped, and an edit's goes to the connection it names.
+    session.run(
+        "conn.setSshTunnel",
+        serde_json::json!({
+            "conn": id,
+            "enabled": form.ssh_enabled(),
+            "host": form.ssh_host,
+            "port": form.ssh_port,
+            "user": form.ssh_user,
+            "key_file": form.ssh_key,
+            "local_port": form.ssh_local_port,
+        }),
+    )?;
+
+    // The database password: the keychain where there is one, the profile file (mode 0600) where
+    // there is not — and an empty field leaves whatever is stored alone.
+    if !form.password.is_empty() {
+        if form.keychain && datacraft_engine::profiles::keychain_available() {
+            session.run(
+                "conn.savePassword",
+                serde_json::json!({ "conn": id, "password": form.password }),
+            )?;
+        } else if editing.is_some() {
+            session.run(
+                "conn.edit",
+                serde_json::json!({ "conn": id, "password": form.password }),
+            )?;
+        }
+    }
+
+    // The SSH password lives under its own account, and only while the toggle says so.
+    if datacraft_engine::profiles::keychain_available() {
+        if form.ssh_save_password && !form.ssh_password.is_empty() {
+            session.run(
+                "conn.sshPassword",
+                serde_json::json!({ "conn": id, "password": form.ssh_password }),
+            )?;
+        } else if !form.ssh_save_password {
+            let _ = session.run(
+                "conn.sshPassword",
+                serde_json::json!({ "conn": id, "remove": true }),
+            );
+        }
+    }
+
+    if editing.is_none() {
+        // Connect straight away: that is what the user asked for.
+        let index = session.conn_index(&id).unwrap_or(0);
+        if let Err(error) = datacraft_engine::cmd::open_now(session, index) {
+            session.log(Level::Warn, format!("saved, not connected: {error}"));
+        }
+    }
+    Ok(())
+}
+
+/// The design's destructive confirmation: the `.ig` badge, the sentence, the typed name and the one
+/// footer row. It is a `Modal` on the same shell, and the editor has closed before it opens, so the
+/// scrim is painted once.
+fn confirmation(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
+    let Some(mut confirm) = state.confirm.clone() else {
+        return;
+    };
+    let mut cancel = false;
+    let mut run = false;
+    let response = dialog_shell(
+        ui.ctx(),
+        tokens,
+        "confirmation",
+        design::DIALOG_NARROW_W,
+        |ui| {
+            if design::dialogue_head(
+                ui,
+                tokens,
+                Some("!"),
+                &confirm.title,
+                &confirm.subject,
+                true,
+            )
+            .clicked()
+            {
+                cancel = true;
+            }
+            dialogue_body(ui, |ui| {
+                para(ui, tokens, &confirm.sentence);
+                // `.facts`: the chips under the sentence, `--s3` apart, wrapped — a dialog whose
+                // content has none (the design's own typed-name variant) paints nothing.
+                if !confirm.facts.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing =
+                            egui::vec2(f32::from(design::S3), f32::from(design::S3));
+                        for fact in &confirm.facts {
+                            design::tag_of(ui, tokens, fact, design::DLG_CHIP_H);
+                        }
+                    });
+                }
+                field_col(ui, BODY_W_NARROW, |ui| {
+                    design::field_label(ui, tokens, "Connection name");
+                    design::input(
+                        ui,
+                        tokens,
+                        BODY_W_NARROW,
+                        !confirm.satisfied(),
+                        true,
+                        |ui| {
+                            input_text(
+                                ui,
+                                tokens,
+                                &mut confirm.typed,
+                                BODY_W_NARROW - 2.0 * f32::from(design::S4),
+                                &confirm.expected,
+                                false,
+                            )
+                        },
+                    );
+                });
+                msg_line(
+                    ui,
+                    tokens,
+                    if confirm.satisfied() {
+                        tokens.ok
+                    } else {
+                        tokens.error
+                    },
+                    if confirm.satisfied() { "✓" } else { "!" },
+                    &confirm.why(),
+                );
+            });
+            design::dialogue_foot(ui, tokens, design::DLG_FOOT_ONE_H, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(confirm.why())
+                            .size(design::T_XS)
+                            .color(tokens.text_dim),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if design::dialogue_button(
+                            ui,
+                            tokens,
+                            &confirm.action,
+                            design::Emphasis::Danger,
+                            confirm.satisfied(),
+                        )
+                        .clicked()
+                        {
+                            run = true;
+                        }
+                        if design::dialogue_button(
+                            ui,
+                            tokens,
+                            "Cancel",
+                            design::Emphasis::Plain,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            cancel = true;
+                        }
+                    });
+                });
+            });
+        },
+    );
+
+    // The typed name is the dialog's own state: it has to survive the frame it was typed in.
+    state.confirm = Some(confirm);
+    if cancel || response.should_close() {
+        state.confirm = None;
+        return;
+    }
+    if run {
+        let Some(mut pending) = state.confirm.take() else {
+            return;
+        };
+        if let Some(object) = pending.params.as_object_mut() {
+            object.insert("confirm".to_string(), serde_json::json!(true));
+        }
+        match session.run(&pending.command, pending.params) {
+            Ok(_) => {
+                session.log(Level::Success, format!("{} removed", pending.subject));
+                state.connection_open = false;
+                state.connection_editing = None;
+                state.connection_form_id = None;
+                state.test_state = None;
+            }
+            Err(error) => {
+                session.log(Level::Error, error.to_string());
+                state.connection_editing = None;
+                state.connection_form_id = None;
+            }
+        }
     }
 }
 
@@ -1042,4 +1903,629 @@ fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens
         state.palette_open = false;
     }
     let _ = session;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::ssh_auth_of;
+
+    /// The design's window, the way the app drives one: one screen rect, no texture uploads, on the
+    /// clock the caller sets.
+    fn screen(events: Vec<egui::Event>, time: f64) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            time: Some(time),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// One click at `pos`: the pointer arrives and then presses and releases.
+    fn click(pos: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            press(pos, true),
+            press(pos, false),
+        ]
+    }
+
+    /// The profile store in a scratch directory, the way the engine's own tests do it: `conn.new`
+    /// writes a profile, and a UI test must not touch the user's.
+    fn scratch() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join("datacraft-ui-test-config");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::remove_file(dir.join("profiles.json"));
+        std::env::set_var("DATACRAFT_CONFIG_DIR", dir);
+        guard
+    }
+
+    /// Every shape one frame painted, the nested ones unpacked.
+    fn shapes(out: &egui::FullOutput) -> Vec<egui::Shape> {
+        fn walk(shape: &egui::Shape, flat: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(parts) => parts.iter().for_each(|part| walk(part, flat)),
+                shape => flat.push(shape.clone()),
+            }
+        }
+        let mut flat = Vec::new();
+        for clipped in &out.shapes {
+            walk(&clipped.shape, &mut flat);
+        }
+        flat
+    }
+
+    /// The box a painted string occupies — its anchor, since `painter.text` places the galley by the
+    /// alignment it was given.
+    fn text_rect(painted: &[egui::Shape], wanted: &str) -> Option<egui::Rect> {
+        painted.iter().find_map(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.text() == wanted => {
+                Some(shape.visual_bounding_rect())
+            }
+            _ => None,
+        })
+    }
+
+    /// Where a painted string was anchored: for a centred label that is the label's own centre, which
+    /// is what a click has to aim at.
+    fn text_pos(painted: &[egui::Shape], wanted: &str) -> Option<egui::Pos2> {
+        painted.iter().find_map(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.text() == wanted => Some(text.pos),
+            _ => None,
+        })
+    }
+
+    /// The ink a painted string wears, off the galley's own job: a `painter.text` call lays the colour
+    /// down in the layout it built, while the shape's fallback is the placeholder egui would use.
+    fn ink(painted: &[egui::Shape], wanted: &str) -> Option<Color32> {
+        painted.iter().find_map(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.text() == wanted => {
+                text.galley.job.sections.first().map(|s| s.format.color)
+            }
+            _ => None,
+        })
+    }
+
+    /// The band the design names by its own size — the head 68, the footer 92 — both `DIALOG_W` wide
+    /// and filled with the panel.
+    fn band(painted: &[egui::Shape], tokens: &Tokens, height: f32) -> egui::Rect {
+        painted
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == tokens.panel
+                        && (rect.rect.width() - design::DIALOG_W).abs() <= 0.5
+                        && (rect.rect.height() - height).abs() <= 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "a {height}px band of {DIALOG_W} width",
+                    DIALOG_W = design::DIALOG_W
+                )
+            })
+    }
+
+    /// Save's own rect and face: the 28px button in the footer's lower row, `accent` when the form is
+    /// complete and the blocked one (`.off`'s `panel_high`) when it is not. Cancel is `panel_alt`, and
+    /// the first row's own action is not the Save at all, so the row and the fill together say which.
+    fn save_button(
+        painted: &[egui::Shape],
+        tokens: &Tokens,
+        footer: egui::Rect,
+    ) -> (egui::Rect, Color32) {
+        painted
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.height() - design::BUTTON_H).abs() <= 0.5
+                        && footer.contains(rect.rect.center())
+                        && rect.rect.center().y > footer.center().y
+                        && (rect.fill == tokens.accent || rect.fill == tokens.panel_high) =>
+                {
+                    Some((rect.rect, rect.fill))
+                }
+                _ => None,
+            })
+            .expect("a Save button in the footer")
+    }
+
+    /// The app's own frame loop, headless: one context, one state and one session, with the dialog
+    /// stack under the design's tokens.
+    struct Editor {
+        ctx: egui::Context,
+        tokens: Tokens,
+        state: UiState,
+        session: Session,
+        /// The clock. An `Area` fades in over `animation_time`, so a frame that ran with no time on it
+        /// would be photographed half-transparent — and half a scrim is not the design's colour.
+        clock: f64,
+    }
+
+    impl Editor {
+        fn new() -> Editor {
+            let ctx = egui::Context::default();
+            let tokens = Tokens::of("dark");
+            tokens.apply(&ctx);
+            let mut state = UiState::default();
+            state.connection_open = true;
+            Editor {
+                ctx,
+                tokens,
+                state,
+                session: Session::new(),
+                clock: 0.0,
+            }
+        }
+
+        /// One pass on the editor's clock.
+        fn pass(&mut self, events: Vec<egui::Event>) -> Vec<egui::Shape> {
+            self.clock += 1.0;
+            let (clock, events) = (self.clock, events);
+            let Editor {
+                ctx,
+                tokens,
+                state,
+                session,
+                ..
+            } = self;
+            let mut out = ctx.run_ui(screen(events, clock), |ui| show(ui, session, state, tokens));
+            // The frame paints into a texture delta the headless context never applies.
+            out.textures_delta.clear();
+            shapes(&out)
+        }
+
+        /// One frame: the events, then two quiet passes. The first pass only lays the modal out — an
+        /// `Area`'s frame is a placeholder until the area knows its own size, and the position it
+        /// derives from that placeholder is 68px low, enough to put the footer's buttons outside the
+        /// footer — so the caller gets the third pass, by which the layout has settled. The events
+        /// still land on the first, where the widget rects are the settled ones of the last frame.
+        fn frame(&mut self, events: Vec<egui::Event>) -> Vec<egui::Shape> {
+            let _ = self.pass(events);
+            let _ = self.pass(Vec::new());
+            self.pass(Vec::new())
+        }
+    }
+
+    /// The editor is the design's `.dlg`: the window under the scrim, a 560px dialog centred in the
+    /// 1440 the design draws it in, the 68px head at its top with its `--s7` inset — which is the
+    /// body's content edge as well — and the 92px footer below it.
+    #[test]
+    fn the_editor_is_a_centred_scrimmed_shell() {
+        let mut editor = Editor::new();
+        let painted = editor.frame(Vec::new());
+
+        // The scrim covers the window.
+        let scrim = painted
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect) if rect.fill == editor.tokens.scrim => Some(rect.rect),
+                _ => None,
+            })
+            .expect("the backdrop");
+        assert!((scrim.width() - 1440.0).abs() <= 0.5, "{scrim:?}");
+        assert!((scrim.height() - 900.0).abs() <= 0.5, "{scrim:?}");
+
+        // The dialog is the design's 560, centred the way a 1440 window centres it.
+        let head = band(&painted, &editor.tokens, design::DLG_HEAD_H);
+        assert!((head.left() - 440.0).abs() <= 0.5, "{head:?}");
+        assert!((head.right() - 1000.0).abs() <= 0.5, "{head:?}");
+
+        // The head's `--s7` inset, and the footer's own 8px dot in the 92 below the head.
+        let title = text_pos(&painted, "New connection").expect("the head's title");
+        assert!((title.x - 460.0).abs() <= 0.5, "{title:?}");
+        let foot = band(&painted, &editor.tokens, design::DLG_FOOT_H);
+        assert!(foot.top() > head.bottom(), "{foot:?} is not below {head:?}");
+        let dot = painted.iter().find_map(|shape| match shape {
+            egui::Shape::Circle(circle) if circle.fill == editor.tokens.text_faint => {
+                Some((circle.center, circle.radius))
+            }
+            _ => None,
+        });
+        let (centre, radius) = dot.expect("the footer's status dot");
+        assert!((radius - design::STATUS_DOT / 2.0).abs() <= 0.5, "{radius}");
+        assert!(foot.contains(centre), "{centre:?} is not in {foot:?}");
+    }
+
+    /// The tabs answer to the form's step and mark it, and a press off the band moves nothing —
+    /// which is what `dialogue_tabs` returning `None` means.
+    #[test]
+    fn the_tabs_mark_the_active_step_and_move_it() {
+        // The marks: the active step is the one at full ink, the rest are the design's dim.
+        let mut editor = Editor::new();
+        let painted = editor.frame(Vec::new());
+        assert_eq!(ink(&painted, "General"), Some(editor.tokens.text));
+        assert_eq!(ink(&painted, "TLS"), Some(editor.tokens.text_dim));
+        assert_eq!(ink(&painted, "Tunnel"), Some(editor.tokens.text_dim));
+        assert_eq!(ink(&painted, "Advanced"), Some(editor.tokens.text_dim));
+        let tls = text_pos(&painted, "TLS").expect("the TLS tab");
+
+        // A click on the tab moves the step, and the marks follow it.
+        let mut clicked = Editor::new();
+        let _ = clicked.frame(Vec::new());
+        let _ = clicked.frame(click(tls));
+        assert_eq!(clicked.state.connection_form.step, ConnStep::Tls);
+        let painted = clicked.frame(Vec::new());
+        assert_eq!(ink(&painted, "TLS"), Some(clicked.tokens.text));
+        assert_eq!(ink(&painted, "General"), Some(clicked.tokens.text_dim));
+
+        // A press off the band — in the head above it, where nothing is sensed — is no click: the
+        // step stays and the dialog stays open, so the press was the dialog's, not the backdrop's.
+        let mut missed = Editor::new();
+        let _ = missed.frame(Vec::new());
+        let _ = missed.frame(click(egui::pos2(tls.x, tls.y - 40.0)));
+        assert!(missed.state.connection_open, "the press closed the editor");
+        assert_eq!(missed.state.connection_form.step, ConnStep::General);
+    }
+
+    /// Save is live exactly while the form is complete, and the sentence beside it is the one
+    /// `conn.new` would refuse the same input with — so the line and the button cannot disagree with
+    /// the engine.
+    #[test]
+    fn save_is_off_exactly_while_the_form_is_blocked() {
+        let _guard = scratch();
+        let mut editor = Editor::new();
+        let painted = editor.frame(Vec::new());
+        let foot = band(&painted, &editor.tokens, design::DLG_FOOT_H);
+        let blocked = editor
+            .state
+            .connection_form
+            .blocker()
+            .expect("a form with no name is blocked");
+        assert!(text_rect(&painted, &blocked).is_some(), "the `.why` line");
+        assert_eq!(
+            save_button(&painted, &editor.tokens, foot).1,
+            editor.tokens.panel_high
+        );
+        // The blocked Save carries that sentence as its hover text too, so the refusal is on the
+        // control that would run the command and not only on the line beside it.
+        let lines = |shapes: &[egui::Shape], want: &str| {
+            shapes
+                .iter()
+                .filter(
+                    |shape| matches!(shape, egui::Shape::Text(text) if text.galley.text() == want),
+                )
+                .count()
+        };
+        assert_eq!(
+            lines(&painted, &blocked),
+            1,
+            "the `.why` line, and no tooltip"
+        );
+        let save = save_button(&painted, &editor.tokens, foot).0;
+        let _ = editor.frame(vec![egui::Event::PointerMoved(save.center())]);
+        let hovered = editor.frame(vec![egui::Event::PointerMoved(save.center())]);
+        assert_eq!(
+            lines(&hovered, &blocked),
+            2,
+            "Save's hover text is the blocker's own sentence"
+        );
+        // The engine refuses the same input with the very sentence the footer prints.
+        let refused = editor
+            .session
+            .run("conn.new", serde_json::json!({"kind": "postgres"}))
+            .expect_err("no name");
+        assert!(refused.to_string().ends_with(&blocked), "{refused}");
+
+        // And the file-based profile's own sentence, again the engine's.
+        editor.state.connection_form.name = "shop".into();
+        editor.state.connection_form.kind = DriverKind::Sqlite;
+        let blocked = editor
+            .state
+            .connection_form
+            .blocker()
+            .expect("a SQLite profile with no file is blocked");
+        let refused = editor
+            .session
+            .run(
+                "conn.new",
+                serde_json::json!({"name": "shop", "kind": "sqlite", "file": ""}),
+            )
+            .expect_err("no file");
+        assert!(refused.to_string().ends_with(&blocked), "{refused}");
+
+        // With a name and no file needed, the design's own sentence replaces it and Save wears the
+        // primary face.
+        editor.state.connection_form.name = "shop".into();
+        editor.state.connection_form.kind = DriverKind::Postgres;
+        let painted = editor.frame(Vec::new());
+        assert_eq!(editor.state.connection_form.blocker(), None);
+        assert!(text_rect(&painted, "The profile is complete.").is_some());
+        assert!(text_rect(&painted, &blocked).is_none());
+        let foot = band(&painted, &editor.tokens, design::DLG_FOOT_H);
+        assert_eq!(
+            save_button(&painted, &editor.tokens, foot).1,
+            editor.tokens.accent
+        );
+    }
+
+    /// The design's one-of-three: the tunnel's auth mode is derived from the profile's own fields,
+    /// and the user's own choice wins once it disagrees.
+    #[test]
+    fn the_auth_mode_comes_from_the_profile_and_the_users_choice_wins() {
+        assert_eq!(ssh_auth_of("/keys/id", false), SshAuth::KeyFile);
+        assert_eq!(ssh_auth_of("", true), SshAuth::Password);
+        assert_eq!(ssh_auth_of("", false), SshAuth::Agent);
+        // A key file and a stored password both set: the key file is what the field says.
+        assert_eq!(ssh_auth_of("/keys/id", true), SshAuth::KeyFile);
+
+        let mut form = ConnectionForm::default();
+        form.ssh_key = "/keys/id".into();
+        assert_eq!(form.ssh_auth(), SshAuth::KeyFile);
+        form.ssh_auth = SshAuth::Password;
+        assert_eq!(form.ssh_auth(), SshAuth::Password);
+        form.ssh_auth = SshAuth::Agent;
+        assert_eq!(form.ssh_auth(), SshAuth::KeyFile);
+
+        // And a profile: the tunnel is on when it has a host, which is the only toggle it has.
+        let mut cfg = datacraft_core::ConnectionConfig::new("jump", DriverKind::Postgres);
+        cfg.ssh.host = "jump.example.com".into();
+        cfg.ssh.key_file = "/keys/id".into();
+        let form = ConnectionForm::from_config(&cfg);
+        assert_eq!(form.ssh_auth(), SshAuth::KeyFile);
+        assert!(form.ssh_enabled());
+        cfg.ssh.host = String::new();
+        let form = ConnectionForm::from_config(&cfg);
+        assert!(!form.ssh_enabled());
+        assert_eq!(form.ssh_auth(), SshAuth::KeyFile);
+    }
+
+    /// The password helpers are where the keychain state is spoken, and the engine's own boolean is
+    /// what the form starts from — so a field cannot promise a keychain the engine says is absent.
+    #[test]
+    fn the_keychain_state_is_what_the_password_helpers_report() {
+        assert!(password_helper(true).contains("keychain"));
+        assert!(password_helper(false).contains("no OS keychain"));
+        assert!(password_helper(false).contains("mode 0600"));
+
+        // The SSH helper hands the engine's own refusal back where there is nothing to promise.
+        assert_eq!(
+            ssh_helper(false, SshAuth::Password),
+            datacraft_engine::profiles::NO_KEYCHAIN
+        );
+        assert_eq!(
+            ssh_helper(false, SshAuth::KeyFile),
+            datacraft_engine::profiles::NO_KEYCHAIN
+        );
+        for auth in [SshAuth::KeyFile, SshAuth::Agent, SshAuth::Password] {
+            assert_ne!(
+                ssh_helper(true, auth),
+                datacraft_engine::profiles::NO_KEYCHAIN
+            );
+        }
+        assert_eq!(
+            ConnectionForm::default().keychain,
+            datacraft_engine::profiles::keychain_available()
+        );
+    }
+
+    /// The confirmation waits for the typed name, and the command it runs is the one the engine
+    /// gates behind `confirm`.
+    #[test]
+    fn the_confirmation_waits_for_the_name_and_runs_the_gated_command() {
+        let mut confirm = Confirm {
+            command: "conn.delete".into(),
+            params: serde_json::json!({"conn": "doomed"}),
+            title: "Delete connection".into(),
+            subject: "doomed".into(),
+            sentence: "Deleting doomed removes the profile and the passwords saved with it.".into(),
+            facts: vec!["SQLite".into(), "not connected".into()],
+            action: "Delete".into(),
+            typed: String::new(),
+            expected: "doomed".into(),
+        };
+        assert!(!confirm.satisfied());
+        assert!(confirm.why().contains("doomed"));
+        assert!(confirm.why().contains("Delete"));
+        // A pasted name with the whitespace a terminal adds still satisfies it.
+        confirm.typed = "  doomed ".into();
+        assert!(confirm.satisfied());
+        assert!(confirm.why().contains("matches"));
+
+        // The gate this answers: without the flag the engine refuses the same command.
+        let _guard = scratch();
+        let mut session = Session::new();
+        let refused = session
+            .run(&confirm.command, confirm.params.clone())
+            .expect_err("the engine's own gate");
+        assert!(refused.to_string().contains("confirm"), "{refused}");
+    }
+
+    /// The confirmation is the design's narrow shell: 440 wide — x 500..940 in the 1440 the design
+    /// draws it in — the 20px `.ig` badge in the head, its `.facts` chips 20 tall `--s3` apart under
+    /// the sentence, one 52px footer band, and a `.btn.danger` that is `.off` until the typed name
+    /// matches the object's own.
+    #[test]
+    fn the_confirmation_is_the_narrow_shell_with_its_facts_and_the_risk_face() {
+        let mut editor = Editor::new();
+        editor.state.connection_open = false;
+        editor.state.confirm = Some(Confirm {
+            command: "conn.delete".into(),
+            params: serde_json::json!({"conn": "shop"}),
+            title: "Delete connection".into(),
+            subject: "shop".into(),
+            sentence: "Deleting shop removes the profile and the passwords saved with it.".into(),
+            facts: vec![
+                "SQLite".into(),
+                "not connected".into(),
+                "group local".into(),
+            ],
+            action: "Delete".into(),
+            typed: String::new(),
+            expected: "shop".into(),
+        });
+        let painted = editor.frame(Vec::new());
+        let tokens = editor.tokens;
+
+        // The narrow shell, centred the way the design centres a 440 in 1440.
+        let head = painted
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == tokens.panel
+                        && (rect.rect.height() - design::DLG_HEAD_H).abs() <= 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the confirmation's head");
+        assert!(
+            (head.left() - 500.0).abs() <= 0.5 && (head.right() - 940.0).abs() <= 0.5,
+            "the confirmation is 440 wide at x 500..940: {head:?}"
+        );
+
+        // The `.ig` badge: the design's 20px `error`-stroked box, `--s1` into the head.
+        let badge = painted
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if rect.stroke.color == tokens.error
+                        && (rect.rect.height() - design::DLG_CHIP_H).abs() <= 0.5
+                        && (rect.rect.width() - design::DLG_CHIP_H).abs() <= 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the head's .ig badge");
+        assert_eq!(badge.width(), design::DLG_CHIP_H, "{badge:?}");
+        assert!(badge.top() > head.top() && badge.bottom() < head.bottom());
+
+        // The `.facts` chips: one per fact, 20 tall, `--s3` apart, in the body.
+        let mut chips: Vec<egui::Rect> = painted
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == tokens.panel_alt
+                        && (rect.rect.height() - design::DLG_CHIP_H).abs() <= 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        chips.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        assert_eq!(chips.len(), 3, "one chip per fact: {chips:?}");
+        for pair in chips.windows(2) {
+            assert!(
+                (pair[1].left() - pair[0].right() - f32::from(design::S3)).abs() <= 0.5,
+                "the chips are --s3 apart: {pair:?}"
+            );
+        }
+
+        // The single 52px footer band, and the danger face: `.off` until the name matches.
+        assert!(
+            painted
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if rect.fill == tokens.panel
+                    && (rect.rect.height() - design::DLG_FOOT_ONE_H).abs() <= 0.5
+                    && (rect.rect.width() - design::DIALOG_NARROW_W).abs() <= 0.5)),
+            "the confirmation's one-row footer"
+        );
+        assert!(
+            painted
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if rect.fill == tokens.panel_high)),
+            "an untyped name leaves the danger button `.off`"
+        );
+        assert!(
+            !painted
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if rect.fill == tokens.error)),
+            "and nothing wears the risk fill yet"
+        );
+
+        editor
+            .state
+            .confirm
+            .as_mut()
+            .expect("the pending dialog")
+            .typed = "shop".into();
+        let painted = editor.frame(Vec::new());
+        assert!(
+            painted
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if rect.fill == tokens.error)),
+            "the matching name arms the danger button"
+        );
+    }
+
+    /// The pinned row states the hop when a tunnel ran and the server otherwise.
+    /// The Test row states the engine's own outcome: the dot is the design's 8 (`STATUS_DOT`, so a
+    /// radius of 4) and wears `ok` or `error`, and the action offers the second try once the first
+    /// failed. Driven over the control channel this row cannot be reached — `conn.test` writes the
+    /// session's log, not the editor's pinned state — so the frame is read here.
+    #[test]
+    fn the_test_row_wears_the_outcome_and_offers_the_second_try() {
+        let _guard = scratch();
+        for (ok, name, action) in [(true, "ok", "Test connection"), (false, "error", "Retry")] {
+            let mut editor = Editor::new();
+            editor.state.connection_editing = Some(0);
+            editor.pass(vec![]);
+            editor.pass(vec![]);
+            // The editor clears the pinned row on the frame it opens, so the outcome goes on after it
+            // has settled — which is also the order the app itself has (a dialog opens, a test runs).
+            editor.state.test_state = Some(TestOutcome {
+                ok,
+                line: format!("{name} · PostgreSQL 16.3 · 12 ms"),
+            });
+            let painted = editor.pass(vec![]);
+            let want = if ok {
+                editor.tokens.ok
+            } else {
+                editor.tokens.error
+            };
+            let dot = painted.iter().find_map(|shape| match shape {
+                egui::Shape::Circle(circle) if circle.fill == want => Some(circle.radius),
+                _ => None,
+            });
+            assert_eq!(
+                dot,
+                Some(design::STATUS_DOT / 2.0),
+                "{name}: the dot's radius"
+            );
+            assert!(
+                text_pos(&painted, action).is_some(),
+                "{name}: the row offers {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pinned_row_states_the_hop_or_the_server() {
+        let server =
+            serde_json::json!({"driver": "PostgreSQL", "version": "16.3", "elapsed_ms": 12});
+        assert_eq!(test_line(&server), "ok · PostgreSQL 16.3 · 12 ms");
+        let tunnel = serde_json::json!({
+            "driver": "PostgreSQL", "version": "16.3", "elapsed_ms": 40,
+            "tunnel": {"host": "jump.example.com", "port": 22, "local_port": 15432},
+        });
+        assert_eq!(
+            test_line(&tunnel),
+            "tunnel ok · jump.example.com:22 · local 15432 · 40 ms"
+        );
+    }
 }

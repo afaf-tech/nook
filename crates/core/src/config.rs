@@ -126,6 +126,15 @@ impl SslMode {
             SslMode::VerifyFull => "verify-full",
         }
     }
+
+    /// Every mode, in the order the design's segmented control offers them.
+    pub const ALL: [SslMode; 5] = [
+        SslMode::Disable,
+        SslMode::Prefer,
+        SslMode::Require,
+        SslMode::VerifyCa,
+        SslMode::VerifyFull,
+    ];
     /// Postgres `sslmode=` value.
     pub fn pg_value(self) -> &'static str {
         self.label()

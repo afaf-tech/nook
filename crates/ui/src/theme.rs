@@ -122,9 +122,11 @@ pub const T_MONO: f32 = 12.0;
 /// inside the password field is 18, `.cb` is 14, and the test row's `.dot` is 8.
 pub const DIALOG_W: f32 = 560.0;
 pub const DIALOG_NARROW_W: f32 = 440.0;
-/// `.dlg-h`'s 68: the `--s6` above the title, the title block and the `--s5` below it. The block is a
-/// `T_LG` line, the `--s1` gap and a `T_SM` line, which are 39.7 of it at the sheet's 1.45 line height
-/// — the head's 68 is the design's pixel mark, so that last 0.3 is air, and the block has to fit.
+/// `.dlg-h`'s 68: `--s6` above the title, the title block, `--s5` below it — the plan's pin. The
+/// sheet's rule is `padding: --s6 --s7 --s5`, and its two pages render that head 65.08 and 67.69 tall
+/// because they inherit different line heights (the title is a `T_LG` line, the subtitle `T_SM`, and
+/// only `.helper`/`.msg`/`.para`/`.note` set the 1.45 the line-height note names). 68 is the mark
+/// this app holds to in both places, so the block has to fit inside it.
 pub const DLG_HEAD_H: f32 = 68.0;
 pub const DLG_TAB_H: f32 = 32.0;
 pub const DLG_TABS_H: f32 = DLG_TAB_H + 1.0;
@@ -135,9 +137,11 @@ pub const DLG_CHIP_H: f32 = 20.0;
 pub const KEYCHIP_H: f32 = 18.0;
 pub const CHECKBOX: f32 = 14.0;
 pub const STATUS_DOT: f32 = 8.0;
-/// `.dlg-f`'s pinned column: `--s5` of padding around 28px rows `--s5` apart. The editor's two rows
-/// are 92; the confirmation's single row is one row and one gap shorter.
-pub const DLG_FOOT_H: f32 = 3.0 * S5 as f32 + 2.0 * BUTTON_H;
+/// `.dlg-f`: the design's `padding: --s5 --s7` around 28px rows, its 1px top border, and the
+/// editor's own `gap: --s4` between the two rows — 1 + 12 + 28 + 8 + 28 + 12 = 89. The confirmation's
+/// single row is the same band without the second row and its gap: 1 + 12 + 28 + 12 = 53.
+pub const DLG_FOOT_H: f32 = 1.0 + 2.0 * S5 as f32 + S4 as f32 + 2.0 * BUTTON_H;
+pub const DLG_FOOT_ONE_H: f32 = 1.0 + 2.0 * S5 as f32 + BUTTON_H;
 /// The line height the sheet sets on its running text (`.helper`, `.msg`, `.para`, `.note`).
 const DLG_LINE_H: f32 = 1.45;
 /// The `.cb` box's own 2px corner, a square one inside `--r-ctl`, and the 9px `.cb`/`.badge` mark it
@@ -2310,9 +2314,17 @@ pub fn dialogue_segmented(ui: &mut Ui, tokens: &Tokens, options: &[(&str, bool)]
         return None;
     }
     let font = tokens.mono(T_SM);
+    // `.seg .s` is `padding: 0 --s5` with a 1px `border-right` under `box-sizing: border-box`, so
+    // every item but the last is a pixel wider than its own padding — that pixel is the divider.
+    let last = options.len() - 1;
     let widths: Vec<f32> = options
         .iter()
-        .map(|(label, _)| measured(ui, font.clone(), label) + 2.0 * f32::from(S5))
+        .enumerate()
+        .map(|(index, (label, _))| {
+            measured(ui, font.clone(), label)
+                + 2.0 * f32::from(S5)
+                + if index == last { 0.0 } else { 1.0 }
+        })
         .collect();
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(widths.iter().sum::<f32>() + 2.0, DLG_SEG_H),
@@ -2358,8 +2370,10 @@ pub fn dialogue_segmented(ui: &mut Ui, tokens: &Tokens, options: &[(&str, bool)]
             painter.rect_filled(item, fill_radius, tokens.accent);
         }
         if index > 0 {
+            // The design's `border-right` on the item before this one: the shared edge, drawn inside
+            // the previous item's extra pixel rather than over this one's padding.
             painter.vline(
-                item.left(),
+                item.left() - 1.0,
                 item.top()..=item.bottom(),
                 Stroke::new(1.0, tokens.stroke),
             );
@@ -2581,7 +2595,7 @@ pub fn dialogue_foot(ui: &mut Ui, tokens: &Tokens, height: f32, add: impl FnOnce
             .max_rect(rect.shrink2(Vec2::new(f32::from(S7), f32::from(S5))))
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    child.spacing_mut().item_spacing.y = f32::from(S5);
+    child.spacing_mut().item_spacing.y = f32::from(S4);
     add(&mut child);
     rect
 }
@@ -3275,15 +3289,30 @@ mod tests {
 
         assert_eq!(DLG_TABS_H, 33.0, "a 32px item and the strip's hairline");
         assert_eq!(DLG_TABS_H, DLG_TAB_H + 1.0);
-        assert_eq!(S6 as f32 + S3 as f32 + INPUT_H, 50.0, "the design's `.fld`");
+        assert_eq!(
+            S6 as f32 + S3 as f32 + INPUT_H,
+            50.0,
+            "the design's `.fld`: `--s6` label box, `--s3` gap, 28px control (its pages render it \
+             48.84 and 49.94 on the same inherited-line-height difference as the head)"
+        );
         assert_eq!(DLG_SEG_H, 28.0);
         assert_eq!(
             DLG_SEG_ITEM_H,
             DLG_SEG_H - 2.0,
             "inside the container's border"
         );
-        assert_eq!(DLG_FOOT_H, 92.0, "12 + a 28px row + 12 + a 28px row + 12");
-        assert_eq!(DLG_FOOT_H, 3.0 * S5 as f32 + 2.0 * BUTTON_H);
+        // The design's own footer band: its 1px top hairline, `--s5` of padding, two 28px rows `--s4`
+        // apart (`components/dialogs.html`'s `.dlg-f` plus the editor's column override) — and the
+        // same band with the single row a confirmation carries.
+        assert_eq!(
+            DLG_FOOT_H, 89.0,
+            "1 + 12 + a 28px row + 8 + a 28px row + 12"
+        );
+        assert_eq!(
+            DLG_FOOT_H,
+            1.0 + 2.0 * S5 as f32 + S4 as f32 + 2.0 * BUTTON_H
+        );
+        assert_eq!(DLG_FOOT_ONE_H, 53.0, "1 + 12 + a 28px row + 12");
         assert_eq!(DLG_CHIP_H, 20.0);
         assert_eq!(KEYCHIP_H, 18.0);
         assert_eq!(CHECKBOX, 14.0);
@@ -3293,8 +3322,8 @@ mod tests {
     /// The bands the helpers lay out are those marks, and the geometry inside them is where the sheet
     /// puts it: the title `--s6` below the head's top edge with its subtitle `--s1` under the title's own
     /// line, the `×` 24×24 with its right edge 20 inside the dialog, the strip's hairline 100 below the
-    /// head's top, the strip's indicator over the item's own width, the dialog's seg 26 inside its 28,
-    /// and the footer's hairline on its own top edge.
+    /// head's top, the strip's indicator over the item's own width, the dialog's seg 26 inside its 28
+    /// with a 1px divider between its items, and the footer's hairline on its own top edge.
     #[test]
     fn the_dialog_bands_are_the_designs_marks() {
         let ctx = egui::Context::default();
@@ -3306,6 +3335,7 @@ mod tests {
         let mut nothing_clicked = true;
         let mut tabs_width = 0.0_f32;
         let mut seg_width = 0.0_f32;
+        let mut seg_total = 0.0_f32;
         let mut name = String::from("analytics-prod");
         let out = ctx.run_ui(window_frame(), |ui| {
             let mut ui = dialog(ui);
@@ -3345,6 +3375,12 @@ mod tests {
             )
             .is_none();
             seg_width = measured(&ui, tokens.mono(T_SM), "Password") + 2.0 * f32::from(S5);
+            seg_total = ["Key file", "Agent", "Password"]
+                .iter()
+                .map(|label| measured(&ui, tokens.mono(T_SM), label) + 2.0 * f32::from(S5))
+                .sum::<f32>()
+                + 2.0 * 1.0
+                + 2.0;
             bands[3] = ui.cursor().top() - at;
             at = ui.cursor().top();
             foot = dialogue_foot(&mut ui, &tokens, DLG_FOOT_H, |ui| {
@@ -3492,6 +3528,14 @@ mod tests {
                 .into_iter()
                 .any(|width| (width - seg_width).abs() <= 0.5),
             "the dialog's seg is 28 around 26px items"
+        );
+        assert!(
+            out.iter().any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if rect.fill == tokens.panel_alt
+                    && (rect.rect.height() - DLG_SEG_H).abs() <= 0.5
+                    && (rect.rect.width() - seg_total).abs() <= 0.5)),
+            "the seg's box is its three items, the two 1px dividers between them and its own border: \
+             {seg_total}"
         );
     }
 
@@ -3680,6 +3724,20 @@ mod tests {
         assert!(fills(&out, tokens.accent), "`.primary` and the checked box");
         assert!(fills(&out, tokens.error), "`.danger` fills with error");
         assert!(strokes(&out, tokens.error, 1.0), "and borders with it");
+        // The focused danger button also wears the design's 2px ring, 1px outside its own box, in
+        // `error` — the face a keyboard user reaches by tabbing to Delete.
+        let _ = ctx.run_ui(window_frame(), |ui| {
+            let response =
+                dialogue_button(&mut dialog(ui), &tokens, "Delete", Emphasis::Danger, true);
+            ctx.memory_mut(|memory| memory.request_focus(response.id));
+        });
+        let focused = shapes(ctx.run_ui(window_frame(), |ui| {
+            let _ = dialogue_button(&mut dialog(ui), &tokens, "Delete", Emphasis::Danger, true);
+        }));
+        assert!(
+            strokes(&focused, tokens.error, 2.0),
+            "a focused danger button wears its own 2px `error` ring"
+        );
         assert!(
             out.iter()
                 .any(|shape| matches!(shape, egui::Shape::Circle(circle)

@@ -200,14 +200,22 @@ pub fn keychain_available() -> bool {
     cfg!(target_os = "macos")
 }
 
-/// Store a password in the login keychain. The secret never reaches the process arguments.
+/// Store a password in the login keychain. The secret goes in on the child's stdin: a bare `-w`
+/// makes `security` ask for it twice and both answers are the same line, so it never reaches the
+/// process arguments, where `ps` could read it for as long as the child lives.
 pub fn keychain_store(id: &str, secret: &str) -> Result<()> {
     if !keychain_available() {
         return Err(Error::unsupported(
             "keychain storage is macOS only; keep the password in the profile file (mode 0600) instead",
         ));
     }
-    let out = Command::new(security_bin())
+    if secret.chars().any(char::is_control) {
+        // A bare `-w` reads one line per answer, so a line break would store a truncated secret.
+        return Err(Error::config(
+            "a keychain password cannot hold a line break",
+        ));
+    }
+    let mut child = Command::new(security_bin())
         .args([
             "add-generic-password",
             "-U",
@@ -216,9 +224,27 @@ pub fn keychain_store(id: &str, secret: &str) -> Result<()> {
             "-a",
             id,
             "-w",
-            secret,
         ])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::io(format!("security: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        // `security` asks for the secret twice; both answers are the same line. A short write means
+        // it gave up early, which the status below reports.
+        // 10 is a line feed: `security` asks for the secret twice and both answers are the
+        // same line, so the pair is the secret, a feed, the secret and a feed.
+        let mut payload = Vec::with_capacity(2 * secret.len() + 2);
+        for _ in 0..2 {
+            payload.extend_from_slice(secret.as_bytes());
+            payload.push(10);
+        }
+        let _ = stdin.write_all(&payload);
+    }
+    let out = child
+        .wait_with_output()
         .map_err(|e| Error::io(format!("security: {e}")))?;
     if out.status.success() {
         Ok(())

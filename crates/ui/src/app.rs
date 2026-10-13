@@ -25,9 +25,138 @@ const MENUS: &[(&str, &[&str])] = &[
     ("Help", &["Help"]),
 ];
 
+/// Every field `ui.setConnectionField` accepts, in the connection editor's own order. The refusal
+/// lists these names, so a script learns the whole surface from one bad call.
+const CONNECTION_FIELDS: &[&str] = &[
+    "name",
+    "kind",
+    "host",
+    "port",
+    "user",
+    "password",
+    "database",
+    "file",
+    "group",
+    "ssl",
+    "read_only",
+    "keychain",
+    "timeout",
+    "step",
+    "ssh_host",
+    "ssh_port",
+    "ssh_user",
+    "ssh_key",
+    "ssh_auth",
+    "ssh_password",
+    "ssh_save_password",
+    "ssh_local_port",
+];
+
+/// The connection editor's steps, in the design's tab order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnStep {
+    General,
+    Tls,
+    Tunnel,
+    Advanced,
+}
+
+impl ConnStep {
+    pub const ALL: [ConnStep; 4] = [
+        ConnStep::General,
+        ConnStep::Tls,
+        ConnStep::Tunnel,
+        ConnStep::Advanced,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ConnStep::General => "General",
+            ConnStep::Tls => "TLS",
+            ConnStep::Tunnel => "Tunnel",
+            ConnStep::Advanced => "Advanced",
+        }
+    }
+
+    pub fn parse(label: &str) -> Option<ConnStep> {
+        ConnStep::ALL
+            .into_iter()
+            .find(|step| step.label().eq_ignore_ascii_case(label))
+    }
+}
+
+/// How the tunnel authenticates. The design's one-of-three is expressed from the fields the profile
+/// already carries (`key_file`, a stored password) plus the user's own choice when the two collide:
+/// a stored password and a key file can both be set, and the segmented control is what says which one
+/// the tunnel uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshAuth {
+    KeyFile,
+    Agent,
+    Password,
+}
+
+impl SshAuth {
+    pub const ALL: [SshAuth; 3] = [SshAuth::KeyFile, SshAuth::Agent, SshAuth::Password];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SshAuth::KeyFile => "Key file",
+            SshAuth::Agent => "Agent",
+            SshAuth::Password => "Password",
+        }
+    }
+}
+
+/// A destructive action waiting for the user's confirmation: the command, the parameters it will run
+/// with, the object's name and what the user has typed so far. The engine's own `confirm` gate is what
+/// makes this required rather than decorative.
+#[derive(Debug, Clone)]
+pub struct Confirm {
+    pub command: String,
+    pub params: Value,
+    /// `.dlg-t`: what is about to happen.
+    pub title: String,
+    /// `.dlg-sub`: the object, in mono.
+    pub subject: String,
+    /// `.para`: the sentence that explains it.
+    pub sentence: String,
+    /// `.facts`: the chips under the sentence.
+    pub facts: Vec<String>,
+    /// The typed-name gate: the button's label, and the exact text it waits for.
+    pub action: String,
+    pub typed: String,
+    pub expected: String,
+}
+
+impl Confirm {
+    /// The typed name matches, so the dangerous button is live.
+    pub fn satisfied(&self) -> bool {
+        self.typed.trim() == self.expected
+    }
+
+    /// The `.why` sentence beside the action row.
+    pub fn why(&self) -> String {
+        if self.satisfied() {
+            format!("matches {}", self.expected)
+        } else {
+            format!("type {} exactly to enable {}", self.expected, self.action)
+        }
+    }
+}
+
+/// One `conn.test` result, kept so the pinned row survives the frame that produced it. A test is a
+/// fact about the connection, not a log line.
+#[derive(Debug, Clone)]
+pub struct TestOutcome {
+    pub ok: bool,
+    pub line: String,
+}
+
 /// The connection editor's working copy.
 #[derive(Debug, Clone)]
 pub struct ConnectionForm {
+    pub step: ConnStep,
     pub name: String,
     pub kind: datacraft_core::DriverKind,
     pub host: String,
@@ -38,18 +167,27 @@ pub struct ConnectionForm {
     pub file: String,
     pub group: String,
     pub ssl: datacraft_core::SslMode,
+    /// `col.label()`; `""` when the profile carries none.
+    pub color: String,
+    /// Seconds; the engine clamps to 1..=300.
+    pub timeout: u16,
     pub read_only: bool,
     pub keychain: bool,
-    pub ssh_enabled: bool,
     pub ssh_host: String,
     pub ssh_port: u16,
     pub ssh_user: String,
     pub ssh_key: String,
+    pub ssh_auth: SshAuth,
+    pub ssh_password: String,
+    pub ssh_save_password: bool,
+    /// 0 = let the tunnel pick a free one, which is the design's `auto`.
+    pub ssh_local_port: u16,
 }
 
 impl Default for ConnectionForm {
     fn default() -> Self {
         ConnectionForm {
+            step: ConnStep::General,
             name: String::new(),
             kind: datacraft_core::DriverKind::Postgres,
             host: "127.0.0.1".into(),
@@ -60,14 +198,100 @@ impl Default for ConnectionForm {
             file: String::new(),
             group: String::new(),
             ssl: datacraft_core::SslMode::Prefer,
+            color: String::new(),
+            timeout: 15,
             read_only: false,
-            keychain: true,
-            ssh_enabled: false,
+            keychain: datacraft_engine::profiles::keychain_available(),
             ssh_host: String::new(),
             ssh_port: 22,
             ssh_user: String::new(),
             ssh_key: String::new(),
+            ssh_auth: SshAuth::Agent,
+            ssh_password: String::new(),
+            ssh_save_password: false,
+            ssh_local_port: 0,
         }
+    }
+}
+
+impl ConnectionForm {
+    /// The form for an existing profile. Secrets are never read back: the profile keeps only a
+    /// reference, and the field stays empty until the user types a new one, which is what makes an
+    /// untouched save unable to rewrite the keychain.
+    pub fn from_config(cfg: &datacraft_core::ConnectionConfig) -> Self {
+        let ssh_password_stored = datacraft_engine::profiles::keychain_available()
+            && datacraft_engine::profiles::keychain_lookup(
+                &datacraft_engine::profiles::ssh_account(&cfg.id),
+            )
+            .ok()
+            .flatten()
+            .is_some();
+        ConnectionForm {
+            step: ConnStep::General,
+            name: cfg.name.clone(),
+            kind: cfg.kind,
+            host: cfg.host.clone(),
+            port: cfg.port,
+            user: cfg.user.clone(),
+            password: String::new(),
+            database: cfg.database.clone(),
+            file: cfg.file.clone(),
+            group: cfg.group.clone(),
+            ssl: cfg.ssl,
+            color: cfg.color.clone(),
+            timeout: cfg.connect_timeout_s.min(300) as u16,
+            read_only: cfg.read_only,
+            keychain: datacraft_engine::profiles::keychain_available(),
+            ssh_host: cfg.ssh.host.clone(),
+            ssh_port: cfg.ssh.port,
+            ssh_user: cfg.ssh.user.clone(),
+            ssh_key: cfg.ssh.key_file.clone(),
+            ssh_auth: ssh_auth_of(cfg.ssh.key_file.as_str(), ssh_password_stored),
+            ssh_password: String::new(),
+            ssh_save_password: cfg.ssh.enabled && ssh_password_stored,
+            ssh_local_port: cfg.ssh.local_port,
+        }
+    }
+
+    /// The design's one-of-three, derived from the fields the profile carries: a key file means Key
+    /// file, a stored password means Password, and neither means the agent. The user's own choice wins
+    /// once it disagrees with both, which is how the segmented control resolves the case where a key
+    /// file and a stored password are set together.
+    pub fn ssh_auth(&self) -> SshAuth {
+        if self.ssh_auth != SshAuth::Agent {
+            self.ssh_auth
+        } else {
+            ssh_auth_of(&self.ssh_key, self.ssh_save_password)
+        }
+    }
+
+    /// `setSshTunnel`'s `enabled`: the design's Tunnel step has no toggle of its own, so a host is what
+    /// says the tunnel is on.
+    pub fn ssh_enabled(&self) -> bool {
+        !self.ssh_host.trim().is_empty()
+    }
+
+    /// The one sentence the `.why` line and Save's disabled state both read. It is the engine's own
+    /// refusal for the same input, so the form cannot say "complete" while `conn.new` would refuse.
+    pub fn blocker(&self) -> Option<String> {
+        if self.name.trim().is_empty() {
+            return Some("a connection needs a name".into());
+        }
+        if self.kind.is_file_based() && self.file.trim().is_empty() {
+            return Some("a SQLite connection needs \"file\"".into());
+        }
+        None
+    }
+}
+
+/// The design's auth mode from the two profile fields, without the user's own choice.
+pub fn ssh_auth_of(key_file: &str, password_stored: bool) -> SshAuth {
+    if !key_file.trim().is_empty() {
+        SshAuth::KeyFile
+    } else if password_stored {
+        SshAuth::Password
+    } else {
+        SshAuth::Agent
     }
 }
 
@@ -160,6 +384,13 @@ pub struct UiState {
     pub connection_open: bool,
     pub connection_editing: Option<usize>,
     pub connection_form: ConnectionForm,
+    /// Which connection the form was built from, so an edit dialog fills it once per open instead of
+    /// every frame (a frame's typing would be overwritten).
+    pub connection_form_id: Option<Option<usize>>,
+    /// The pinned `conn.test` row, kept across frames.
+    pub test_state: Option<TestOutcome>,
+    /// The destructive action waiting for confirmation, if any.
+    pub confirm: Option<Confirm>,
     pub command_open: bool,
     pub command_id: String,
     pub command_params: String,
@@ -212,6 +443,9 @@ impl Default for UiState {
             connection_open: false,
             connection_editing: None,
             connection_form: ConnectionForm::default(),
+            connection_form_id: None,
+            test_state: None,
+            confirm: None,
             command_open: false,
             command_id: "sql.run".into(),
             command_params: "{\n  \"sql\": \"select 1\"\n}".into(),
@@ -274,6 +508,10 @@ impl UiState {
     pub fn open_connection_dialog(&mut self, index: Option<usize>) {
         self.connection_open = true;
         self.connection_editing = index;
+        // Force the next paint to rebuild the form from the connection it is editing: an edit dialog
+        // that kept the previous form would save the wrong profile's fields.
+        self.connection_form_id = None;
+        self.test_state = None;
         if index.is_none() {
             self.connection_form = ConnectionForm::default();
         }
@@ -542,6 +780,58 @@ impl DatacraftApp {
                 }
                 "ui.setResultView" => {
                     DatacraftApp::set_result_view(&self.session, &mut self.state, &request.params)
+                }
+                "ui.openConnection" => {
+                    // `conn` names the profile to edit by id; omitted or null opens a new one. The
+                    // dialog is opened through the same path the tree uses, so the form is rebuilt
+                    // from the profile exactly once.
+                    let target = match request.params.get("conn") {
+                        None | Some(Value::Null) => Ok(None),
+                        Some(value) => value
+                            .as_str()
+                            .ok_or_else(|| "conn must be a connection id".to_string())
+                            .and_then(|id| {
+                                self.session.conn_index(id).map(Some).map_err(|_| {
+                                    format!(
+                                        "no such connection '{id}'; try {}",
+                                        self.connection_ids()
+                                    )
+                                })
+                            }),
+                    };
+                    match target {
+                        Err(error) => serde_json::json!({"ok": false, "error": error}),
+                        Ok(index) => {
+                            self.state.open_connection_dialog(index);
+                            ctx.request_repaint();
+                            serde_json::json!({"ok": true, "editing": index})
+                        }
+                    }
+                }
+                "ui.setConnectionTab" => {
+                    let tab = request
+                        .params
+                        .get("tab")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default();
+                    match ConnStep::parse(tab) {
+                        None => serde_json::json!({
+                            "ok": false,
+                            "error": format!("unknown tab '{tab}'; try General, TLS, Tunnel, Advanced"),
+                        }),
+                        Some(_) if !self.state.connection_open => serde_json::json!({
+                            "ok": false,
+                            "error": "no connection dialog is open",
+                        }),
+                        Some(step) => {
+                            self.state.connection_form.step = step;
+                            ctx.request_repaint();
+                            serde_json::json!({"ok": true, "tab": step.label()})
+                        }
+                    }
+                }
+                "ui.setConnectionField" => {
+                    DatacraftApp::set_connection_field(&mut self.state, &request.params)
                 }
                 "ui.selectTable" => {
                     let table = request
@@ -1780,6 +2070,165 @@ impl DatacraftApp {
         serde_json::json!({"ok": true, "view": name, "views": crate::register::View::names()})
     }
 
+    /// `ui.setConnectionField {field, value}`: the connection form's own fields by name, so a script
+    /// can build a dialog frame. Every field the editor paints is named here, and the refusal lists
+    /// them, which is what keeps the two in step.
+    fn set_connection_field(state: &mut UiState, params: &Value) -> Value {
+        if !state.connection_open {
+            return serde_json::json!({"ok": false, "error": "no connection dialog is open"});
+        }
+        let Some(field) = params.get("field").and_then(Value::as_str) else {
+            return serde_json::json!({
+                "ok": false,
+                "error": format!("a field name is required; try {}", CONNECTION_FIELDS.join(", ")),
+            });
+        };
+        let value = params.get("value").cloned().unwrap_or(Value::Null);
+        let text = value.as_str().unwrap_or_default().to_string();
+        let flag = value.as_bool().unwrap_or(false);
+        let number = value
+            .as_u64()
+            .filter(|n| *n <= u64::from(u16::MAX))
+            .map(|n| n as u16);
+        let form = &mut state.connection_form;
+        let accepted = match field {
+            "name" => {
+                form.name = text;
+                true
+            }
+            "kind" => match datacraft_core::DriverKind::parse(&text) {
+                Some(kind) => {
+                    form.kind = kind;
+                    true
+                }
+                None => false,
+            },
+            "host" => {
+                form.host = text;
+                true
+            }
+            "port" => match number {
+                Some(port) => {
+                    form.port = port;
+                    true
+                }
+                None => false,
+            },
+            "user" => {
+                form.user = text;
+                true
+            }
+            "password" => {
+                form.password = text;
+                true
+            }
+            "database" => {
+                form.database = text;
+                true
+            }
+            "file" => {
+                form.file = text;
+                true
+            }
+            "group" => {
+                form.group = text;
+                true
+            }
+            "ssl" => match datacraft_core::SslMode::parse(&text) {
+                Some(mode) => {
+                    form.ssl = mode;
+                    true
+                }
+                None => false,
+            },
+            "read_only" => {
+                form.read_only = flag;
+                true
+            }
+            "keychain" => {
+                form.keychain = flag;
+                true
+            }
+            "timeout" => match number {
+                Some(timeout) => {
+                    form.timeout = timeout;
+                    true
+                }
+                None => false,
+            },
+            "ssh_host" => {
+                form.ssh_host = text;
+                true
+            }
+            "ssh_port" => match number {
+                Some(port) => {
+                    form.ssh_port = port;
+                    true
+                }
+                None => false,
+            },
+            "ssh_user" => {
+                form.ssh_user = text;
+                true
+            }
+            "ssh_key" => {
+                form.ssh_key = text;
+                true
+            }
+            "ssh_auth" => match text.to_ascii_lowercase().as_str() {
+                "key file" | "keyfile" | "key" => {
+                    form.ssh_auth = SshAuth::KeyFile;
+                    true
+                }
+                "agent" => {
+                    form.ssh_auth = SshAuth::Agent;
+                    true
+                }
+                "password" => {
+                    form.ssh_auth = SshAuth::Password;
+                    true
+                }
+                _ => false,
+            },
+            "ssh_password" => {
+                form.ssh_password = text;
+                true
+            }
+            "ssh_save_password" => {
+                form.ssh_save_password = flag;
+                true
+            }
+            "ssh_local_port" => match number {
+                Some(port) => {
+                    form.ssh_local_port = port;
+                    true
+                }
+                None => false,
+            },
+            "step" => match ConnStep::parse(&text) {
+                Some(step) => {
+                    form.step = step;
+                    true
+                }
+                None => false,
+            },
+            other => {
+                return serde_json::json!({
+                    "ok": false,
+                    "error": format!("unknown field '{other}'; try {}", CONNECTION_FIELDS.join(", ")),
+                })
+            }
+        };
+        if accepted {
+            serde_json::json!({"ok": true, "field": field, "value": value})
+        } else {
+            serde_json::json!({
+                "ok": false,
+                "error": format!("field '{field}' did not accept {value}; try {}", CONNECTION_FIELDS.join(", ")),
+            })
+        }
+    }
+
     /// The active tab, when it is a query tab: the two register methods act on the script on screen.
     fn query_tab(session: &Session) -> Result<usize, String> {
         match session.active_tab {
@@ -1796,6 +2245,16 @@ impl DatacraftApp {
             1 => "0".into(),
             _ => format!("0..{}", runs - 1),
         }
+    }
+
+    /// The ids the connection control methods name in their refusals.
+    fn connection_ids(&self) -> String {
+        self.session
+            .conns
+            .iter()
+            .map(|conn| conn.cfg.id.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Resolve the connection a control request points at: the index it names, or the active one when

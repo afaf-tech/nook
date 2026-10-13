@@ -887,8 +887,10 @@ pub(crate) mod test_support {
 
     /// A fake `security` on `DATACRAFT_SECURITY_BIN`: it records every call's arguments in a log and
     /// answers a lookup for `account` with `secret`, so the keychain paths can be exercised without
-    /// the login keychain. It takes the same lock as `scratch_config` — a process-wide override
-    /// cannot be set while another test reads it — and returns the log the assertions read.
+    /// the login keychain. An `add-generic-password` call has its stdin read and logged too
+    /// (prefixed `stdin `), which is what lets a test assert the secret arrives there and never in
+    /// the arguments. It takes the same lock as `scratch_config` — a process-wide override cannot be
+    /// set while another test reads it — and returns the log the assertions read.
     pub fn fake_security(
         account: &str,
         secret: &str,
@@ -900,7 +902,8 @@ pub(crate) mod test_support {
         let _ = std::fs::remove_file(&log);
         let script = dir.join("security");
         let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *find-generic-password*{account}*) printf '%s\\n' '{secret}' ;;\nesac\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *add-generic-password*)\n    read -r first\n    read -r second\n    printf 'stdin %s %s\\n' \"$first\" \"$second\" >> \"{}\"\n    ;;\n  *find-generic-password*{account}*) printf '%s\\n' '{secret}' ;;\nesac\nexit 0\n",
+            log.display(),
             log.display()
         );
         let _ = std::fs::write(&script, body);

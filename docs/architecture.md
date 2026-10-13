@@ -87,7 +87,7 @@ implementations:
 
 ## Testing
 
-- 256 `#[test]` functions across the workspace, 83 of them in the UI crate: quoting and literals,
+- 293 `#[test]` functions across the workspace, 103 of them in the UI crate: quoting and literals,
   catalog types, DDL per dialect, structure diff, ER layout, statement splitting, edit planning, data
   generation determinism, report shaping, schedules, profiles, MCP JSON-RPC, and every command against
   junk parameters (`commands_run_with_junk_parameters_never_panic`).
@@ -103,10 +103,18 @@ implementations:
   For a real check, start `datacraft --demo --control <port>` and drive it over the control channel:
   `ui.selectTab` (a negative index shows the start page), `engine.run`, `ui.setEditorText`,
   `ui.selectResult` and `ui.setResultView` (so every statement of a run and both result views can be
-  shot), `ui.setTheme` (so both palettes can be shot without touching the window), `ui.shot` per view,
-  `ui.quit`. The frames are then reviewed as images, and anything visual is fixed and
-  re-shot. `ui.shot` writes the file and leaves the app running; only a `--shot` launch quits after
-  capture.
+  shot), `ui.setTheme` (so both palettes can be shot without touching the window), `ui.openConnection`,
+  `ui.setConnectionTab` and `ui.setConnectionField` (so the connection editor's own frames — a profile
+  opened by id, each step, a field typed into — can be shot the same way, which is the only way a
+  dialog can be photographed at all), `ui.shot` per view, `ui.quit`. The frames are then reviewed as
+  images, and anything visual is fixed and re-shot. `ui.shot` writes the file and leaves the app
+  running; only a `--shot` launch quits after capture.
+- Dialog frames are also asserted headlessly, in `dialogs.rs`'s own tests: `egui::Context::run_ui`
+  paints the app's real `show()` into an off-screen context, and the tests read the painted shapes —
+  a band's height, a button's fill, a label's ink — rather than a screenshot. The context is driven
+  with a clock, because an `Area` fades in over `animation_time` and a frame with no time on it is a
+  frame painted half-transparent; and a frame is run three passes, because the first only lays the
+  modal out and the position it derives from that placeholder is 68px low.
 
 ## Known design choices and their ceilings
 
@@ -294,3 +302,36 @@ implementations:
   macOS only — the same ceiling as the keychain it reads. **Upgrade path**: an in-app prompt whose
   answer is written to the keychain for the length of the run, which is this plumbing with the
   persistence swapped for a session (`docs/gaps.md` §12).
+- **The connection editor and its confirmation are modals; the other five surfaces are still
+  windows.** `dialog_shell` is `egui::Modal::new(id).backdrop_color(tokens.scrim).frame(..)`, so the
+  scrim, the centred position, the radius-6 `stroke_strong` frame and the click-outside-to-close
+  behaviour come from one place, and the editor (560 wide) and the confirmation (440) are its two
+  users. The command runner, Generate data, Export, Preferences and the `Cmd+K` palette still paint
+  through `egui::Window` with the app's own frame: placed rather than centred, dimming nothing, and
+  leaving the panes behind them live. **Ceiling**: two chromes — a dialog's scrim, radius and border
+  are the design's only where `dialog_shell` is used, and the five do not block input to what is under
+  them. **Upgrade path**: the next slice swaps each `egui::Window::new` for `dialog_shell` with its
+  own width; the actions inside do not change, which is the reason the two can live apart at all.
+- **The TLS step ships the mode, not the certificate fields.** The design's step draws three
+  certificate paths; `ConnectionConfig` has no field for them and no driver reads one — `native-tls`
+  verifies against the OS trust store — so the step paints the five modes `SslMode::parse` accepts and
+  says what is true in the design's own `.helper` place (`TLS_HELPER`): the certificate paths have no
+  field in this version. **Ceiling**: `verify-ca` and `verify-full` can only trust a private CA that
+  the OS already trusts, so a self-signed chain needs a system-level install. **Upgrade path**: three
+  fields on the TLS config, which is where `profiles.json`'s shape changes, plus the connector's
+  certificate source.
+- **A profile's colour is carried and never painted.** The editor's form holds the profile's `color`
+  and a save writes it back (`ConnectionConfig.color`), and nothing in the app reads it: the design's
+  colour picker — the fourth control of the General step's own row — is not shipped, and the tree
+  paints no per-connection dot. **Ceiling**: a colour can be set in `profiles.json` by hand and has no
+  effect on any frame. **Upgrade path**: paint it where the design does — the picker here and the
+  connection's chip in the tree — which is one helper and one call site.
+- **The Advanced tab is this app's own, and holds the destructive action.** The design's fourth tab is
+  never drawn open in the mockup, so there is no design for its body; what it holds is the profile's
+  own facts (engine, connected or not, group), the sentence that deleting removes the profile and the
+  passwords saved with it and leaves the server alone, and `Delete connection` — the one action the
+  design gives no home. It is a `danger` button that opens the confirmation, which is where the
+  profile's name is typed, and `conn.delete` refuses without `confirm: true` in the same breath.
+  **Ceiling**: the tab's content is unreviewed by the design, and the delete sits one click deeper
+  than a design that had drawn it. **Upgrade path**: when the design draws the tab (pooling, session
+  settings), the action moves to wherever that names.

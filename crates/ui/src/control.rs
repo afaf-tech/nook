@@ -199,6 +199,9 @@ pub const METHODS: &[&str] = &[
     "ui.commands",
     "ui.selectResult",
     "ui.setResultView",
+    "ui.openConnection",
+    "ui.setConnectionTab",
+    "ui.setConnectionField",
     "ui.quit",
 ];
 

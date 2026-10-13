@@ -31,7 +31,6 @@ The same commands are available from the shell (`datacraft-cli commands`) and ov
 /// passes only the prompt — the password itself is read here, in the helper, so it never reaches the
 /// parent's arguments or environment.
 fn askpass(id: Option<String>) -> i32 {
-    let id = id.or_else(|| std::env::var(datacraft_engine::ASKPASS_CONN_ENV).ok());
     let Some(id) = id else {
         eprintln!("--ssh-askpass needs a connection id");
         return 2;
@@ -48,11 +47,36 @@ fn askpass(id: Option<String>) -> i32 {
     }
 }
 
+/// Is this process `ssh` asking for the password, and for which connection? `ssh` execs `SSH_ASKPASS`
+/// with the prompt and nothing else, so the invocation is one non-flag argument plus the id in
+/// `DATACRAFT_ASKPASS_CONN`; `None` means an ordinary launch, which a stray environment cannot turn
+/// into one.
+fn askpass_invocation(args: &[String], env: Option<String>) -> Option<Option<String>> {
+    let mut rest = args.iter();
+    if let Some(flag) = rest.find(|a| *a == "--ssh-askpass") {
+        let _ = flag;
+        return Some(rest.next().cloned().or(env));
+    }
+    match args {
+        [prompt] if !prompt.starts_with('-') && env.is_some() => Some(env),
+        _ => None,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{}", usage());
         return;
+    }
+    // `ssh` runs the app this way — with the prompt as its only argument and the id in the
+    // environment — so it is answered before any option is parsed, and it prints one line and exits
+    // instead of starting up.
+    if let Some(id) = askpass_invocation(
+        &args,
+        std::env::var(datacraft_engine::ASKPASS_CONN_ENV).ok(),
+    ) {
+        std::process::exit(askpass(id));
     }
     let mut options = Options::default();
     let mut index = 0;
@@ -78,10 +102,6 @@ fn main() {
                         std::process::exit(2);
                     }
                 }
-            }
-            "--ssh-askpass" => {
-                // ssh runs the app this way; it prints one line and exits instead of starting up.
-                std::process::exit(askpass(args.get(index + 1).cloned()));
             }
             "--conn" => {
                 index += 1;
@@ -113,5 +133,50 @@ fn main() {
     if let Err(e) = datacraft_ui::run(options) {
         eprintln!("datacraft: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Which invocations are `ssh` asking for a password. `ssh` execs `SSH_ASKPASS` with the prompt
+    /// as its only argument, so the id can only come from `DATACRAFT_ASKPASS_CONN`; the flag form is
+    /// the manual one, and a stray environment must not turn an ordinary launch into a helper.
+    #[test]
+    fn ssh_askpass_is_recognised_by_its_own_invocation() {
+        let prompt = vec!["ops@jump.example.com's password:".to_string()];
+        assert_eq!(
+            askpass_invocation(&prompt, Some("shop".into())),
+            Some(Some("shop".into())),
+            "ssh's own invocation"
+        );
+        assert_eq!(
+            askpass_invocation(&["--ssh-askpass".into(), "shop".into()], None),
+            Some(Some("shop".into())),
+            "the flag names the connection"
+        );
+        assert_eq!(
+            askpass_invocation(&["--ssh-askpass".into()], Some("shop".into())),
+            Some(Some("shop".into())),
+            "the flag falls back to the environment"
+        );
+        assert_eq!(
+            askpass_invocation(&["--ssh-askpass".into()], None),
+            Some(None),
+            "a missing id is an error the helper reports"
+        );
+        assert_eq!(askpass_invocation(&prompt, None), None, "no id anywhere");
+        assert_eq!(
+            askpass_invocation(&["--demo".into()], Some("shop".into())),
+            None,
+            "a stray environment does not hijack a normal launch"
+        );
+        assert_eq!(askpass_invocation(&[], Some("shop".into())), None);
+        assert_eq!(
+            askpass_invocation(&["a".into(), "b".into()], Some("shop".into())),
+            None,
+            "ssh passes exactly one argument"
+        );
     }
 }

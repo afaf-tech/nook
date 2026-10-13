@@ -163,8 +163,13 @@ fn new_conn(session: &mut Session, p: &crate::Params) -> Result<serde_json::Valu
 
 fn edit(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     let index = session.resolve_conn(p)?;
-    let name = session.conns[index].cfg.name.clone();
     let mut cfg = session.conns[index].cfg.clone();
+    if let Some(name) = p.str_opt("name") {
+        // A rename is a real edit; an empty one leaves the name alone.
+        if !name.trim().is_empty() {
+            cfg.name = name;
+        }
+    }
     if let Some(host) = p.str_opt("host") {
         cfg.host = host;
     }
@@ -192,7 +197,9 @@ fn edit(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     if let Some(ssl) = p.str_opt("ssl") {
         cfg.ssl = SslMode::parse(&ssl).ok_or_else(|| Error::config("bad ssl mode"))?;
     }
-    cfg.name = name;
+    if p.has("timeout") {
+        cfg.connect_timeout_s = p.int_opt("timeout", 15).clamp(1, 300) as u64;
+    }
     session.profiles.upsert(cfg.clone())?;
     session.conns[index].cfg = cfg;
     session.log(Level::Info, "connection updated");
@@ -666,9 +673,24 @@ mod tests {
             )
             .expect("store");
         assert_eq!(stored["account"], "doomed#ssh");
-        assert!(std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .contains("-a doomed#ssh"));
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(calls.contains("-a doomed#ssh"), "{calls}");
+        // The phase's non-goal: the secret reaches the child on stdin, never in its arguments, where
+        // `ps` could read it for as long as the child lives.
+        assert!(
+            calls.lines().any(|line| line.ends_with("-a doomed#ssh -w")),
+            "{calls}"
+        );
+        assert!(
+            !calls
+                .lines()
+                .any(|line| line.starts_with("add-generic-password") && line.contains("hunter2")),
+            "the secret is in the arguments: {calls}"
+        );
+        assert!(
+            calls.lines().any(|line| line == "stdin hunter2 hunter2"),
+            "the secret did not arrive on stdin: {calls}"
+        );
         assert_eq!(
             crate::profiles::keychain_lookup("doomed#ssh")
                 .expect("lookup")
@@ -690,6 +712,63 @@ mod tests {
         assert!(session
             .run("conn.sshPassword", json!({"conn": "doomed"}))
             .is_err());
+    }
+
+    #[test]
+    fn editing_a_connection_changes_the_one_it_names_with_its_name_and_timeout() {
+        let _guard = crate::test_support::scratch_config();
+        let mut session = Session::new();
+        for id in ["first", "second"] {
+            let mut cfg = profile(id);
+            cfg.name = id.to_string();
+            session.profiles.upsert(cfg.clone()).ok();
+            session.conns.push(Conn::new(cfg));
+        }
+        session.active_conn = Some(0);
+        let first_before = session.conns[0].cfg.clone();
+
+        session
+            .run(
+                "conn.edit",
+                json!({"conn": "second", "host": "db.example.com", "name": "Second shop",
+                       "timeout": 42}),
+            )
+            .expect("edit");
+
+        // The connection that was named moved; the active one — which is a different connection —
+        // did not.
+        assert_eq!(session.conns[1].cfg.host, "db.example.com");
+        assert_eq!(session.conns[1].cfg.name, "Second shop");
+        assert_eq!(session.conns[1].cfg.connect_timeout_s, 42);
+        assert_eq!(session.conns[0].cfg.host, first_before.host);
+        assert_eq!(session.conns[0].cfg.name, first_before.name);
+        assert_eq!(
+            session.conns[0].cfg.connect_timeout_s,
+            first_before.connect_timeout_s
+        );
+
+        // An edit is a save: both fields come back from the store.
+        let reloaded = ProfileStore::load().expect("reload");
+        assert_eq!(
+            reloaded
+                .get("second")
+                .map(|cfg| (cfg.name.clone(), cfg.connect_timeout_s)),
+            Some(("Second shop".to_string(), 42))
+        );
+        assert_eq!(
+            reloaded.get("first").map(|cfg| cfg.name.clone()),
+            Some("first".to_string())
+        );
+
+        // An empty name is not a rename, and the timeout stays inside the engine's own range.
+        session
+            .run("conn.edit", json!({"conn": "second", "name": "   "}))
+            .expect("edit");
+        assert_eq!(session.conns[1].cfg.name, "Second shop");
+        session
+            .run("conn.edit", json!({"conn": "second", "timeout": 9000}))
+            .expect("edit");
+        assert_eq!(session.conns[1].cfg.connect_timeout_s, 300);
     }
 
     #[test]
