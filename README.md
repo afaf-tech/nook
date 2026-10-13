@@ -33,46 +33,56 @@ registered command shared by all three surfaces.
 - macOS is fully supported; the GUI uses `egui`/`eframe`
 - `ssh` for tunneled connections; `pg_dump`/`mysqldump` only for those backup types
 
-## Install and build
+## Install
 
 ```sh
 git clone https://github.com/kasfulk/nook.git && cd nook
-cargo build --release -p nook -p nook-cli
+./install.sh
 ```
 
-Binaries land in `target/release/`.
+`install.sh` builds the two release binaries and copies them into `~/.local/bin`; set
+`PREFIX=/usr/local ./install.sh` to install elsewhere. It warns if the target directory is not on
+`PATH`.
+
+To build without installing instead:
+
+```sh
+cargo build --release -p nook -p nook-cli   # binaries land in target/release/
+```
 
 ## Run
 
 **Desktop app**
 
 ```sh
-cargo run -p nook                          # start with your saved connections
-cargo run -p nook -- --demo                # sample SQLite database in the temp directory
-cargo run -p nook -- --conn postgres://localhost/shop
-cargo run -p nook -- --sql "select * from users"
-cargo run -p nook -- --control 7981        # JSON control channel on port 7981
-cargo run -p nook -- --shot /tmp/nook.png  # render one frame to PNG and exit
+nook                                       # start with your saved connections
+nook --demo                                # sample SQLite database in the temp directory
+nook --conn postgres://localhost/shop
+nook --sql "select * from users"
+nook --control 7981                        # JSON control channel on port 7981
+nook --shot /tmp/nook.png                  # render one frame to PNG and exit
 ```
+
+From a checkout, prefix any of these with `cargo run -p nook --`, e.g. `cargo run -p nook -- --demo`.
 
 **CLI** — the same surface from a shell:
 
 ```sh
-cargo run -p nook-cli -- tables postgres://localhost/shop
-cargo run -p nook-cli -- sql postgres://localhost/shop "select status, count(*) from orders group by status"
-cargo run -p nook-cli -- dump postgres://localhost/shop --out backup.sql
-cargo run -p nook-cli -- transfer --from sqlite:./shop.db --to postgres://localhost/stage --tables '*'
-cargo run -p nook-cli -- datagen sqlite:./shop.db customers --rows 500 --seed 7
+nook-cli tables postgres://localhost/shop
+nook-cli sql postgres://localhost/shop "select status, count(*) from orders group by status"
+nook-cli dump postgres://localhost/shop --out backup.sql
+nook-cli transfer --from sqlite:./shop.db --to postgres://localhost/stage --tables '*'
+nook-cli datagen sqlite:./shop.db customers --rows 500 --seed 7
 ```
 
 A connection is a saved profile name or a URI: `sqlite:./app.db`,
 `postgres://user:pass@127.0.0.1:5432/shop`, `mysql://root@127.0.0.1/shop`.
-Run `cargo run -p nook-cli -- help` for the full command list.
+Run `nook-cli help` (or `cargo run -p nook-cli -- help`) for the full command list.
 
 **For agents**
 
 ```sh
-cargo run -p nook-cli -- mcp    # MCP server on stdio; every command id is a tool
+nook-cli mcp    # MCP server on stdio; every command id is a tool
 ```
 
 The control channel speaks one JSON object per line; the key is written to
@@ -94,8 +104,8 @@ cargo xtask parity  # regenerate docs/parity-checklist.md
 
 `crates/engine/src/catalog.rs` lists the features a Navicat-class tool is expected to have, each with
 the command id that implements it. [`docs/parity-checklist.md`](docs/parity-checklist.md) is the
-generated coverage report, and a test keeps it above a floor that only rises. Run
-`cargo run -p nook-cli -- parity` for the same numbers, area by area, with the gaps named.
+generated coverage report, and a test keeps it above a floor that only rises. `cargo xtask parity`
+(or `nook-cli parity` from an install) prints the same numbers, area by area, with the gaps named.
 
 ## Architecture
 
