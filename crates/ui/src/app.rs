@@ -89,14 +89,16 @@ impl Default for DatagenForm {
 }
 
 /// One top-bar menu: the design keeps six of them, each opening the command groups the registry
-/// already publishes.
+/// already publishes. Returns the id of the spec that was picked — the click is answered by the
+/// caller, after this function's `&mut UiState` is gone, because running the command needs
+/// `&mut Session` at the same time.
 fn menu_button(
     ui: &mut egui::Ui,
     tokens: &Tokens,
     menu: &str,
     groups: &[&str],
-    state: &mut UiState,
-) {
+) -> Option<&'static str> {
+    let mut picked = None;
     // The design's `.menu` is a bare label: no fill, no border, 28px tall and 6px of padding, with a
     // fill only while the pointer is on it. egui's default button paints chrome in every state, so
     // the visuals are scoped here rather than faked with an explicit fill that would kill the hover.
@@ -129,7 +131,7 @@ fn menu_button(
                         let response =
                             ui.button(RichText::new(spec.label).size(t::T_SM).color(tokens.text));
                         if response.clicked() {
-                            state.open_command(spec.id.to_string());
+                            picked = Some(spec.id);
                             ui.close();
                         }
                         if !spec.help.is_empty() {
@@ -140,6 +142,7 @@ fn menu_button(
             }
         });
     });
+    picked
 }
 
 /// How many rows the inspector's Preview tab asks for: enough to recognise the data, few enough
@@ -741,13 +744,21 @@ impl DatacraftApp {
                 self.workspace_button(ui, tokens);
                 t::divider(ui, tokens);
 
+                let mut pick = None;
                 ui.scope(|ui| {
                     // The design's `.menus` is one flex block, so the six labels sit flush.
                     ui.spacing_mut().item_spacing.x = 0.0;
                     for (menu, groups) in MENUS {
-                        menu_button(ui, tokens, menu, groups, &mut self.state);
+                        if let Some(id) = menu_button(ui, tokens, menu, groups) {
+                            pick = Some(id);
+                        }
                     }
                 });
+                // Answered out here, where `&mut UiState` is released: the pick runs the command,
+                // and that needs `&mut Session` too. One menu can be picked per frame.
+                if let Some(id) = pick {
+                    Self::menu_pick(&mut self.session, &mut self.state, id);
+                }
 
                 // What the right cluster will need, measured before it is painted: the design's
                 // `.palette` is `flex: 1 1 auto; min-width: 120px; max-width: 300px`, and this is
@@ -1930,6 +1941,27 @@ impl DatacraftApp {
         }
     }
 
+    /// A menu pick is a command run, not a form to fill in: `Session::run` resolves the connection
+    /// and the tab a command needs (`resolve_conn`, `active_tab`) and every shortcut in the bar
+    /// already calls it with `{}`, so the pick goes straight through. Only a command the engine
+    /// refuses — a missing `key`, no open connection, a tab that is not there — opens the parameter
+    /// window, and it opens on the engine's own message, so a value it genuinely needs is named.
+    /// Every failure opens the window: the alternatives are sniffing error classes or adding a
+    /// required-parameter field to the registry, and the message already says which value is short.
+    fn menu_pick(session: &mut Session, state: &mut UiState, id: &str) {
+        // Preferences is a form, not a runner: `open_command` owns that special case and opens the
+        // settings dialog, which is the same thing the File ▸ App entry has always done.
+        if id == "app.settings" {
+            state.open_command(id.to_string());
+            return;
+        }
+        if let Err(e) = session.run(id, serde_json::json!({})) {
+            session.log(Level::Warn, e.to_string());
+            state.open_command(id.to_string());
+            state.command_result = Some(format!("error: {e}"));
+        }
+    }
+
     /// Keyboard shortcuts that are not tied to the menu.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let (palette, run_query, apply, close_tab, format_sql, toggle_log) = ctx.input(|i| {
@@ -2174,6 +2206,36 @@ mod tests {
         assert_eq!(
             DatacraftApp::inspector_target(&session, None),
             Err("connection 'closed' is not open".to_string())
+        );
+    }
+
+    #[test]
+    fn a_menu_pick_runs_the_command_and_only_the_engine_refusal_opens_the_runner() {
+        let mut session = crate::demo_session();
+        let mut state = UiState::default();
+
+        // A pick the engine can serve from context runs and opens nothing: the report is that every
+        // pick landed in 'Run a Command', including the many commands that need no input.
+        assert!(!session.messages.is_empty());
+        DatacraftApp::menu_pick(&mut session, &mut state, "app.clearLog");
+        assert!(session.messages.is_empty(), "the pick ran the command");
+        assert!(!state.command_open, "a command that ran opens no window");
+
+        // Preferences is a form, not a command: the settings dialog, never the runner.
+        DatacraftApp::menu_pick(&mut session, &mut state, "app.settings");
+        assert!(state.settings_open);
+        assert!(!state.command_open, "Preferences is a form, not a runner");
+
+        // A pick the engine refuses does open the runner, showing the engine's own message, so a
+        // command that needs a value the context cannot supply still has a way to be given one.
+        DatacraftApp::menu_pick(&mut session, &mut state, "app.setSetting");
+        assert!(state.command_open);
+        assert_eq!(state.command_id, "app.setSetting");
+        // The runner's own wording for a failure (`dialogs.rs`): the window reads the same whether
+        // the command came from a menu pick or from the Run button in it.
+        assert_eq!(
+            state.command_result.as_deref(),
+            Some("error: config: missing parameter 'key'")
         );
     }
 
