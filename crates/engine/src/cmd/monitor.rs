@@ -1,6 +1,6 @@
 //! Server monitor: sessions, variables, status and the per-table dashboard.
 
-use datacraft_core::{Error, Result, Value};
+use nook_core::{Error, Result, Value};
 use serde_json::json;
 
 use crate::{CommandSpec, Level, Params, Session};
@@ -116,7 +116,7 @@ fn dashboard(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         .collect();
 
     // A small numeric table for the UI's bar chart: size in kilobytes per table.
-    let chart = datacraft_model::ResultSet {
+    let chart = nook_model::ResultSet {
         columns: vec!["table".into(), "kilobytes".into()],
         column_types: vec!["text".into(), "numeric".into()],
         rows: tables
@@ -126,7 +126,7 @@ fn dashboard(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             })
             .take(limit)
             .collect(),
-        ..datacraft_model::ResultSet::default()
+        ..nook_model::ResultSet::default()
     };
 
     Ok(json!({

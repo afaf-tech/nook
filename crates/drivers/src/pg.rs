@@ -8,8 +8,8 @@
 
 use std::time::{Duration, Instant};
 
-use datacraft_core::{ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
-use datacraft_model::{
+use nook_core::{ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
+use nook_model::{
     Catalog, Column, DbProcess, DbUser, ForeignKey, Index, ResultSet, Schema, ServerInfo, Table,
     TableKind,
 };
@@ -103,8 +103,8 @@ fn connect(cfg: &ConnectionConfig) -> Result<Client> {
         pc.dbname(&cfg.database);
     }
     pc.ssl_mode(match cfg.ssl {
-        datacraft_core::SslMode::Disable => postgres::config::SslMode::Disable,
-        datacraft_core::SslMode::Prefer => postgres::config::SslMode::Prefer,
+        nook_core::SslMode::Disable => postgres::config::SslMode::Disable,
+        nook_core::SslMode::Prefer => postgres::config::SslMode::Prefer,
         _ => postgres::config::SslMode::Require,
     });
     let target = if cfg.ssh.enabled {
@@ -112,14 +112,14 @@ fn connect(cfg: &ConnectionConfig) -> Result<Client> {
     } else {
         format!("{host}:{port}")
     };
-    if cfg.ssl == datacraft_core::SslMode::Disable {
+    if cfg.ssl == nook_core::SslMode::Disable {
         return pc
             .connect(NoTls)
             .map_err(|e| Error::connect(format!("{target}: {e}")));
     }
     let verify = matches!(
         cfg.ssl,
-        datacraft_core::SslMode::VerifyFull | datacraft_core::SslMode::VerifyCa
+        nook_core::SslMode::VerifyFull | nook_core::SslMode::VerifyCa
     );
     let builder = native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(!verify)
@@ -666,13 +666,13 @@ impl Driver for Postgres {
             .find_table(schema, table)
             .ok_or_else(|| Error::not_found(format!("no such table: {table}")))?
             .clone();
-        let mut out = datacraft_model::ddl::create_table(&t, Dialect::Postgres);
+        let mut out = nook_model::ddl::create_table(&t, Dialect::Postgres);
         out.push('\n');
-        for idx in datacraft_model::ddl::create_indexes(&t, Dialect::Postgres) {
+        for idx in nook_model::ddl::create_indexes(&t, Dialect::Postgres) {
             out.push_str(&idx);
             out.push('\n');
         }
-        for fk in datacraft_model::ddl::create_foreign_keys(&t, Dialect::Postgres) {
+        for fk in nook_model::ddl::create_foreign_keys(&t, Dialect::Postgres) {
             out.push_str(&fk);
             out.push('\n');
         }

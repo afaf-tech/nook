@@ -1,7 +1,7 @@
 //! The connection sidebar: search, connection cards, schema and table lists.
 
-use datacraft_engine::{ConnState, Session, TabKind, TableRef};
 use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
+use nook_engine::{ConnState, Session, TabKind, TableRef};
 
 use crate::app::UiState;
 use crate::icons::{self, Glyph};
@@ -31,7 +31,7 @@ impl Scope {
 
     /// Whether an object of this kind is listed. The table loop and the count share it, so the
     /// match line can never disagree with the rows under it.
-    fn shows(self, kind: datacraft_model::TableKind) -> bool {
+    fn shows(self, kind: nook_model::TableKind) -> bool {
         match self {
             Scope::All => true,
             Scope::Connections => false,
@@ -42,10 +42,10 @@ impl Scope {
 }
 
 /// A view is not a table, and both the badge and the scope control say so.
-fn is_view(kind: datacraft_model::TableKind) -> bool {
+fn is_view(kind: nook_model::TableKind) -> bool {
     matches!(
         kind,
-        datacraft_model::TableKind::View | datacraft_model::TableKind::MatView
+        nook_model::TableKind::View | nook_model::TableKind::MatView
     )
 }
 
@@ -726,23 +726,23 @@ pub fn open_data_tab(session: &mut Session, index: usize, reference: TableRef) {
         None => reference.table.clone(),
     };
     let tab = session.add_tab(TabKind::Data, title, Some(index));
-    if let Err(e) = datacraft_engine::cmd::bind_grid_table(session, tab, reference) {
-        session.log(datacraft_engine::Level::Error, e.to_string());
+    if let Err(e) = nook_engine::cmd::bind_grid_table(session, tab, reference) {
+        session.log(nook_engine::Level::Error, e.to_string());
         return;
     }
-    if let Err(e) = datacraft_engine::cmd::load_grid(session, tab) {
-        session.log(datacraft_engine::Level::Error, e.to_string());
+    if let Err(e) = nook_engine::cmd::load_grid(session, tab) {
+        session.log(nook_engine::Level::Error, e.to_string());
     }
 }
 
 /// Colour for a cell value type, used by the results view.
-pub fn value_color(value: &datacraft_core::Value, tokens: &Tokens) -> Color32 {
+pub fn value_color(value: &nook_core::Value, tokens: &Tokens) -> Color32 {
     match value {
-        datacraft_core::Value::Null => tokens.text_dim,
-        datacraft_core::Value::Int(_)
-        | datacraft_core::Value::UInt(_)
-        | datacraft_core::Value::Float(_) => tokens.accent,
-        datacraft_core::Value::Bool(_) => tokens.warn,
+        nook_core::Value::Null => tokens.text_dim,
+        nook_core::Value::Int(_) | nook_core::Value::UInt(_) | nook_core::Value::Float(_) => {
+            tokens.accent
+        }
+        nook_core::Value::Bool(_) => tokens.warn,
         _ => tokens.text,
     }
 }
@@ -750,7 +750,7 @@ pub fn value_color(value: &datacraft_core::Value, tokens: &Tokens) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_model::TableKind;
+    use nook_model::TableKind;
 
     #[test]
     fn a_scope_admits_exactly_the_kinds_it_names() {

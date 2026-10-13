@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use datacraft_core::{ConnectionConfig, DriverKind, Error, Result};
+use nook_core::{ConnectionConfig, DriverKind, Error, Result};
 
 /// What a backup or restore will run.
 #[derive(Debug, Clone, PartialEq)]
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn restore_plan_accepts_a_real_file() {
-        let dir = std::env::temp_dir().join("datacraft_backup_test");
+        let dir = std::env::temp_dir().join("nook_backup_test");
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("dump.sql");
         std::fs::write(&file, "select 1;").expect("write");

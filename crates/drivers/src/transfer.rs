@@ -3,8 +3,8 @@
 
 use std::time::Instant;
 
-use datacraft_core::{quote_qualified, sql_literal, Dialect, DriverKind, Error, Result, Value};
-use datacraft_model::{ddl, Catalog, ResultSet, Table};
+use nook_core::{quote_qualified, sql_literal, Dialect, DriverKind, Error, Result, Value};
+use nook_model::{ddl, Catalog, ResultSet, Table};
 
 use crate::Driver;
 
@@ -194,7 +194,7 @@ pub fn transfer(
         .schemas
         .iter()
         .flat_map(|s| s.tables.iter())
-        .filter(|t| t.kind == datacraft_model::TableKind::Table)
+        .filter(|t| t.kind == nook_model::TableKind::Table)
         .filter(|t| {
             tables.is_empty()
                 || tables.iter().any(|w| w == "*")
@@ -425,7 +425,7 @@ pub fn sync_statements(
                 let cols = change
                     .values
                     .iter()
-                    .map(|(c, _)| datacraft_core::quote_ident(c, dialect))
+                    .map(|(c, _)| nook_core::quote_ident(c, dialect))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let vals = change
@@ -446,7 +446,7 @@ pub fn sync_statements(
                     .map(|(c, v)| {
                         format!(
                             "{} = {}",
-                            datacraft_core::quote_ident(c, dialect),
+                            nook_core::quote_ident(c, dialect),
                             sql_literal(v, dialect)
                         )
                     })
@@ -457,11 +457,11 @@ pub fn sync_statements(
                     .iter()
                     .map(|(c, v)| {
                         if v.is_null() {
-                            format!("{} IS NULL", datacraft_core::quote_ident(c, dialect))
+                            format!("{} IS NULL", nook_core::quote_ident(c, dialect))
                         } else {
                             format!(
                                 "{} = {}",
-                                datacraft_core::quote_ident(c, dialect),
+                                nook_core::quote_ident(c, dialect),
                                 sql_literal(v, dialect)
                             )
                         }
@@ -480,7 +480,7 @@ pub fn sync_statements(
                     .map(|(c, v)| {
                         format!(
                             "{} = {}",
-                            datacraft_core::quote_ident(c, dialect),
+                            nook_core::quote_ident(c, dialect),
                             sql_literal(v, dialect)
                         )
                     })
@@ -558,7 +558,7 @@ pub fn sync_data(
         .schemas
         .iter()
         .flat_map(|s| s.tables.iter())
-        .filter(|t| t.kind == datacraft_model::TableKind::Table)
+        .filter(|t| t.kind == nook_model::TableKind::Table)
         .filter(|t| {
             tables.is_empty()
                 || tables.iter().any(|w| w == "*")
@@ -653,7 +653,7 @@ pub fn dump_script(
     let kind = driver.kind();
     let mut out = String::new();
     out.push_str(&format!(
-        "-- DataCraft dump of {} ({})\n-- {}\n\n",
+        "-- Nook dump of {} ({})\n-- {}\n\n",
         catalog
             .database
             .clone()
@@ -668,7 +668,7 @@ pub fn dump_script(
         .schemas
         .iter()
         .flat_map(|s| s.tables.iter())
-        .filter(|t| t.kind == datacraft_model::TableKind::Table)
+        .filter(|t| t.kind == nook_model::TableKind::Table)
         .filter(|t| {
             tables.is_empty()
                 || tables.iter().any(|w| w == "*")

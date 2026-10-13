@@ -22,7 +22,7 @@ pub mod theme;
 pub mod tree;
 pub mod views;
 
-pub use app::DatacraftApp;
+pub use app::NookApp;
 
 /// Options the desktop binary passes in.
 #[derive(Debug, Clone, Default)]
@@ -40,16 +40,16 @@ pub struct Options {
 }
 
 /// Build the sample database used by `--demo` and by the screenshot check.
-pub fn demo_session() -> datacraft_engine::Session {
-    use datacraft_core::{ConnectionConfig, Value};
-    use datacraft_engine::{Conn, Level, Session, TabKind};
+pub fn demo_session() -> nook_engine::Session {
+    use nook_core::{ConnectionConfig, Value};
+    use nook_engine::{Conn, Level, Session, TabKind};
 
-    let path = std::env::temp_dir().join("datacraft-demo.db");
+    let path = std::env::temp_dir().join("nook-demo.db");
     let _ = std::fs::remove_file(&path);
     let cfg = ConnectionConfig::sqlite(path.to_string_lossy());
     let mut session = Session::new();
     session.conns.push(Conn::new(cfg));
-    if let Err(e) = datacraft_engine::cmd::open_now(&mut session, 0) {
+    if let Err(e) = nook_engine::cmd::open_now(&mut session, 0) {
         session.log(Level::Error, format!("demo setup failed: {e}"));
         return session;
     }
@@ -67,11 +67,11 @@ pub fn demo_session() -> datacraft_engine::Session {
         INSERT INTO orders (customer_id, total, status) VALUES \
           (1, 120.50, 'paid'), (1, 42.00, 'paid'), (2, 7.25, 'pending'), (3, 999.99, 'paid'),\
           (4, 15.00, 'refunded'), (5, 250.75, 'pending'), (6, 60.00, 'paid'), (2, 31.40, 'paid');";
-    if let Err(e) = datacraft_engine::cmd::run_sql(&mut session, 0, setup, Some(10)) {
+    if let Err(e) = nook_engine::cmd::run_sql(&mut session, 0, setup, Some(10)) {
         session.log(Level::Error, format!("demo data failed: {e}"));
         return session;
     }
-    let _ = datacraft_engine::cmd::refresh_catalog(&mut session, 0);
+    let _ = nook_engine::cmd::refresh_catalog(&mut session, 0);
     let index = session.add_tab(TabKind::Query, "Query", Some(0));
     if let Some(tab) = session.tabs.get_mut(index) {
         tab.sql.text = "SELECT c.city, count(o.id) AS orders, round(sum(o.total), 2) AS revenue\n  FROM customers c\n  LEFT JOIN orders o ON o.customer_id = c.id\n GROUP BY c.city\n ORDER BY revenue DESC;".into();
@@ -93,15 +93,15 @@ pub fn demo_session() -> datacraft_engine::Session {
             .insert("monitor".into(), serde_json::json!({"kind": "dashboard"}));
     }
     let data_tab = session.add_tab(TabKind::Data, "main.customers", Some(0));
-    let _ = datacraft_engine::cmd::bind_grid_table(
+    let _ = nook_engine::cmd::bind_grid_table(
         &mut session,
         data_tab,
-        datacraft_engine::TableRef {
+        nook_engine::TableRef {
             schema: None,
             table: "customers".into(),
         },
     );
-    let _ = datacraft_engine::cmd::load_grid(&mut session, data_tab);
+    let _ = nook_engine::cmd::load_grid(&mut session, data_tab);
     let _ = Value::Int(0);
     session.log(Level::Success, "sample database ready (customers, orders)");
     session
@@ -113,12 +113,12 @@ pub fn run(options: Options) -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([900.0, 600.0])
-            .with_title("DataCraft"),
+            .with_title("Nook"),
         ..Default::default()
     };
     eframe::run_native(
-        "DataCraft",
+        "Nook",
         native_options,
-        Box::new(move |cc| Ok(Box::new(DatacraftApp::new(cc, options.clone())))),
+        Box::new(move |cc| Ok(Box::new(NookApp::new(cc, options.clone())))),
     )
 }

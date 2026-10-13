@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-use datacraft_core::{DriverKind, Error, Result};
-use datacraft_drivers::backup;
-use datacraft_drivers::transfer::{self, TransferOptions};
+use nook_core::{DriverKind, Error, Result};
+use nook_drivers::backup;
+use nook_drivers::transfer::{self, TransferOptions};
 use serde_json::json;
 
 use crate::cmd::grid::expand;
@@ -43,7 +43,7 @@ pub fn commands() -> Vec<CommandSpec> {
             .params(r#"{"id":"nightly","enabled":false}"#),
         CommandSpec::new("job.run", "Run a job now", "Automation", job_run).params(r#"{"id":"nightly"}"#),
         CommandSpec::new("job.runDue", "Run every due job", "Automation", job_run_due)
-            .help("Called by the app's timer and by `datacraft-cli job serve`."),
+            .help("Called by the app's timer and by `nook-cli job serve`."),
         CommandSpec::new("job.logs", "Job log", "Automation", job_logs)
             .params(r#"{"id":"nightly","limit":20}"#),
     ]
@@ -137,7 +137,7 @@ fn preview_transfer(session: &mut Session, p: &Params) -> Result<serde_json::Val
     let mut plan = Vec::new();
     for schema in &catalog.schemas {
         for table in &schema.tables {
-            if table.kind != datacraft_model::TableKind::Table {
+            if table.kind != nook_model::TableKind::Table {
                 continue;
             }
             if !(tables.iter().any(|t| t == "*")
@@ -221,12 +221,7 @@ fn sync_data(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 fn structure_changes(
     session: &mut Session,
     p: &Params,
-) -> Result<(
-    usize,
-    usize,
-    Vec<datacraft_model::Change>,
-    datacraft_core::Dialect,
-)> {
+) -> Result<(usize, usize, Vec<nook_model::Change>, nook_core::Dialect)> {
     let (from, to) = pair(session, p)?;
     let source = session.catalog_of(from)?.clone();
     let target = session.catalog_of(to)?.clone();
@@ -234,12 +229,12 @@ fn structure_changes(
         let driver = session.driver_for(to)?;
         driver.dialect()
     };
-    let mut changes = datacraft_model::diff_catalogs(&source, &target, dialect);
+    let mut changes = nook_model::diff_catalogs(&source, &target, dialect);
     if !p.bool_opt("include_drops", true) {
         changes.retain(|c| {
             !matches!(
                 c.kind,
-                datacraft_model::ChangeKind::DropTable | datacraft_model::ChangeKind::DropColumn
+                nook_model::ChangeKind::DropTable | nook_model::ChangeKind::DropColumn
             )
         });
     }
@@ -342,7 +337,7 @@ fn dump(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         return Ok(json!({
             "path": path.to_string_lossy(),
             "bytes": script.len(),
-            "statements": datacraft_drivers::split_script(&script).len(),
+            "statements": nook_drivers::split_script(&script).len(),
             "engine": "in-process SQL script",
             "schema_only": schema_only,
         }));
@@ -385,7 +380,7 @@ fn restore(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     if kind == DriverKind::Sqlite {
         let script = std::fs::read_to_string(&path)
             .map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
-        let statements = datacraft_drivers::split_script(&script);
+        let statements = nook_drivers::split_script(&script);
         let count = statements.len();
         crate::cmd::run_sql(session, index, &script, Some(1))?;
         let _ = crate::cmd::refresh_catalog(session, index);
@@ -665,7 +660,7 @@ mod tests {
     #[test]
     fn listing_missing_backup_directory_is_not_an_error() {
         let mut session = Session::new();
-        let p = Params::from_json(json!({"dir": "/tmp/datacraft-no-such-dir"})).expect("params");
+        let p = Params::from_json(json!({"dir": "/tmp/nook-no-such-dir"})).expect("params");
         let out = list_backups(&mut session, &p).expect("list");
         assert_eq!(out["files"].as_array().map(Vec::len), Some(0));
     }

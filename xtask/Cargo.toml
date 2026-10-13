@@ -9,5 +9,5 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
-datacraft-drivers = { workspace = true }
-datacraft-engine = { workspace = true }
+nook-drivers = { workspace = true }
+nook-engine = { workspace = true }

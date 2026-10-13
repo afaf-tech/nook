@@ -1,7 +1,7 @@
 //! Query editor commands: run, format, complete, explain, history, transactions.
 
-use datacraft_core::{Error, Result};
-use datacraft_model::ResultSet;
+use nook_core::{Error, Result};
+use nook_model::ResultSet;
 use serde_json::json;
 
 use crate::cmd::{run_sql, sql_from_params_or_editor};
@@ -337,7 +337,7 @@ fn complete(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         .and_then(|i| session.conns.get(i))
         .and_then(|c| c.driver.as_ref())
         .map(|d| d.dialect())
-        .unwrap_or(datacraft_core::Dialect::Sqlite);
+        .unwrap_or(nook_core::Dialect::Sqlite);
     let catalog = session
         .active_conn
         .and_then(|i| session.conns.get(i))
@@ -487,14 +487,14 @@ fn stop(_session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
 
 /// Split a script into statements, keeping the trailing semicolons.
 pub fn split(sql: &str) -> Vec<String> {
-    datacraft_drivers::split_script(sql)
+    nook_drivers::split_script(sql)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::scratch_config;
-    use datacraft_model::ResultSet;
+    use nook_model::ResultSet;
 
     /// A real session: one SQLite connection on `:memory:` and a query tab, the editor's own path to
     /// a run. The guard keeps the scratch config directory to this test for its whole life, and the

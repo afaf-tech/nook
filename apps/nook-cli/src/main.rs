@@ -6,15 +6,15 @@
     clippy::todo,
     clippy::unreachable
 )]
-//! `datacraft-cli`: the same commands the app runs, from a shell.
+//! `nook-cli`: the same commands the app runs, from a shell.
 //!
 //! Connections are named by saved profile id or given as a URI
 //! (`sqlite:./app.db`, `postgres://user:pass@host:5432/db`, `mysql://…`).
 
 use std::io::Write;
 
-use datacraft_core::{ConnectionConfig, Error, Result, Value};
-use datacraft_engine::{registry, Conn, Level, Session};
+use nook_core::{ConnectionConfig, Error, Result, Value};
+use nook_engine::{registry, Conn, Level, Session};
 use serde_json::json;
 
 type CliResult = std::result::Result<(), String>;
@@ -24,7 +24,7 @@ fn main() {
     let code = match run(&args) {
         Ok(()) => 0,
         Err(message) => {
-            eprintln!("datacraft: {message}");
+            eprintln!("nook: {message}");
             1
         }
     };
@@ -32,7 +32,7 @@ fn main() {
 }
 
 fn usage() -> String {
-    r#"datacraft-cli — DataCraft from the shell
+    r#"nook-cli — Nook from the shell
 
   commands [--group G] [--json]          every command id with its parameters
   parity [--markdown]                    feature coverage against the Navicat catalog
@@ -92,7 +92,7 @@ fn run(args: &[String]) -> CliResult {
         "diagram" => diagram(args),
         "chart" => chart(args),
         "job" => job(args),
-        "mcp" => datacraft_mcp::serve_stdio(usage()).map_err(|e| e.to_string()),
+        "mcp" => nook_mcp::serve_stdio(usage()).map_err(|e| e.to_string()),
         other => Err(format!("unknown command '{other}'\n\n{}", usage())),
     }
 }
@@ -185,7 +185,7 @@ fn open_connection(session: &mut Session, spec: &str) -> Result<usize> {
         session.conns.push(Conn::new(cfg));
     }
     let index = session.conn_index(&id)?;
-    datacraft_engine::cmd::open_now(session, index)?;
+    nook_engine::cmd::open_now(session, index)?;
     Ok(index)
 }
 
@@ -199,7 +199,7 @@ fn run_command(
 
 // ------------------------------------------------------------------ presentation
 
-fn print_result(rows: &datacraft_model::ResultSet, format: &str) -> CliResult {
+fn print_result(rows: &nook_model::ResultSet, format: &str) -> CliResult {
     match format {
         "json" => {
             let text =
@@ -213,7 +213,7 @@ fn print_result(rows: &datacraft_model::ResultSet, format: &str) -> CliResult {
     Ok(())
 }
 
-fn print_table(rows: &datacraft_model::ResultSet) {
+fn print_table(rows: &nook_model::ResultSet) {
     if !rows.is_tabular() {
         println!(
             "{} row(s) affected in {:.1} ms",
@@ -279,7 +279,7 @@ fn print_json(value: &serde_json::Value) -> CliResult {
 fn commands(args: &[String]) -> CliResult {
     let group = opt(args, "--group");
     let json_out = flag(args, "--json");
-    let list: Vec<&datacraft_engine::CommandSpec> = registry()
+    let list: Vec<&nook_engine::CommandSpec> = registry()
         .iter()
         .filter(|c| group.as_deref().map(|g| c.group == g).unwrap_or(true))
         .collect();
@@ -314,7 +314,7 @@ fn commands(args: &[String]) -> CliResult {
 }
 
 fn parity(args: &[String]) -> CliResult {
-    let report = datacraft_engine::parity::measure();
+    let report = nook_engine::parity::measure();
     if flag(args, "--markdown") {
         print!("{}", report.markdown());
         return Ok(());
@@ -338,11 +338,8 @@ fn parity(args: &[String]) -> CliResult {
 }
 
 fn profiles() -> CliResult {
-    let store = datacraft_engine::ProfileStore::load().map_err(|e| e.to_string())?;
-    println!(
-        "config: {}",
-        datacraft_engine::profiles::config_dir().display()
-    );
+    let store = nook_engine::ProfileStore::load().map_err(|e| e.to_string())?;
+    println!("config: {}", nook_engine::profiles::config_dir().display());
     for cfg in store.list() {
         println!(
             "  {:<20} {:<10} {:<10} {}{}",
@@ -379,14 +376,14 @@ fn sql(args: &[String]) -> CliResult {
     }
     let out = run_command(&mut session, "sql.run", serde_json::Value::Object(params))
         .map_err(|e| e.to_string())?;
-    let rows = datacraft_model::ResultSet {
+    let rows = nook_model::ResultSet {
         columns: string_list(&out["columns"]),
         column_types: string_list(&out["types"]),
         rows: json_rows(&out["data"], string_list(&out["columns"]).len()),
         affected: out["affected"].as_u64().unwrap_or(0),
         elapsed_ms: out["elapsed_ms"].as_f64().unwrap_or(0.0),
         truncated: out["truncated"].as_bool().unwrap_or(false),
-        ..datacraft_model::ResultSet::default()
+        ..nook_model::ResultSet::default()
     };
     print_result(&rows, &format)?;
     for message in &session.messages {
@@ -434,7 +431,7 @@ fn script(args: &[String]) -> CliResult {
     let text = std::fs::read_to_string(&file).map_err(|e| format!("read {file}: {e}"))?;
     let mut session = Session::new();
     let index = open_connection(&mut session, conn).map_err(|e| e.to_string())?;
-    let statements = datacraft_drivers::split_script(&text);
+    let statements = nook_drivers::split_script(&text);
     let conn_id = session.conns[index].cfg.id.clone();
     let out = run_command(
         &mut session,
@@ -1161,7 +1158,7 @@ fn job(args: &[String]) -> CliResult {
                 .and_then(|i| i.parse::<u64>().ok())
                 .unwrap_or(30)
                 .clamp(5, 3600);
-            println!("datacraft scheduler: every {interval}s (ctrl-c to stop)");
+            println!("nook scheduler: every {interval}s (ctrl-c to stop)");
             loop {
                 let mut session = Session::new();
                 let profile_ids: Vec<String> = session

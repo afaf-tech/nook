@@ -12,8 +12,8 @@ pub mod schema;
 pub mod sql;
 pub mod tools;
 
-use datacraft_core::{Error, Result};
-use datacraft_model::ResultSet;
+use nook_core::{Error, Result};
+use nook_model::ResultSet;
 
 use crate::{Conn, ConnState, Level, Session, SshSecret, Tab, TableRef, Tunnel};
 
@@ -56,7 +56,7 @@ pub(crate) fn open_conn(session: &mut Session, index: usize) -> Result<()> {
         tunnel = Some(t);
     }
 
-    let driver = match datacraft_drivers::open(&effective) {
+    let driver = match nook_drivers::open(&effective) {
         Ok(d) => d,
         Err(e) => {
             if let Some(conn) = session.conns.get_mut(index) {
@@ -168,7 +168,7 @@ pub fn run_sql(
 /// The one place the grid's SQL is written: the select behind one page of a table.
 pub fn page_select(
     table: &TableRef,
-    dialect: datacraft_core::Dialect,
+    dialect: nook_core::Dialect,
     filter: &str,
     order: &str,
     size: usize,
@@ -176,7 +176,7 @@ pub fn page_select(
 ) -> String {
     let mut sql = format!(
         "SELECT * FROM {}",
-        datacraft_core::quote_qualified(table.schema.as_deref(), &table.table, dialect)
+        nook_core::quote_qualified(table.schema.as_deref(), &table.table, dialect)
     );
     if !filter.trim().is_empty() {
         sql.push_str(&format!(" WHERE {}", filter.trim()));
@@ -201,7 +201,7 @@ pub fn grid_select(tab: &Tab) -> Result<(String, TableRef)> {
         .get("dialect")
         .and_then(|v| v.as_str())
         .and_then(parse_dialect)
-        .unwrap_or(datacraft_core::Dialect::Sqlite);
+        .unwrap_or(nook_core::Dialect::Sqlite);
     let size = tab.grid.page_size.clamp(1, 100_000);
     let offset = tab.grid.page.saturating_mul(size);
     let sql = page_select(
@@ -230,7 +230,7 @@ pub fn preview_table(
         .conns
         .get(index)
         .and_then(|c| c.driver.as_ref().map(|d| d.dialect()))
-        .unwrap_or(datacraft_core::Dialect::Sqlite);
+        .unwrap_or(nook_core::Dialect::Sqlite);
     let limit = limit.clamp(1, 500);
     let sql = page_select(table, dialect, "", "", limit, 0);
     let started = std::time::Instant::now();
@@ -241,11 +241,11 @@ pub fn preview_table(
     Ok(result)
 }
 
-pub fn parse_dialect(name: &str) -> Option<datacraft_core::Dialect> {
+pub fn parse_dialect(name: &str) -> Option<nook_core::Dialect> {
     match name {
-        "sqlite" => Some(datacraft_core::Dialect::Sqlite),
-        "postgres" | "postgresql" => Some(datacraft_core::Dialect::Postgres),
-        "mysql" | "mariadb" => Some(datacraft_core::Dialect::MySql),
+        "sqlite" => Some(nook_core::Dialect::Sqlite),
+        "postgres" | "postgresql" => Some(nook_core::Dialect::Postgres),
+        "mysql" | "mariadb" => Some(nook_core::Dialect::MySql),
         _ => None,
     }
 }
@@ -302,7 +302,7 @@ pub fn bind_grid_table(session: &mut Session, tab_index: usize, table: TableRef)
         .conns
         .get(conn_index)
         .and_then(|c| c.driver.as_ref().map(|d| d.dialect()))
-        .unwrap_or(datacraft_core::Dialect::Sqlite);
+        .unwrap_or(nook_core::Dialect::Sqlite);
     let tab = session
         .tabs
         .get_mut(tab_index)
@@ -325,16 +325,16 @@ pub fn bind_grid_table(session: &mut Session, tab_index: usize, table: TableRef)
     Ok(())
 }
 
-pub(crate) fn dialect_name(d: datacraft_core::Dialect) -> &'static str {
+pub(crate) fn dialect_name(d: nook_core::Dialect) -> &'static str {
     match d {
-        datacraft_core::Dialect::Sqlite => "sqlite",
-        datacraft_core::Dialect::Postgres => "postgres",
-        datacraft_core::Dialect::MySql => "mysql",
+        nook_core::Dialect::Sqlite => "sqlite",
+        nook_core::Dialect::Postgres => "postgres",
+        nook_core::Dialect::MySql => "mysql",
     }
 }
 
 /// Primary-key values for a grid row, used when planning an edit.
-pub(crate) fn pk_values(tab: &Tab, row: usize) -> Result<Vec<(String, datacraft_core::Value)>> {
+pub(crate) fn pk_values(tab: &Tab, row: usize) -> Result<Vec<(String, nook_core::Value)>> {
     let mut out = Vec::new();
     for column in &tab.grid.primary_key {
         let value = tab
@@ -347,7 +347,7 @@ pub(crate) fn pk_values(tab: &Tab, row: usize) -> Result<Vec<(String, datacraft_
     }
     if out.is_empty() {
         return Err(Error::unsupported(format!(
-            "{} has no primary key; DataCraft will not guess which row to change",
+            "{} has no primary key; Nook will not guess which row to change",
             tab.grid
                 .table
                 .as_ref()

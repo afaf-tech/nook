@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use datacraft_core::{Error, Result, Value};
-use datacraft_model::{plan_edits, EditKind, RowEdit};
+use nook_core::{Error, Result, Value};
+use nook_model::{plan_edits, EditKind, RowEdit};
 use serde_json::json;
 
 use crate::cmd::{bind_grid_table, load_grid, pk_values, run_sql};
@@ -232,18 +232,18 @@ fn sort(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             .get("dialect")
             .and_then(|v| v.as_str())
             .and_then(super::parse_dialect)
-            .unwrap_or(datacraft_core::Dialect::Sqlite);
+            .unwrap_or(nook_core::Dialect::Sqlite);
         // Clicking the same column again flips the direction.
         let current = tab.grid.order.clone();
         let wanted = format!(
             "{} {}",
-            datacraft_core::quote_ident(&column, dialect),
+            nook_core::quote_ident(&column, dialect),
             if desc { "DESC" } else { "ASC" }
         );
         tab.grid.order = if current == wanted {
             format!(
                 "{} {}",
-                datacraft_core::quote_ident(&column, dialect),
+                nook_core::quote_ident(&column, dialect),
                 if desc { "ASC" } else { "DESC" }
             )
         } else {
@@ -314,7 +314,7 @@ fn count_rows(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
             let dialect = driver.dialect();
             let sql = format!(
                 "SELECT count(*) FROM {} WHERE {}",
-                datacraft_core::quote_qualified(schema.as_deref(), &table, dialect),
+                nook_core::quote_qualified(schema.as_deref(), &table, dialect),
                 filter.trim()
             );
             let rs = driver.run(&sql, 1)?;
@@ -346,7 +346,7 @@ fn record_edit(
         .get("dialect")
         .and_then(|v| v.as_str())
         .and_then(super::parse_dialect)
-        .unwrap_or(datacraft_core::Dialect::Sqlite);
+        .unwrap_or(nook_core::Dialect::Sqlite);
     let edit = {
         let tab = session
             .tabs
@@ -403,7 +403,7 @@ fn record_edit(
 }
 
 /// A value that satisfies a NOT NULL column the server would otherwise reject.
-fn fallback(column: &datacraft_model::Column) -> Value {
+fn fallback(column: &nook_model::Column) -> Value {
     let ty = column.type_name.to_ascii_uppercase();
     if ty.contains("INT") || ty.contains("SERIAL") {
         Value::Int(0)
@@ -645,7 +645,7 @@ fn export_table(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
     write_or_return(session, p, &format, &text)
 }
 
-fn render(result: &datacraft_model::ResultSet, format: &str) -> Result<String> {
+fn render(result: &nook_model::ResultSet, format: &str) -> Result<String> {
     match format {
         "csv" => Ok(result.to_csv()),
         "json" => serde_json::to_string_pretty(&result.to_json())
@@ -759,7 +759,7 @@ fn copy_as_sql(session: &mut Session, _p: &Params) -> Result<serde_json::Value> 
         .get("dialect")
         .and_then(|v| v.as_str())
         .and_then(super::parse_dialect)
-        .unwrap_or(datacraft_core::Dialect::Sqlite);
+        .unwrap_or(nook_core::Dialect::Sqlite);
     let sql = tab
         .grid
         .result
@@ -773,12 +773,12 @@ fn copy_as_sql(session: &mut Session, _p: &Params) -> Result<serde_json::Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_core::Value;
-    use datacraft_model::{Column, ResultSet};
+    use nook_core::Value;
+    use nook_model::{Column, ResultSet};
 
     fn grid_tab() -> (Session, usize) {
         let mut session = Session::new();
-        let conn = datacraft_core::ConnectionConfig::new("mem", datacraft_core::DriverKind::Sqlite);
+        let conn = nook_core::ConnectionConfig::new("mem", nook_core::DriverKind::Sqlite);
         session.conns.push(crate::Conn::new(conn));
         let index = session.add_tab(TabKind::Data, "users", Some(0));
         let tab = &mut session.tabs[index];
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(
             crate::cmd::page_select(
                 &table,
-                datacraft_core::Dialect::Sqlite,
+                nook_core::Dialect::Sqlite,
                 "  status = 'trial'  ",
                 " id DESC ",
                 50,
@@ -823,7 +823,7 @@ mod tests {
             "SELECT * FROM \"customers\" WHERE status = 'trial' ORDER BY id DESC LIMIT 50 OFFSET 100"
         );
         assert_eq!(
-            crate::cmd::page_select(&table, datacraft_core::Dialect::Postgres, "", "", 50, 100,),
+            crate::cmd::page_select(&table, nook_core::Dialect::Postgres, "", "", 50, 100,),
             "SELECT * FROM \"main\".\"customers\" LIMIT 50 OFFSET 100"
         );
         // No filter, no order, no schema: the plain first page.
@@ -832,7 +832,7 @@ mod tests {
             table: "users".into(),
         };
         assert_eq!(
-            crate::cmd::page_select(&bare, datacraft_core::Dialect::Sqlite, "", "", 0, 0),
+            crate::cmd::page_select(&bare, nook_core::Dialect::Sqlite, "", "", 0, 0),
             "SELECT * FROM \"users\" LIMIT 1 OFFSET 0"
         );
     }
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn exporting_the_grid_writes_a_file() {
         let (mut session, _) = grid_tab();
-        let dir = std::env::temp_dir().join("datacraft_grid_test");
+        let dir = std::env::temp_dir().join("nook_grid_test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("rows.csv").to_string_lossy().into_owned();
         let p = Params::from_json(json!({"format": "csv", "path": path})).expect("params");

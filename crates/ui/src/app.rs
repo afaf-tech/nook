@@ -1,8 +1,8 @@
 //! The application shell: app bar with real menus, tab strip, status bar, log drawer, sidebar,
 //! dialogs, control channel and the scheduled-job tick.
 
-use datacraft_engine::{Conn, Density, Level, Session, TabKind, TableRef};
 use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
+use nook_engine::{Conn, Density, Level, Session, TabKind, TableRef};
 use serde_json::Value;
 
 use crate::control::Control;
@@ -158,7 +158,7 @@ pub struct TestOutcome {
 pub struct ConnectionForm {
     pub step: ConnStep,
     pub name: String,
-    pub kind: datacraft_core::DriverKind,
+    pub kind: nook_core::DriverKind,
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -166,7 +166,7 @@ pub struct ConnectionForm {
     pub database: String,
     pub file: String,
     pub group: String,
-    pub ssl: datacraft_core::SslMode,
+    pub ssl: nook_core::SslMode,
     /// `col.label()`; `""` when the profile carries none.
     pub color: String,
     /// Seconds; the engine clamps to 1..=300.
@@ -189,7 +189,7 @@ impl Default for ConnectionForm {
         ConnectionForm {
             step: ConnStep::General,
             name: String::new(),
-            kind: datacraft_core::DriverKind::Postgres,
+            kind: nook_core::DriverKind::Postgres,
             host: "127.0.0.1".into(),
             port: 5432,
             user: std::env::var("USER").unwrap_or_default(),
@@ -197,11 +197,11 @@ impl Default for ConnectionForm {
             database: String::new(),
             file: String::new(),
             group: String::new(),
-            ssl: datacraft_core::SslMode::Prefer,
+            ssl: nook_core::SslMode::Prefer,
             color: String::new(),
             timeout: 15,
             read_only: false,
-            keychain: datacraft_engine::profiles::keychain_available(),
+            keychain: nook_engine::profiles::keychain_available(),
             ssh_host: String::new(),
             ssh_port: 22,
             ssh_user: String::new(),
@@ -218,14 +218,12 @@ impl ConnectionForm {
     /// The form for an existing profile. Secrets are never read back: the profile keeps only a
     /// reference, and the field stays empty until the user types a new one, which is what makes an
     /// untouched save unable to rewrite the keychain.
-    pub fn from_config(cfg: &datacraft_core::ConnectionConfig) -> Self {
-        let ssh_password_stored = datacraft_engine::profiles::keychain_available()
-            && datacraft_engine::profiles::keychain_lookup(
-                &datacraft_engine::profiles::ssh_account(&cfg.id),
-            )
-            .ok()
-            .flatten()
-            .is_some();
+    pub fn from_config(cfg: &nook_core::ConnectionConfig) -> Self {
+        let ssh_password_stored = nook_engine::profiles::keychain_available()
+            && nook_engine::profiles::keychain_lookup(&nook_engine::profiles::ssh_account(&cfg.id))
+                .ok()
+                .flatten()
+                .is_some();
         ConnectionForm {
             step: ConnStep::General,
             name: cfg.name.clone(),
@@ -241,7 +239,7 @@ impl ConnectionForm {
             color: cfg.color.clone(),
             timeout: cfg.connect_timeout_s.min(300) as u16,
             read_only: cfg.read_only,
-            keychain: datacraft_engine::profiles::keychain_available(),
+            keychain: nook_engine::profiles::keychain_available(),
             ssh_host: cfg.ssh.host.clone(),
             ssh_port: cfg.ssh.port,
             ssh_user: cfg.ssh.user.clone(),
@@ -341,11 +339,10 @@ fn menu_button(
         egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
             ui.set_min_width(280.0);
             for group in groups {
-                let specs: Vec<&'static datacraft_engine::CommandSpec> =
-                    datacraft_engine::registry()
-                        .iter()
-                        .filter(|c| c.group == *group)
-                        .collect();
+                let specs: Vec<&'static nook_engine::CommandSpec> = nook_engine::registry()
+                    .iter()
+                    .filter(|c| c.group == *group)
+                    .collect();
                 if specs.is_empty() {
                     continue;
                 }
@@ -530,7 +527,7 @@ impl UiState {
             return;
         }
         self.command_id = id.clone();
-        let base = datacraft_engine::find(&id)
+        let base = nook_engine::find(&id)
             .map(|s| s.params.to_string())
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| "{}".into());
@@ -629,14 +626,14 @@ impl UiState {
     }
 }
 
-pub struct DatacraftApp {
+pub struct NookApp {
     pub session: Session,
     pub state: UiState,
     last_job_tick: std::time::Instant,
     options: Options,
 }
 
-impl DatacraftApp {
+impl NookApp {
     pub fn new(cc: &eframe::CreationContext, options: Options) -> Self {
         let mut session = if options.demo {
             crate::demo_session()
@@ -664,7 +661,7 @@ impl DatacraftApp {
             }
         }
         for uri in &options.connect {
-            match datacraft_core::ConnectionConfig::parse(uri) {
+            match nook_core::ConnectionConfig::parse(uri) {
                 Ok(cfg) => {
                     let id = cfg.id.clone();
                     if session.conn_index(&id).is_err() {
@@ -672,7 +669,7 @@ impl DatacraftApp {
                     }
                     match session.conn_index(&id) {
                         Ok(index) => {
-                            if let Err(e) = datacraft_engine::cmd::open_now(&mut session, index) {
+                            if let Err(e) = nook_engine::cmd::open_now(&mut session, index) {
                                 session.log(Level::Error, format!("{uri}: {e}"));
                             }
                         }
@@ -690,7 +687,7 @@ impl DatacraftApp {
         }
         state.shot = options.shot.clone();
         state.shot_quit = options.shot.is_some();
-        DatacraftApp {
+        NookApp {
             session,
             state,
             last_job_tick: std::time::Instant::now(),
@@ -776,10 +773,10 @@ impl DatacraftApp {
                     }
                 }
                 "ui.selectResult" => {
-                    DatacraftApp::select_result(&self.session, &mut self.state, &request.params)
+                    NookApp::select_result(&self.session, &mut self.state, &request.params)
                 }
                 "ui.setResultView" => {
-                    DatacraftApp::set_result_view(&self.session, &mut self.state, &request.params)
+                    NookApp::set_result_view(&self.session, &mut self.state, &request.params)
                 }
                 "ui.openConnection" => {
                     // `conn` names the profile to edit by id; omitted or null opens a new one. The
@@ -831,7 +828,7 @@ impl DatacraftApp {
                     }
                 }
                 "ui.setConnectionField" => {
-                    DatacraftApp::set_connection_field(&mut self.state, &request.params)
+                    NookApp::set_connection_field(&mut self.state, &request.params)
                 }
                 "ui.selectTable" => {
                     let table = request
@@ -850,8 +847,7 @@ impl DatacraftApp {
                     // described"; a connection that is gone or closed is refused before the tab or the
                     // selection is touched, and the panel is not left claiming a success it cannot
                     // show.
-                    match DatacraftApp::inspector_target(&self.session, request.params.get("conn"))
-                    {
+                    match NookApp::inspector_target(&self.session, request.params.get("conn")) {
                         Err(error) => serde_json::json!({"ok": false, "error": error}),
                         Ok(conn_index) => {
                             let known = match self.session.conns[conn_index].catalog.as_ref() {
@@ -947,15 +943,15 @@ impl DatacraftApp {
                     })).collect::<Vec<_>>()
                 }),
                 "ui.commands" => serde_json::json!({
-                    "count": datacraft_engine::registry().len(),
-                    "ids": datacraft_engine::registry().iter().map(|c| c.id).collect::<Vec<_>>(),
+                    "count": nook_engine::registry().len(),
+                    "ids": nook_engine::registry().iter().map(|c| c.id).collect::<Vec<_>>(),
                 }),
                 "ui.shot" => {
                     let path = request
                         .params
                         .get("path")
                         .and_then(|p| p.as_str())
-                        .unwrap_or("/tmp/datacraft.png")
+                        .unwrap_or("/tmp/nook.png")
                         .to_string();
                     self.state.shot = Some(path.clone());
                     self.state.shot_requested = false;
@@ -1029,7 +1025,7 @@ impl DatacraftApp {
                     tokens.font(t::T_XS),
                     tokens.accent_text,
                 );
-                ui.label(RichText::new("DataCraft").size(t::T_MD).color(tokens.text));
+                ui.label(RichText::new("Nook").size(t::T_MD).color(tokens.text));
 
                 self.workspace_button(ui, tokens);
                 t::divider(ui, tokens);
@@ -1744,8 +1740,8 @@ impl DatacraftApp {
         let mut toggle_log = false;
         let features = format!(
             "{}/{} features",
-            datacraft_engine::parity::measure().covered.len(),
-            datacraft_engine::parity::measure().total()
+            nook_engine::parity::measure().covered.len(),
+            nook_engine::parity::measure().total()
         );
         let band = t::band_h(ui, tokens, STATUS_H, |ui| {
             ui.horizontal(|ui| {
@@ -1766,7 +1762,7 @@ impl DatacraftApp {
                         ui.label(RichText::new(&conn.cfg.name).size(12.0).color(tokens.text));
                         let cfg = &conn.cfg;
                         let target = match cfg.kind {
-                            datacraft_core::DriverKind::Sqlite => cfg.file.clone(),
+                            nook_core::DriverKind::Sqlite => cfg.file.clone(),
                             _ => {
                                 let (host, port) = cfg.target();
                                 let db = if cfg.database.is_empty() {
@@ -1924,7 +1920,7 @@ impl DatacraftApp {
         match action {
             TreeAction::None => {}
             TreeAction::OpenConnection(index) => {
-                if let Err(e) = datacraft_engine::cmd::open_now(&mut self.session, index) {
+                if let Err(e) = nook_engine::cmd::open_now(&mut self.session, index) {
                     self.session.log(Level::Error, e.to_string());
                 }
             }
@@ -2018,7 +2014,7 @@ impl DatacraftApp {
     /// never run builds the register `ui.setResultView` then moves; the refusal names the results
     /// that do exist, because the caller has no other way to learn them.
     fn select_result(session: &Session, state: &mut UiState, params: &Value) -> Value {
-        let index = match DatacraftApp::query_tab(session) {
+        let index = match NookApp::query_tab(session) {
             Ok(index) => index,
             Err(error) => return serde_json::json!({"ok": false, "error": error}),
         };
@@ -2030,7 +2026,7 @@ impl DatacraftApp {
                 "ok": false,
                 "error": format!(
                     "no result {wanted}: the run holds {runs} ({})",
-                    DatacraftApp::result_range(runs)
+                    NookApp::result_range(runs)
                 ),
             });
         }
@@ -2045,7 +2041,7 @@ impl DatacraftApp {
     /// `ui.setResultView`: show the active query tab's register as a grid or as JSON. The refusal
     /// lists the views the segment actually paints, so the two can never drift apart.
     fn set_result_view(session: &Session, state: &mut UiState, params: &Value) -> Value {
-        let index = match DatacraftApp::query_tab(session) {
+        let index = match NookApp::query_tab(session) {
             Ok(index) => index,
             Err(error) => return serde_json::json!({"ok": false, "error": error}),
         };
@@ -2096,7 +2092,7 @@ impl DatacraftApp {
                 form.name = text;
                 true
             }
-            "kind" => match datacraft_core::DriverKind::parse(&text) {
+            "kind" => match nook_core::DriverKind::parse(&text) {
                 Some(kind) => {
                     form.kind = kind;
                     true
@@ -2134,7 +2130,7 @@ impl DatacraftApp {
                 form.group = text;
                 true
             }
-            "ssl" => match datacraft_core::SslMode::parse(&text) {
+            "ssl" => match nook_core::SslMode::parse(&text) {
                 Some(mode) => {
                     form.ssl = mode;
                     true
@@ -2371,13 +2367,9 @@ impl DatacraftApp {
                 }
             }
         } else if slot.is_none() && self.state.inspector.preview.is_none() {
-            let result = datacraft_engine::cmd::preview_table(
-                &mut self.session,
-                index,
-                &reference,
-                PREVIEW_ROWS,
-            )
-            .map_err(|error| error.to_string());
+            let result =
+                nook_engine::cmd::preview_table(&mut self.session, index, &reference, PREVIEW_ROWS)
+                    .map_err(|error| error.to_string());
             self.state.inspector.preview = Some(result);
         }
     }
@@ -2469,7 +2461,7 @@ impl DatacraftApp {
     }
 }
 
-impl eframe::App for DatacraftApp {
+impl eframe::App for NookApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let tokens = self.tokens();
@@ -2618,14 +2610,14 @@ mod tests {
         for name in ["first", "second"] {
             session
                 .conns
-                .push(Conn::new(datacraft_core::ConnectionConfig::new(
+                .push(Conn::new(nook_core::ConnectionConfig::new(
                     name,
-                    datacraft_core::DriverKind::Sqlite,
+                    nook_core::DriverKind::Sqlite,
                 )));
         }
         session.active_conn = Some(1);
 
-        let rows = DatacraftApp::workspace_rows(&session);
+        let rows = NookApp::workspace_rows(&session);
         assert_eq!(rows.len(), 2);
         // `conn.select` resolves an id or a name and never a position, so the popup must hand over
         // the id: passing the index made every pick fail with `no connection named '0'`.
@@ -2643,27 +2635,27 @@ mod tests {
         let mut session = crate::demo_session();
         session
             .conns
-            .push(Conn::new(datacraft_core::ConnectionConfig::new(
+            .push(Conn::new(nook_core::ConnectionConfig::new(
                 "closed",
-                datacraft_core::DriverKind::Sqlite,
+                nook_core::DriverKind::Sqlite,
             )));
         assert!(session.conns[0].is_open());
         assert_eq!(
-            DatacraftApp::inspector_target(&session, Some(&serde_json::json!(0))),
+            NookApp::inspector_target(&session, Some(&serde_json::json!(0))),
             Ok(0)
         );
         assert_eq!(
-            DatacraftApp::inspector_target(&session, Some(&serde_json::json!(1))),
+            NookApp::inspector_target(&session, Some(&serde_json::json!(1))),
             Err("connection 'closed' is not open".to_string())
         );
         assert_eq!(
-            DatacraftApp::inspector_target(&session, Some(&serde_json::json!("zero"))),
+            NookApp::inspector_target(&session, Some(&serde_json::json!("zero"))),
             Err("no such connection (pass a numeric 'conn' index)".to_string())
         );
-        assert!(DatacraftApp::inspector_target(&session, Some(&serde_json::json!(7))).is_err());
+        assert!(NookApp::inspector_target(&session, Some(&serde_json::json!(7))).is_err());
         session.active_conn = Some(1);
         assert_eq!(
-            DatacraftApp::inspector_target(&session, None),
+            NookApp::inspector_target(&session, None),
             Err("connection 'closed' is not open".to_string())
         );
     }
@@ -2676,18 +2668,18 @@ mod tests {
         // A pick the engine can serve from context runs and opens nothing: the report is that every
         // pick landed in 'Run a Command', including the many commands that need no input.
         assert!(!session.messages.is_empty());
-        DatacraftApp::menu_pick(&mut session, &mut state, "app.clearLog");
+        NookApp::menu_pick(&mut session, &mut state, "app.clearLog");
         assert!(session.messages.is_empty(), "the pick ran the command");
         assert!(!state.command_open, "a command that ran opens no window");
 
         // Preferences is a form, not a command: the settings dialog, never the runner.
-        DatacraftApp::menu_pick(&mut session, &mut state, "app.settings");
+        NookApp::menu_pick(&mut session, &mut state, "app.settings");
         assert!(state.settings_open);
         assert!(!state.command_open, "Preferences is a form, not a runner");
 
         // A pick the engine refuses does open the runner, showing the engine's own message, so a
         // command that needs a value the context cannot supply still has a way to be given one.
-        DatacraftApp::menu_pick(&mut session, &mut state, "app.setSetting");
+        NookApp::menu_pick(&mut session, &mut state, "app.setSetting");
         assert!(state.command_open);
         assert_eq!(state.command_id, "app.setSetting");
         // The runner's own wording for a failure (`dialogs.rs`): the window reads the same whether

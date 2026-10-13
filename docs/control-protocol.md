@@ -4,8 +4,8 @@ The desktop app can be driven from a script, a test or an agent. It listens on `
 every request must present the key written when it started.
 
 ```sh
-cargo run -p datacraft -- --control 7981
-# datacraft: control channel on 127.0.0.1:7981 · key ~/Library/Application Support/DataCraft/control-key.7981
+cargo run -p nook -- --control 7981
+# nook: control channel on 127.0.0.1:7981 · key ~/Library/Application Support/Nook/control-key.7981
 ```
 
 The key file sits next to `profiles.json` and is mode `0600`. Send one JSON object per line; each
@@ -55,7 +55,7 @@ scripted change outlives the process. `app.settings` echoes the same object.
 ## Driving it end to end
 
 ```sh
-KEY=$(cat "$HOME/Library/Application Support/DataCraft/control-key.7981")
+KEY=$(cat "$HOME/Library/Application Support/Nook/control-key.7981")
 send() { printf '%s\n' "$1" | nc 127.0.0.1 7981; }
 
 send "{\"id\":1,\"key\":\"$KEY\",\"method\":\"engine.run\",\"params\":{\"command\":\"grid.open\",\"params\":{\"conn\":\"local\",\"table\":\"public.users\"}}}"
@@ -66,11 +66,11 @@ send "{\"id\":5,\"key\":\"$KEY\",\"method\":\"ui.shot\",\"params\":{\"path\":\"/
 ```
 
 Every command in the registry is reachable this way, with exactly the parameters
-`datacraft-cli commands` documents — the control channel, the CLI, MCP and the ribbon are the same
+`nook-cli commands` documents — the control channel, the CLI, MCP and the ribbon are the same
 surface.
 
 ## MCP instead
 
-For an agent that speaks MCP, `datacraft-cli mcp` serves the same registry over stdio: `tools/list`
+For an agent that speaks MCP, `nook-cli mcp` serves the same registry over stdio: `tools/list`
 returns one tool per command with its documented parameters, and `tools/call` opens a saved
 connection on demand when a call names one (`conn`, `from` or `to`).

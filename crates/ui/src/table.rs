@@ -5,8 +5,8 @@
 //! Layout: horizontal scroll wraps the header *and* the body so they move together while the header
 //! stays put vertically; the body scrolls on its own below it.
 
-use datacraft_core::Value;
 use egui::{Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use nook_core::Value;
 
 use crate::theme::{self as design, Tokens, HEAD_H};
 
@@ -233,7 +233,7 @@ pub fn show(
     let widths = column_widths(ui, tokens, view);
     // Rows and gridlines span the whole viewport, so a narrow table does not leave dead stripes.
     let viewport_w = ui.available_width().max(total_width(&widths));
-    if std::env::var("DATACRAFT_TABLE_DEBUG").is_ok() {
+    if std::env::var("NOOK_TABLE_DEBUG").is_ok() {
         eprintln!(
             "table: cols={} rows={} widths={:?} avail={:?} height={}",
             view.columns.len(),
@@ -475,7 +475,7 @@ pub fn show(
                             row_rect.bottom() - 0.5,
                             Stroke::new(0.5, tokens.grid_line),
                         );
-                        if std::env::var("DATACRAFT_TABLE_DEBUG").is_ok() && row_index < 2 {
+                        if std::env::var("NOOK_TABLE_DEBUG").is_ok() && row_index < 2 {
                             eprintln!(
                                 "row {row_index}: rect={:?} clip={:?} first={:?}",
                                 row_rect,
@@ -637,7 +637,7 @@ mod tests {
             sortable: true,
             gutter: true,
             height,
-            row_h: design::row_h(datacraft_engine::Density::Compact),
+            row_h: design::row_h(nook_engine::Density::Compact),
             empty_text: "no rows",
         }
     }

@@ -623,7 +623,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Automation",
         "job.runDue",
         "Scheduler tick",
-        "every 30 s in the app, or datacraft-cli job serve",
+        "every 30 s in the app, or nook-cli job serve",
     ),
     (
         "Automation",
@@ -943,7 +943,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Platform",
         "platform.cli",
         "Command line tool",
-        "datacraft-cli exists and shares command ids; not a command itself",
+        "nook-cli exists and shares command ids; not a command itself",
     ),
     (
         "Platform",

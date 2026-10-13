@@ -1,4 +1,4 @@
-# DataCraft gaps
+# Nook gaps
 
 The ranked work list, most valuable first. Every entry names the catalog id it would close, so the
 parity number moves when it lands.
@@ -23,9 +23,9 @@ then run the battery:
 
 ```sh
 scripts/live-check.sh mysql://root@127.0.0.1/shop
-datacraft-cli transfer --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage --tables '*'
-datacraft-cli sync-data --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage --apply
-datacraft-cli diff-structure --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage
+nook-cli transfer --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage --tables '*'
+nook-cli sync-data --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage --apply
+nook-cli diff-structure --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage
 ```
 
 ## 2. Form view for one record

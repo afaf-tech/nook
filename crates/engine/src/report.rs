@@ -1,7 +1,7 @@
 //! Charts and aggregations for the report tab: pure data shaping, so the UI only draws.
 
-use datacraft_core::{quote_ident, quote_qualified, Dialect, Error, Result, Value};
-use datacraft_model::{ResultSet, Table};
+use nook_core::{quote_ident, quote_qualified, Dialect, Error, Result, Value};
+use nook_model::{ResultSet, Table};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChartKind {
@@ -259,7 +259,7 @@ pub fn pivot(result: &ResultSet) -> Result<Pivot> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_model::{Column, ResultSet, Table};
+    use nook_model::{Column, ResultSet, Table};
 
     fn result() -> ResultSet {
         ResultSet {

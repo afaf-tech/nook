@@ -9,12 +9,12 @@
 //! and the ceiling in `docs/architecture.md`). `Stop` is painted disabled with the engine's own
 //! sentence as its hover text instead.
 
-use datacraft_engine::{Level, Session};
 use egui::text::LayoutJob;
 use egui::{
     Align2, CornerRadius, Key, Margin, Modifiers, Rect, RichText, Sense, Stroke, TextFormat, Ui,
     Vec2,
 };
+use nook_engine::{Level, Session};
 
 use crate::app::UiState;
 use crate::register::{self, Register};
@@ -100,14 +100,14 @@ pub fn caret_line_col(text: &str, range: Option<egui::text::CCursorRange>) -> Op
 /// trailing whitespace, or past a comment the splitter dropped — and every caller takes
 /// `unwrap_or(0)`: that button must always run something, and the first statement is that something.
 pub fn caret_statement(text: &str, caret: Option<Caret>) -> Option<usize> {
-    datacraft_engine::sqltext::statement_index_at(text, caret?.index)
+    nook_engine::sqltext::statement_index_at(text, caret?.index)
 }
 
 /// The lines one statement owns, 1-based and inclusive, counted from the script itself. `split` trims
 /// and drops comments, so a comment or blank line above a statement belongs to no statement and
 /// carries neither a marker nor a row fill.
 pub fn statement_lines(text: &str, index: usize) -> Option<(usize, usize)> {
-    let statements = datacraft_engine::cmd::sql::split(text);
+    let statements = nook_engine::cmd::sql::split(text);
     let mut cursor = 0usize;
     for (nth, statement) in statements.iter().enumerate() {
         let start = text[cursor..].find(statement).map(|i| cursor + i)?;
@@ -140,14 +140,14 @@ pub fn sql_job(tokens: &Tokens, text: &str) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     job.keep_trailing_whitespace = true;
-    for token in datacraft_engine::sqltext::tokenize(text) {
+    for token in nook_engine::sqltext::tokenize(text) {
         let (color, italics) = match token.kind {
-            datacraft_engine::sqltext::TokenKind::Keyword => (tokens.accent, false),
-            datacraft_engine::sqltext::TokenKind::Str => (tokens.ok, false),
-            datacraft_engine::sqltext::TokenKind::Number => (tokens.info, false),
-            datacraft_engine::sqltext::TokenKind::Comment => (tokens.text_faint, true),
-            datacraft_engine::sqltext::TokenKind::Punct => (tokens.text_dim, false),
-            datacraft_engine::sqltext::TokenKind::Word => (tokens.text, false),
+            nook_engine::sqltext::TokenKind::Keyword => (tokens.accent, false),
+            nook_engine::sqltext::TokenKind::Str => (tokens.ok, false),
+            nook_engine::sqltext::TokenKind::Number => (tokens.info, false),
+            nook_engine::sqltext::TokenKind::Comment => (tokens.text_faint, true),
+            nook_engine::sqltext::TokenKind::Punct => (tokens.text_dim, false),
+            nook_engine::sqltext::TokenKind::Word => (tokens.text, false),
         };
         job.append(
             &token.text,
@@ -172,7 +172,7 @@ pub fn caret_note(caret: Caret) -> String {
 /// The engine's own sentence for `sql.stop`, which is what the disabled Stop says when the pointer
 /// rests on it: the button cannot describe the engine differently from the engine.
 pub fn stop_reason() -> &'static str {
-    datacraft_engine::find("sql.stop")
+    nook_engine::find("sql.stop")
         .map(|spec| spec.help)
         .unwrap_or("Stopping a run is not possible yet")
 }
@@ -204,7 +204,7 @@ pub fn show(
 
     let text = session.tabs[tab_index].sql.text.clone();
     let caret = caret_in(&text, state.caret.map_or(0, |caret| caret.index));
-    let statements = datacraft_engine::cmd::sql::split(&text);
+    let statements = nook_engine::cmd::sql::split(&text);
     let failed = session.tabs[tab_index]
         .sql
         .results
@@ -449,7 +449,7 @@ fn vdiv(ui: &mut Ui, tokens: &Tokens) {
 /// `N statements`, the toolbar's trailing fact: the script's own length, which the strip's chips then
 /// name one by one.
 fn statements_note(text: &str) -> String {
-    let count = datacraft_engine::cmd::sql::split(text).len();
+    let count = nook_engine::cmd::sql::split(text).len();
     format!(
         "{count} {}",
         table::plural(count as u64, "statement", "statements")
@@ -1179,9 +1179,9 @@ fn replace_prefix(text: &str, index: usize, prefix: &str, word: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_engine::TabKind;
     use egui::epaint::ClippedShape;
     use egui::{pos2, Color32};
+    use nook_engine::TabKind;
 
     /// Everything one frame painted, plus the layout the editor measured.
     #[derive(Default)]
@@ -1278,15 +1278,17 @@ mod tests {
     /// query tab holding `script`.
     fn session(name: &str, script: &str) -> Session {
         let path =
-            std::env::temp_dir().join(format!("cutecat-editor-{}-{name}.db", std::process::id()));
+            std::env::temp_dir().join(format!("nook-editor-{}-{name}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut session = Session::new();
-        session.conns.push(datacraft_engine::Conn::new(
-            datacraft_core::ConnectionConfig::sqlite(path.to_string_lossy()),
-        ));
+        session
+            .conns
+            .push(nook_engine::Conn::new(nook_core::ConnectionConfig::sqlite(
+                path.to_string_lossy(),
+            )));
         session.active_conn = Some(0);
-        datacraft_engine::cmd::open_now(&mut session, 0).expect("the fixture database opens");
-        datacraft_engine::cmd::run_sql(
+        nook_engine::cmd::open_now(&mut session, 0).expect("the fixture database opens");
+        nook_engine::cmd::run_sql(
             &mut session,
             0,
             "CREATE TABLE customers (id INTEGER PRIMARY KEY, city TEXT NOT NULL);\
@@ -1294,7 +1296,7 @@ mod tests {
             Some(10),
         )
         .expect("the fixture schema is valid");
-        datacraft_engine::cmd::refresh_catalog(&mut session, 0).expect("the catalog refreshes");
+        nook_engine::cmd::refresh_catalog(&mut session, 0).expect("the catalog refreshes");
         let index = session.add_tab(TabKind::Query, "Query", Some(0));
         session.tabs[index].sql.text = script.to_owned();
         session.active_tab = Some(index);
@@ -1357,7 +1359,7 @@ mod tests {
 
     /// The query tab's state: the session starts on its Welcome tab, so the tab under test is the
     /// one the app would paint — the active one.
-    fn tab(world: &(Session, UiState, Tokens)) -> &datacraft_engine::Tab {
+    fn tab(world: &(Session, UiState, Tokens)) -> &nook_engine::Tab {
         &world.0.tabs[world.0.active_tab.unwrap()]
     }
 
@@ -1798,7 +1800,7 @@ mod tests {
                     .iter()
                     .map(|label| design::toolbar_button_width(ui, &world.2, label, None))
                     .sum();
-                let chip = design::chip_width(ui, &world.2, "cutecat-demo.db");
+                let chip = design::chip_width(ui, &world.2, "nook-demo.db");
                 let gaps = 12.0 * f32::from(design::S4);
                 measured = (kept + gaps, kept + chip + cut + gaps);
             },
@@ -1822,7 +1824,7 @@ mod tests {
         let mut world = world("stop", "select 1 as a;\n");
         assert_eq!(
             stop_reason(),
-            datacraft_engine::find("sql.stop").unwrap().help,
+            nook_engine::find("sql.stop").unwrap().help,
             "the button says what the registry says"
         );
         let f = frame(&ctx, &mut world, Vec::new(), 1.0);
@@ -2056,8 +2058,8 @@ mod tests {
         // statement while their texts differ.
         let second = "select 1 as a;\n-- a note the splitter drops\n".to_owned();
         assert_eq!(
-            datacraft_engine::cmd::sql::split(&first),
-            datacraft_engine::cmd::sql::split(&second),
+            nook_engine::cmd::sql::split(&first),
+            nook_engine::cmd::sql::split(&second),
             "the two scripts split the same way"
         );
         world.0.tabs[index].sql.text = second.clone();
@@ -2156,7 +2158,7 @@ mod tests {
         for _ in 0..4 {
             time += 0.4;
             let f = frame(&ctx, &mut world, Vec::new(), time);
-            seen |= f.shows(datacraft_engine::cmd::grid::no_grid_reason());
+            seen |= f.shows(nook_engine::cmd::grid::no_grid_reason());
             // A button that is offered is filled with its sheet — `panel_alt` at rest, the pointer's
             // fill under the hand; the disabled face paints nothing at all. (Every control in a band
             // also gets one transparent rect from the layout machinery, which paints nothing.)

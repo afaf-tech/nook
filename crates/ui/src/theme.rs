@@ -286,12 +286,12 @@ impl Tokens {
         }
     }
 
-    pub fn level_color(&self, level: datacraft_engine::Level) -> Color32 {
+    pub fn level_color(&self, level: nook_engine::Level) -> Color32 {
         match level {
-            datacraft_engine::Level::Info => self.text_dim,
-            datacraft_engine::Level::Warn => self.warn,
-            datacraft_engine::Level::Error => self.error,
-            datacraft_engine::Level::Success => self.ok,
+            nook_engine::Level::Info => self.text_dim,
+            nook_engine::Level::Warn => self.warn,
+            nook_engine::Level::Error => self.error,
+            nook_engine::Level::Success => self.ok,
         }
     }
 
@@ -1096,10 +1096,10 @@ pub fn keycap(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
 }
 
 /// The row height a density preference asks for: the design's `--h-row` or `--h-row-comfort`.
-pub fn row_h(density: datacraft_engine::Density) -> f32 {
+pub fn row_h(density: nook_engine::Density) -> f32 {
     match density {
-        datacraft_engine::Density::Compact => ROW_H,
-        datacraft_engine::Density::Comfortable => ROW_COMFORT_H,
+        nook_engine::Density::Compact => ROW_H,
+        nook_engine::Density::Comfortable => ROW_COMFORT_H,
     }
 }
 

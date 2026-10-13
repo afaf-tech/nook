@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-use datacraft_core::{Error, Result};
+use nook_core::{Error, Result};
 use serde_json::{json, Value};
 
 /// A request from the socket to the UI thread, and the reply channel back.
@@ -35,8 +35,8 @@ impl Control {
             .map_err(|e| Error::io(e.to_string()))?
             .port();
         let key = generate_key();
-        let key_path = datacraft_engine::profiles::config_dir().join(format!("control-key.{port}"));
-        datacraft_engine::profiles::ensure_dir()?;
+        let key_path = nook_engine::profiles::config_dir().join(format!("control-key.{port}"));
+        nook_engine::profiles::ensure_dir()?;
         std::fs::write(&key_path, &key)
             .map_err(|e| Error::io(format!("write {}: {e}", key_path.display())))?;
         restrict(&key_path);
@@ -73,7 +73,7 @@ impl Control {
     }
 
     pub fn key_path(&self) -> std::path::PathBuf {
-        datacraft_engine::profiles::config_dir().join(format!("control-key.{}", self.port))
+        nook_engine::profiles::config_dir().join(format!("control-key.{}", self.port))
     }
 }
 
@@ -114,7 +114,7 @@ fn serve_client(stream: TcpStream, tx: Sender<Request>, key: String) {
             let _ = writeln!(
                 writer,
                 "{}",
-                json!({"id": id, "error": format!("bad key; read {}", datacraft_engine::profiles::config_dir().join("control-key.*").display())})
+                json!({"id": id, "error": format!("bad key; read {}", nook_engine::profiles::config_dir().join("control-key.*").display())})
             );
             continue;
         }

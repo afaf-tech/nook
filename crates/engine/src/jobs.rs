@@ -1,11 +1,11 @@
 //! Automation: scheduled jobs (backup, transfer, sync, query, data generation) with a run log.
-//! Navicat's Automation does the same work; here a job is plain JSON so `datacraft-cli job run`
+//! Navicat's Automation does the same work; here a job is plain JSON so `nook-cli job run`
 //! and the in-app scheduler share it.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use datacraft_core::{Error, Result};
+use nook_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 pub fn now() -> u64 {

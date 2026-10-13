@@ -1,6 +1,6 @@
 # Working conventions
 
-The rules this codebase is written to, for anyone (or anything) contributing. DataCraft is a tool
+The rules this codebase is written to, for anyone (or anything) contributing. Nook is a tool
 people point at databases they care about, so the bar is "never lose data, never crash, never claim
 what is not measured".
 
@@ -10,7 +10,7 @@ what is not measured".
   `unimplemented!`. Production crate roots carry
   `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`;
   keep it on new crates.
-- **Errors are `Result<T>`** through `datacraft_core::Error` and `?`. A feature that cannot work says
+- **Errors are `Result<T>`** through `nook_core::Error` and `?`. A feature that cannot work says
   so with `Error::Unsupported` and a sentence the user can act on — it never panics and never silently
   does nothing.
 - **Input-derived values are hostile** (SQL text, cell values, file contents, imports, command
@@ -44,7 +44,7 @@ what is not measured".
 - The UI is thin: it reads `Session` state, paints it, and dispatches command ids. Colours live in
   `crates/ui/src/theme.rs`.
 - One code path per job: `quote_ident`, `sql_literal`, `returns_rows`, `split_script`,
-  `datacraft_model::ddl`, `plan_edits`, `diff`, `layout`, `dump_script`, `datagen`. Do not write a
+  `nook_model::ddl`, `plan_edits`, `diff`, `layout`, `dump_script`, `datagen`. Do not write a
   second version inside a command.
 
 ## Interface
@@ -70,7 +70,7 @@ layering check, and the parity freshness check. Commit after each arc of work th
 ## Documentation
 
 - British English, full sentences. Every generated or measured number must be reproducible with a
-  command in this repository (`cargo xtask parity`, `datacraft-cli commands`,
+  command in this repository (`cargo xtask parity`, `nook-cli commands`,
   `grep -rn "#\\[test\\]" | wc -l`).
 - Comments explain **why**; do not narrate the line below or restate the type.
 - Deliberate simplifications are marked in the code with a `ponytail:` comment naming the ceiling and

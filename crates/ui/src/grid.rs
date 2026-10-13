@@ -1,7 +1,7 @@
 //! The data grid: context toolbar, inline editing, pending-change drawer and the page footer.
 
-use datacraft_engine::{Level, Session};
 use egui::RichText;
+use nook_engine::{Level, Session};
 
 use crate::app::UiState;
 use crate::table::{TableColumn, TableEvent, TableView};
@@ -22,7 +22,7 @@ pub fn show(
         .grid
         .table
         .as_ref()
-        .map(datacraft_engine::TableRef::key)
+        .map(nook_engine::TableRef::key)
         .unwrap_or_else(|| "(no table)".into());
     let columns = tab.grid.result.columns.clone();
     let rows = tab.grid.result.rows.clone();
@@ -45,7 +45,7 @@ pub fn show(
         .grid
         .pending
         .iter()
-        .filter(|edit| edit.kind == datacraft_model::EditKind::SetCell)
+        .filter(|edit| edit.kind == nook_model::EditKind::SetCell)
         .filter_map(|edit| {
             columns
                 .iter()
@@ -57,7 +57,7 @@ pub fn show(
         .grid
         .pending
         .iter()
-        .filter(|edit| edit.kind == datacraft_model::EditKind::InsertRow)
+        .filter(|edit| edit.kind == nook_model::EditKind::InsertRow)
         .map(|edit| edit.row)
         .collect();
     let page = tab.grid.page;
@@ -422,7 +422,7 @@ pub fn show(
                     .get(row)
                     .and_then(|r| r.get(column))
                     .cloned()
-                    .unwrap_or(datacraft_core::Value::Null);
+                    .unwrap_or(nook_core::Value::Null);
                 state.table(tab_index).selected = Some((row, column));
                 state
                     .table(tab_index)
@@ -645,7 +645,7 @@ pub fn show(
         }
     }
     if reload {
-        if let Err(e) = datacraft_engine::cmd::load_grid(session, tab_index) {
+        if let Err(e) = nook_engine::cmd::load_grid(session, tab_index) {
             session.log(Level::Error, e.to_string());
         }
     }
@@ -747,17 +747,17 @@ fn read_only_note(
     } else if failed {
         (
             "Editing is disabled — the page did not load",
-            "DataCraft will not edit rows it has not read. Retry the page, or check the connection.",
+            "Nook will not edit rows it has not read. Retry the page, or check the connection.",
         )
     } else if schema_columns == 0 {
         (
             "Editing is disabled — the table's columns are unknown",
-            "Reopen the table from the tree so DataCraft can read its shape, then edit it.",
+            "Reopen the table from the tree so Nook can read its shape, then edit it.",
         )
     } else {
         (
             "Editing is disabled — this table has no primary key",
-            "Without a unique key DataCraft cannot identify the single row to update or delete. Selection, copy and export stay available; run an UPDATE in the query editor if you really mean it.",
+            "Without a unique key Nook cannot identify the single row to update or delete. Selection, copy and export stay available; run an UPDATE in the query editor if you really mean it.",
         )
     }
 }
@@ -885,7 +885,7 @@ mod tests {
             TableColumn::new("id", "INTEGER").pk(true),
             TableColumn::new("name", "TEXT"),
         ];
-        let rows: Vec<Vec<datacraft_core::Value>> = Vec::new();
+        let rows: Vec<Vec<nook_core::Value>> = Vec::new();
         let mut marks: Vec<(&str, f32, f32)> = Vec::new();
         let mut out = ctx.run_ui(input, |ui| {
             egui::CentralPanel::default_margins()
@@ -927,7 +927,7 @@ mod tests {
                         gutter: true,
                         // An empty page asks for the head alone.
                         height: 0.0,
-                        row_h: design::row_h(datacraft_engine::Density::Compact),
+                        row_h: design::row_h(nook_engine::Density::Compact),
                         empty_text: "head-only",
                     };
                     let mut state = crate::table::TableState::default();

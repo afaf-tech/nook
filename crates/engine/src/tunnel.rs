@@ -1,4 +1,4 @@
-//! SSH tunnel: DataCraft shells out to the system `ssh`, so agent keys and `~/.ssh/config` just work.
+//! SSH tunnel: Nook shells out to the system `ssh`, so agent keys and `~/.ssh/config` just work.
 
 use std::ffi::OsString;
 use std::io::{ErrorKind, IsTerminal};
@@ -6,11 +6,11 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use datacraft_core::{ConnectionConfig, Error, Result};
+use nook_core::{ConnectionConfig, Error, Result};
 
 /// The environment variable the askpass helper reads the connection id from. It is not a secret, and
 /// it cannot be an argument: `ssh` execs `SSH_ASKPASS` with the prompt and nothing else.
-pub const ASKPASS_CONN_ENV: &str = "DATACRAFT_ASKPASS_CONN";
+pub const ASKPASS_CONN_ENV: &str = "NOOK_ASKPASS_CONN";
 
 const SSH_ASKPASS_ENV: &str = "SSH_ASKPASS";
 const SSH_ASKPASS_REQUIRE_ENV: &str = "SSH_ASKPASS_REQUIRE";
@@ -227,7 +227,7 @@ impl Drop for Tunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_core::{DriverKind, SshTunnel};
+    use nook_core::{DriverKind, SshTunnel};
 
     #[test]
     fn free_ports_are_distinct_and_usable() {

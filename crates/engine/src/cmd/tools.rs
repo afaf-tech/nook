@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use datacraft_core::{quote_ident, quote_qualified, sql_literal, Dialect, Error, Result, Value};
-use datacraft_model::ddl;
+use nook_core::{quote_ident, quote_qualified, sql_literal, Dialect, Error, Result, Value};
+use nook_model::ddl;
 use serde_json::json;
 
 use crate::cmd::{dialect_name, run_sql};
@@ -269,12 +269,11 @@ fn load_rows(
             .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
             .is_none()
     {
-        let mut table =
-            datacraft_model::Table::new(reference.schema.clone(), reference.table.clone());
+        let mut table = nook_model::Table::new(reference.schema.clone(), reference.table.clone());
         for name in &target_columns {
             table
                 .columns
-                .push(datacraft_model::Column::new(name.clone(), "TEXT"));
+                .push(nook_model::Column::new(name.clone(), "TEXT"));
         }
         run_sql(session, index, &ddl::create_table(&table, dialect), Some(1))?;
         created = true;
@@ -402,7 +401,7 @@ fn import_sql(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
     let script = std::fs::read_to_string(&path)
         .map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
-    let statements = datacraft_drivers::split_script(&script);
+    let statements = nook_drivers::split_script(&script);
     if statements.is_empty() {
         return Err(Error::config("the file has no statements"));
     }
@@ -768,10 +767,10 @@ mod tests {
     #[test]
     fn importing_a_missing_file_is_an_error() {
         let mut session = Session::new();
-        let p = Params::from_json(json!({"path": "/tmp/nope-datacraft.csv", "table": "t"}))
-            .expect("params");
+        let p =
+            Params::from_json(json!({"path": "/tmp/nope-nook.csv", "table": "t"})).expect("params");
         assert!(import_csv(&mut session, &p).is_err());
-        let p = Params::from_json(json!({"path": "/tmp/nope-datacraft.json", "table": "t"}))
+        let p = Params::from_json(json!({"path": "/tmp/nope-nook.json", "table": "t"}))
             .expect("params");
         assert!(import_json(&mut session, &p).is_err());
     }

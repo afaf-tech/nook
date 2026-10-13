@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live check: run DataCraft against a real server and print what it did.
+# Live check: run Nook against a real server and print what it did.
 #
 #   scripts/live-check.sh postgres://localhost/shop
 #   scripts/live-check.sh mysql://root@127.0.0.1/shop
@@ -15,8 +15,8 @@ if [ -z "$CONN" ]; then
 fi
 
 cd "$(dirname "$0")/.."
-cargo build -q -p datacraft-cli
-CLI=./target/debug/datacraft-cli
+cargo build -q -p nook-cli
+CLI=./target/debug/nook-cli
 
 echo "== connection =="
 $CLI sql "$CONN" "select 1 as ok" || exit 1
@@ -31,7 +31,7 @@ echo "== users =="
 $CLI users "$CONN" | head -10
 
 echo "== grid edits on a scratch table =="
-SCRATCH="datacraft_live_check_$$"
+SCRATCH="nook_live_check_$$"
 $CLI sql "$CONN" "create table $SCRATCH (id integer primary key, note text)" >/dev/null
 $CLI sql "$CONN" "insert into $SCRATCH values (1, 'one'), (2, 'two')" >/dev/null
 $CLI sql "$CONN" "update $SCRATCH set note = 'edited' where id = 1" | tail -1

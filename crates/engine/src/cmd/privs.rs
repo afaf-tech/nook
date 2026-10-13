@@ -1,6 +1,6 @@
 //! Privileges: users, roles and grants. Postgres and MySQL only — SQLite has no users.
 
-use datacraft_core::{quote_ident, quote_qualified, Dialect, DriverKind, Error, Result};
+use nook_core::{quote_ident, quote_qualified, Dialect, DriverKind, Error, Result};
 use serde_json::json;
 
 use crate::{CommandSpec, Level, Params, Session};
@@ -68,10 +68,10 @@ fn grants(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = session.resolve_conn(p)?;
     let name = p.str_arg("user")?;
     let host = p.str_opt("host").unwrap_or_default();
-    let user = datacraft_model::DbUser {
+    let user = nook_model::DbUser {
         name,
         host,
-        ..datacraft_model::DbUser::default()
+        ..nook_model::DbUser::default()
     };
     let list = {
         let driver = session.driver_for(index)?;
@@ -364,7 +364,7 @@ mod tests {
         let mut session = Session::new();
         session
             .conns
-            .push(crate::Conn::new(datacraft_core::ConnectionConfig::sqlite(
+            .push(crate::Conn::new(nook_core::ConnectionConfig::sqlite(
                 "/tmp/x.db",
             )));
         session.active_conn = Some(0);

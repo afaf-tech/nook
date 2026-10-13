@@ -1,6 +1,6 @@
 //! Connection commands: profiles, opening, closing, testing, SSH tunnels, saved passwords.
 
-use datacraft_core::{ConnectionConfig, DriverKind, Error, Result, SslMode};
+use nook_core::{ConnectionConfig, DriverKind, Error, Result, SslMode};
 use serde_json::json;
 
 use crate::tunnel::{tunnel_facts, SshSecret};
@@ -292,7 +292,7 @@ fn test(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
         tunnel = Some(t);
     }
     let facts = tunnel.as_ref().map(tunnel_facts);
-    let mut driver = datacraft_drivers::open(&effective)?;
+    let mut driver = nook_drivers::open(&effective)?;
     let server = driver.server_info()?;
     let tables = driver.catalog().map(|c| c.table_count()).unwrap_or(0);
     driver.close();
@@ -497,7 +497,7 @@ mod tests {
     use super::*;
     use crate::Params;
     use crate::ProfileStore;
-    use datacraft_core::SshTunnel;
+    use nook_core::SshTunnel;
 
     /// A saved profile with nothing but an id and a name.
     fn profile(id: &str) -> ConnectionConfig {
@@ -772,7 +772,7 @@ mod tests {
         let mut session = Session::new();
         let mut cfg = ConnectionConfig::sqlite(
             std::env::temp_dir()
-                .join("datacraft-test-conn.db")
+                .join("nook-test-conn.db")
                 .to_string_lossy()
                 .to_string(),
         );

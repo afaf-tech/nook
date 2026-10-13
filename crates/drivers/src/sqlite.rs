@@ -2,8 +2,8 @@
 
 use std::time::{Duration, Instant};
 
-use datacraft_core::{quote_ident, ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
-use datacraft_model::{
+use nook_core::{quote_ident, ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
+use nook_model::{
     Catalog, Column, ForeignKey, Index, ResultSet, Schema, ServerInfo, Table, TableKind,
 };
 use rusqlite::types::ValueRef;
@@ -95,7 +95,7 @@ fn map_err(e: rusqlite::Error, sql: &str) -> Error {
 }
 
 fn is_read_statement(sql: &str) -> bool {
-    datacraft_core::returns_rows(sql) && !sql.to_ascii_lowercase().contains(" into ")
+    nook_core::returns_rows(sql) && !sql.to_ascii_lowercase().contains(" into ")
 }
 
 fn value_from(v: ValueRef<'_>) -> Value {
@@ -455,30 +455,27 @@ impl Sqlite {
         };
         let mut script = vec![
             "PRAGMA foreign_keys = OFF;".to_string(),
-            datacraft_model::ddl::create_table(&scratch, Dialect::Sqlite),
-            datacraft_core::quote_qualified(None, &tmp, Dialect::Sqlite),
+            nook_model::ddl::create_table(&scratch, Dialect::Sqlite),
+            nook_core::quote_qualified(None, &tmp, Dialect::Sqlite),
         ];
         script[2] = format!(
             "INSERT INTO {tmp_q} ({col_list}) SELECT {col_list} FROM {orig};",
             tmp_q = script[2],
             orig = quote_ident(&table.name, Dialect::Sqlite)
         );
-        script.push(datacraft_model::ddl::drop_table(
+        script.push(nook_model::ddl::drop_table(
             None,
             &table.name,
             Dialect::Sqlite,
             false,
         ));
-        script.push(datacraft_model::ddl::rename_table(
+        script.push(nook_model::ddl::rename_table(
             None,
             &tmp,
             &table.name,
             Dialect::Sqlite,
         ));
-        script.extend(datacraft_model::ddl::create_indexes(
-            &rebuilt,
-            Dialect::Sqlite,
-        ));
+        script.extend(nook_model::ddl::create_indexes(&rebuilt, Dialect::Sqlite));
         script.push("PRAGMA foreign_keys = ON;".to_string());
         Ok(script)
     }
@@ -487,7 +484,7 @@ impl Sqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_model::{ddl, plan_edits, EditKind, RowEdit};
+    use nook_model::{ddl, plan_edits, EditKind, RowEdit};
 
     fn db() -> Sqlite {
         let mut db = Sqlite::memory().expect("memory db");
@@ -539,7 +536,7 @@ mod tests {
 
     #[test]
     fn read_only_connection_refuses_writes() {
-        let path = std::env::temp_dir().join("datacraft_ro_test.db");
+        let path = std::env::temp_dir().join("nook_ro_test.db");
         let _ = std::fs::remove_file(&path);
         let mut rw = Sqlite::open(&ConnectionConfig::sqlite(path.to_string_lossy())).expect("open");
         rw.run("CREATE TABLE t (a int)", 1).expect("create");
@@ -681,7 +678,7 @@ mod tests {
                 .expect("users");
             users.columns.push(Column::new("nickname", "TEXT"));
         }
-        let changes = datacraft_model::diff_catalogs(&wanted, &live, Dialect::Sqlite);
+        let changes = nook_model::diff_catalogs(&wanted, &live, Dialect::Sqlite);
         assert_eq!(changes.len(), 1);
         db.run(&changes[0].sql, 1).expect("apply add column");
         let after = db.catalog().expect("catalog");

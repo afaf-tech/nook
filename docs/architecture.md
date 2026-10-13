@@ -1,8 +1,8 @@
-# DataCraft architecture
+# Nook architecture
 
 > **Last reviewed:** 2026-10-12 · **Target:** Navicat Premium 17 workflows
 
-How DataCraft is built today. The conventions for working in the code are in
+How Nook is built today. The conventions for working in the code are in
 [`conventions.md`](conventions.md).
 
 ## Layers
@@ -12,13 +12,13 @@ a crate may only depend on crates below it, and nothing below L5 depends on egui
 
 | Layer | Crate | Lines | Job |
 |---|---|---|---|
-| L0 | `datacraft-core` | 1.0k | `Error`/`Result`, `Value` (the one cell type), `ConnectionConfig` with SSH and SSL settings, dialect quoting and literals, `returns_rows` |
-| L1 | `datacraft-model` | 1.8k | `Catalog`, `Schema`, `Table`, `Column`, `Index`, `ForeignKey`, `DbProcess`, `DbUser`, `ServerInfo`, `ResultSet`; grid edit plans; DDL for all three dialects; structure diff; ER layout |
-| L2 | `datacraft-drivers` | 3.8k | `Driver` trait + `sqlite`, `pg`, `mysql`; statement splitter; data transfer; row-level sync; `.sql` dump; backup and restore through the vendor tools |
-| L3 | `datacraft-engine` | 10.1k | `Session` (connections, tabs, grid buffer, history, messages), 140 commands in `cmd/*.rs`, the Navicat feature catalog, parity measurement, jobs and the scheduler, data generation, reports, profiles and the keychain, the SSH tunnel |
-| L4 | `datacraft-mcp` | 0.3k | MCP server over stdio: every command is a tool, connections open on demand |
-| L5 | `datacraft-ui` | 6.9k | egui front end: design tokens, table widget, app shell, sidebar, grid, editor, designer, diagram, charts, monitor, jobs, dialogs, control channel, `--shot` |
-| apps | `datacraft`, `datacraft-cli` | 1.3k | desktop binary and the command line |
+| L0 | `nook-core` | 1.0k | `Error`/`Result`, `Value` (the one cell type), `ConnectionConfig` with SSH and SSL settings, dialect quoting and literals, `returns_rows` |
+| L1 | `nook-model` | 1.8k | `Catalog`, `Schema`, `Table`, `Column`, `Index`, `ForeignKey`, `DbProcess`, `DbUser`, `ServerInfo`, `ResultSet`; grid edit plans; DDL for all three dialects; structure diff; ER layout |
+| L2 | `nook-drivers` | 3.8k | `Driver` trait + `sqlite`, `pg`, `mysql`; statement splitter; data transfer; row-level sync; `.sql` dump; backup and restore through the vendor tools |
+| L3 | `nook-engine` | 10.1k | `Session` (connections, tabs, grid buffer, history, messages), 140 commands in `cmd/*.rs`, the Navicat feature catalog, parity measurement, jobs and the scheduler, data generation, reports, profiles and the keychain, the SSH tunnel |
+| L4 | `nook-mcp` | 0.3k | MCP server over stdio: every command is a tool, connections open on demand |
+| L5 | `nook-ui` | 6.9k | egui front end: design tokens, table widget, app shell, sidebar, grid, editor, designer, diagram, charts, monitor, jobs, dialogs, control channel, `--shot` |
+| apps | `nook`, `nook-cli` | 1.3k | desktop binary and the command line |
 
 ## Data flow
 
@@ -32,17 +32,17 @@ a crate may only depend on crates below it, and nothing below L5 depends on egui
 3. **Read data.** The grid asks for one page (`SELECT … LIMIT n OFFSET m`, with the tab's `ORDER BY`
    and `WHERE`), and the driver bounds the result at `max_rows`.
 4. **Edit data.** A cell edit is coerced to the declared column type, turned into an `UPDATE` keyed by
-   the primary key (`datacraft_model::plan_edits`) and pushed onto the tab's pending list. `grid.apply`
+   the primary key (`nook_model::plan_edits`) and pushed onto the tab's pending list. `grid.apply`
    runs the whole list inside one transaction and rolls back at the first failure.
 5. **Move data.** Transfer reads pages of 2,000 rows and writes each page inside a transaction
    (`transfer::transfer`); sync compares both sides by primary key (`transfer::compare_rows`, a pure
    function) and writes only the differences; structure sync compares two catalogs
-   (`datacraft_model::diff`) and applies the DDL, with destructive steps gated behind a flag.
+   (`nook_model::diff`) and applies the DDL, with destructive steps gated behind a flag.
 6. **Back up.** SQLite is dumped in process to a portable `.sql` script (`transfer::dump_script`);
    PostgreSQL and MySQL shell out to `pg_dump`/`mysqldump` with the password in the environment, never
    on the command line. Restore mirrors both paths.
 7. **Automate.** A job is a command plus a schedule, stored as JSON. The desktop app ticks every 30
-   seconds and `datacraft-cli job serve` does the same for cron; both call `job.runDue`, which
+   seconds and `nook-cli job serve` does the same for cron; both call `job.runDue`, which
    dispatches each due job through the registry and records the result.
 
 ## Interface
@@ -93,14 +93,14 @@ implementations:
   junk parameters (`commands_run_with_junk_parameters_never_panic`).
 - Live checks that need a server are run with the CLI rather than in the unit suite, because they
   mutate databases:
-  - PostgreSQL 17: `datacraft-cli tables|sql|describe|ddl|monitor|users`, transfer SQLite → PostgreSQL,
+  - PostgreSQL 17: `nook-cli tables|sql|describe|ddl|monitor|users`, transfer SQLite → PostgreSQL,
     `sync-data` dry run and apply, `diff-structure` and `--apply`, `dump` (pg_dump) and `restore` (psql)
     into a fresh database.
   - MySQL/MariaDB: the same script, once a server is reachable.
 - `cargo xtask ci` runs fmt, clippy with warnings denied, the workspace tests, the layering check and
   the parity freshness check.
-- UI verification: `cargo run -p datacraft -- --shot /tmp/shot.png` renders a frame and writes a PNG.
-  For a real check, start `datacraft --demo --control <port>` and drive it over the control channel:
+- UI verification: `cargo run -p nook -- --shot /tmp/shot.png` renders a frame and writes a PNG.
+  For a real check, start `nook --demo --control <port>` and drive it over the control channel:
   `ui.selectTab` (a negative index shows the start page), `engine.run`, `ui.setEditorText`,
   `ui.selectResult` and `ui.setResultView` (so every statement of a run and both result views can be
   shot), `ui.setTheme` (so both palettes can be shot without touching the window), `ui.openConnection`,
@@ -256,7 +256,7 @@ implementations:
   sites that render a real grid decide per frame (`grid.rs`, `editor.rs`); `views::list` pins
   `theme::ROW_H`. The design demonstrates comfortable rows on its grid register, so the lists keep the
   compact measure until an explore register asks otherwise — then `list` takes a row height too.
-- **The explore preview is a page, not a pager.** `datacraft_engine::cmd::preview_table` runs the same
+- **The explore preview is a page, not a pager.** `nook_engine::cmd::preview_table` runs the same
   `page_select` the grid does, without a history entry and without registering a command of its own, so
   `cargo xtask parity` stays honest. `ponytail:` there is no control-protocol surface for it and no
   second page; add a command and an offset argument when the preview needs to scroll past
@@ -289,7 +289,7 @@ implementations:
   the database password the `{id}` account holds — and `conn.delete` removes both accounts. The tunnel
   hands it to `ssh` through an askpass helper: `SSH_ASKPASS` is the app's own binary with
   `SSH_ASKPASS_REQUIRE=force`, `--ssh-askpass` prints one line from the keychain, and the connection id
-  travels in `DATACRAFT_ASKPASS_CONN`, because ssh's askpass protocol passes only the prompt and no
+  travels in `NOOK_ASKPASS_CONN`, because ssh's askpass protocol passes only the prompt and no
   arguments of its own. The secret is therefore never in an argument, an environment variable or a
   file, and `ConnectionConfig` gained no field, so the SSH password never reaches `profiles.json`.
   Where there is no keychain — every platform but macOS — there is no source for the helper either:

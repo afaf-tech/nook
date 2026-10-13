@@ -1,6 +1,6 @@
 //! Structure synchronization: compare two catalogs and emit the DDL that closes the gap.
 
-use datacraft_core::Dialect;
+use nook_core::Dialect;
 
 use crate::ddl;
 use crate::{Catalog, Table};
@@ -75,7 +75,7 @@ pub fn diff(source: &Catalog, target: &Catalog, dialect: Dialect) -> Vec<Change>
                     sql: String::new(),
                     manual: true,
                     note: format!(
-                        "{}: copy the definition by hand, DataCraft does not move views yet",
+                        "{}: copy the definition by hand, Nook does not move views yet",
                         table.kind.label()
                     ),
                 }),

@@ -2,14 +2,14 @@
 
 use std::time::{Duration, Instant};
 
-use datacraft_core::{ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
-use datacraft_model::{
-    Catalog, Column, DbProcess, DbUser, ForeignKey, Index, ResultSet, Schema, ServerInfo, Table,
-    TableKind,
-};
 use mysql::consts::ColumnType;
 use mysql::prelude::*;
 use mysql::{Column as MyColumn, Conn, Opts, OptsBuilder, Row, SslOpts, Value as MyValue};
+use nook_core::{ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
+use nook_model::{
+    Catalog, Column, DbProcess, DbUser, ForeignKey, Index, ResultSet, Schema, ServerInfo, Table,
+    TableKind,
+};
 
 use crate::{guard_read_only, Driver, MAX_ROWS};
 
@@ -24,10 +24,10 @@ impl MySql {
     pub fn open(cfg: &ConnectionConfig) -> Result<Self> {
         let mut opts = Opts::from_url(&cfg.uri())
             .map_err(|e| Error::config(format!("connection string: {e}")))?;
-        if cfg.ssl != datacraft_core::SslMode::Disable {
+        if cfg.ssl != nook_core::SslMode::Disable {
             let verify = matches!(
                 cfg.ssl,
-                datacraft_core::SslMode::VerifyFull | datacraft_core::SslMode::VerifyCa
+                nook_core::SslMode::VerifyFull | nook_core::SslMode::VerifyCa
             );
             opts = OptsBuilder::from_opts(opts)
                 .ssl_opts(Some(
@@ -203,7 +203,7 @@ impl Driver for MySql {
         let started = Instant::now();
         let limit = limit.max(1);
         let mut rs = ResultSet::default();
-        if datacraft_core::returns_rows(sql) {
+        if nook_core::returns_rows(sql) {
             let mut qr = self
                 .conn
                 .query_iter(sql)
@@ -499,7 +499,7 @@ impl Driver for MySql {
     }
 
     fn table_ddl(&mut self, schema: Option<&str>, table: &str) -> Result<String> {
-        let qualified = datacraft_core::quote_qualified(
+        let qualified = nook_core::quote_qualified(
             schema.or(Some(self.database.as_str())),
             table,
             Dialect::MySql,

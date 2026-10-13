@@ -7,9 +7,9 @@
 //! duration and its own failure. Everything it paints is built from those runs — the pill's copy,
 //! the CSV the Copy button writes and the JSON the JSON view shows.
 
-use datacraft_engine::{Session, SqlState, StatementRun};
-use datacraft_model::ResultSet;
 use egui::{Align2, CornerRadius, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use nook_engine::{Session, SqlState, StatementRun};
+use nook_model::ResultSet;
 
 use crate::app::UiState;
 use crate::icons::Glyph;
@@ -231,7 +231,7 @@ pub fn show(
             params["conn"] = serde_json::json!(session.conns[conn].cfg.id);
         }
         if let Err(e) = session.run("sql.run", params) {
-            session.log(datacraft_engine::Level::Error, format!("sql.run: {e}"));
+            session.log(nook_engine::Level::Error, format!("sql.run: {e}"));
         }
     }
 }
@@ -267,7 +267,7 @@ fn paint(
     tokens: &Tokens,
     register: &mut Register,
     sql: &SqlState,
-    density: datacraft_engine::Density,
+    density: nook_engine::Density,
     max_rows: usize,
     id: egui::Id,
     table: &mut TableState,
@@ -597,7 +597,7 @@ fn status_bar(
                     false,
                     |_| {},
                 )
-                .on_hover_text(datacraft_engine::cmd::grid::no_grid_reason());
+                .on_hover_text(nook_engine::cmd::grid::no_grid_reason());
                 let copyable = run.result.is_some();
                 if design::toolbar_button(
                     ui,
@@ -1154,7 +1154,7 @@ fn segment_width(ui: &Ui, tokens: &Tokens, labels: &[(&str, bool)]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_core::Value;
+    use nook_core::Value;
 
     fn result(columns: &[&str], rows: Vec<Vec<Value>>) -> ResultSet {
         ResultSet {
@@ -1262,7 +1262,7 @@ mod tests {
         events: Vec<egui::Event>,
         register: &mut Register,
         sql: &SqlState,
-        density: datacraft_engine::Density,
+        density: nook_engine::Density,
         table: &mut TableState,
         actions: &mut Actions,
     ) -> (Layout, Vec<(Rect, String)>) {
@@ -1573,7 +1573,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -1605,7 +1605,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -1657,7 +1657,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -1714,7 +1714,7 @@ mod tests {
                 Vec::new(),
                 &mut register,
                 &sql,
-                datacraft_engine::Density::Compact,
+                nook_engine::Density::Compact,
                 &mut table,
                 &mut actions,
             );
@@ -1795,7 +1795,7 @@ mod tests {
                     Vec::new(),
                     &mut register,
                     &sql,
-                    datacraft_engine::Density::Compact,
+                    nook_engine::Density::Compact,
                     &mut table,
                     &mut actions,
                 );
@@ -1885,7 +1885,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -1903,7 +1903,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -1945,7 +1945,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -1994,7 +1994,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -2013,11 +2013,8 @@ mod tests {
         let ctx = egui::Context::default();
         let sql = state(vec![ok("select id, name from t", 6, 12.0)]);
         for (density, pitch) in [
-            (datacraft_engine::Density::Compact, design::ROW_H),
-            (
-                datacraft_engine::Density::Comfortable,
-                design::ROW_COMFORT_H,
-            ),
+            (nook_engine::Density::Compact, design::ROW_H),
+            (nook_engine::Density::Comfortable, design::ROW_COMFORT_H),
         ] {
             let mut register = Register::from(&sql, None);
             let mut table = TableState::default();
@@ -2056,7 +2053,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -2085,7 +2082,7 @@ mod tests {
             events,
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );
@@ -2137,7 +2134,7 @@ mod tests {
             Vec::new(),
             &mut register,
             &sql,
-            datacraft_engine::Density::Compact,
+            nook_engine::Density::Compact,
             &mut table,
             &mut actions,
         );

@@ -1,0 +1,17 @@
+[package]
+name = "nook-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nook-cli"
+path = "src/main.rs"
+
+[dependencies]
+nook-core = { workspace = true }
+nook-model = { workspace = true }
+nook-drivers = { workspace = true }
+nook-engine = { workspace = true }
+nook-mcp = { workspace = true }
+serde_json = { workspace = true }

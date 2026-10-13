@@ -6,7 +6,7 @@
     clippy::todo,
     clippy::unreachable
 )]
-//! L1: what a database looks like to DataCraft — catalog, result sets, edit plans, structure diffs, ER layout.
+//! L1: what a database looks like to Nook — catalog, result sets, edit plans, structure diffs, ER layout.
 
 pub mod ddl;
 pub mod diagram;
@@ -17,7 +17,7 @@ pub use diagram::{layout as layout_diagram, Diagram, DiagramEdge, DiagramNode};
 pub use diff::{diff as diff_catalogs, Change, ChangeKind};
 pub use edit::{plan as plan_edits, plan_update, EditKind, RowEdit};
 
-use datacraft_core::{quote_qualified, sql_literal, Dialect, Value};
+use nook_core::{quote_qualified, sql_literal, Dialect, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -383,7 +383,7 @@ impl ResultSet {
         let cols = self
             .columns
             .iter()
-            .map(|c| datacraft_core::quote_ident(c, dialect))
+            .map(|c| nook_core::quote_ident(c, dialect))
             .collect::<Vec<_>>()
             .join(", ");
         let mut out = String::new();

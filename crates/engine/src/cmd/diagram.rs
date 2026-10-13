@@ -1,6 +1,6 @@
 //! ER diagram commands: layout for the canvas, and SVG export for sharing.
 
-use datacraft_core::{Error, Result};
+use nook_core::{Error, Result};
 use serde_json::json;
 
 use crate::CommandSpec;
@@ -27,7 +27,7 @@ fn er_diagram(session: &mut crate::Session, p: &crate::Params) -> Result<serde_j
     let index = session.resolve_conn(p)?;
     let schema = p.str_opt("schema");
     let catalog = session.catalog_of(index)?;
-    let diagram = datacraft_model::layout_diagram(catalog, schema.as_deref());
+    let diagram = nook_model::layout_diagram(catalog, schema.as_deref());
     Ok(json!({
         "nodes": diagram.nodes.iter().map(|n| json!({
             "key": n.key, "schema": n.schema, "table": n.table,
@@ -59,7 +59,7 @@ fn export_svg(session: &mut crate::Session, p: &crate::Params) -> Result<serde_j
                 .unwrap_or_default()
         );
         (
-            datacraft_model::layout_diagram(catalog, schema.as_deref()),
+            nook_model::layout_diagram(catalog, schema.as_deref()),
             title,
         )
     };
@@ -129,7 +129,7 @@ fn table_card(session: &mut crate::Session, p: &crate::Params) -> Result<serde_j
 }
 
 /// Deterministic SVG: no fonts beyond the generic families, no scripts, no external references.
-pub fn to_svg(diagram: &datacraft_model::Diagram, title: &str) -> String {
+pub fn to_svg(diagram: &nook_model::Diagram, title: &str) -> String {
     const HEADER: f32 = 24.0;
     const ROW: f32 = 18.0;
     let mut out = String::with_capacity(4096);
@@ -207,9 +207,9 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_model::{Column, ForeignKey, Schema, Table};
+    use nook_model::{Column, ForeignKey, Schema, Table};
 
-    fn catalog() -> datacraft_model::Catalog {
+    fn catalog() -> nook_model::Catalog {
         let mut users = Table::new(None, "users");
         let mut id = Column::new("id", "int");
         id.primary_key = true;
@@ -225,19 +225,19 @@ mod tests {
             ref_columns: vec!["id".into()],
             ..ForeignKey::default()
         });
-        datacraft_model::Catalog {
+        nook_model::Catalog {
             database: Some("shop".into()),
             schemas: vec![Schema {
                 name: "main".into(),
                 tables: vec![users, posts],
             }],
-            ..datacraft_model::Catalog::default()
+            ..nook_model::Catalog::default()
         }
     }
 
     #[test]
     fn svg_contains_boxes_edges_and_no_script() {
-        let diagram = datacraft_model::layout_diagram(&catalog(), None);
+        let diagram = nook_model::layout_diagram(&catalog(), None);
         let svg = to_svg(&diagram, "shop · main");
         assert!(svg.starts_with("<svg"));
         assert!(svg.ends_with("</svg>\n"));
@@ -255,7 +255,7 @@ mod tests {
         if let Some(table) = catalog.schemas[0].tables.first_mut() {
             table.name = "<script>alert(1)</script>".into();
         }
-        let svg = to_svg(&datacraft_model::layout_diagram(&catalog, None), "x & y");
+        let svg = to_svg(&nook_model::layout_diagram(&catalog, None), "x & y");
         assert!(!svg.contains("<script>alert"));
         assert!(svg.contains("&lt;script&gt;"));
         assert!(svg.contains("x &amp; y"));

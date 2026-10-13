@@ -92,7 +92,7 @@ fn run(program: &str, args: &[&str]) -> i32 {
 }
 
 fn parity() -> i32 {
-    let markdown = datacraft_engine::parity::measure().markdown();
+    let markdown = nook_engine::parity::measure().markdown();
     let path = repo_root().join("docs/parity-checklist.md");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -100,7 +100,7 @@ fn parity() -> i32 {
     match std::fs::write(&path, &markdown) {
         Ok(()) => {
             println!("wrote {}", path.display());
-            println!("{}", datacraft_engine::parity::measure().summary());
+            println!("{}", nook_engine::parity::measure().summary());
             0
         }
         Err(e) => {
@@ -112,7 +112,7 @@ fn parity() -> i32 {
 
 /// The generated checklist has to match the code, or a feature quietly slipped out.
 fn parity_check() -> i32 {
-    let markdown = datacraft_engine::parity::measure().markdown();
+    let markdown = nook_engine::parity::measure().markdown();
     let path = repo_root().join("docs/parity-checklist.md");
     match std::fs::read_to_string(&path) {
         Ok(current) if current == markdown => {
@@ -133,14 +133,14 @@ fn parity_check() -> i32 {
 /// Layering: a crate may only depend on crates below it.
 fn layers() -> i32 {
     const ORDER: &[(&str, usize)] = &[
-        ("datacraft-core", 0),
-        ("datacraft-model", 1),
-        ("datacraft-drivers", 2),
-        ("datacraft-engine", 3),
-        ("datacraft-mcp", 4),
-        ("datacraft-ui", 5),
-        ("datacraft", 6),
-        ("datacraft-cli", 6),
+        ("nook-core", 0),
+        ("nook-model", 1),
+        ("nook-drivers", 2),
+        ("nook-engine", 3),
+        ("nook-mcp", 4),
+        ("nook-ui", 5),
+        ("nook", 6),
+        ("nook-cli", 6),
         ("xtask", 7),
     ];
     let mut problems: Vec<String> = Vec::new();

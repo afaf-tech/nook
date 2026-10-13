@@ -1,4 +1,4 @@
-# DataCraft roadmap
+# Nook roadmap
 
 **Stage: alpha** · the core workflows are real and tested against live servers; the gaps are named.
 
@@ -9,7 +9,7 @@
 | Number | Value | Kind |
 |---|---|---|
 | Navicat feature catalog coverage | **140 / 203 (69.0%)** | measured (`cargo xtask parity` → [`docs/parity-checklist.md`](docs/parity-checklist.md)) |
-| Commands | 140 registered ids | measured (`datacraft-cli commands`) |
+| Commands | 140 registered ids | measured (`nook-cli commands`) |
 | Engines with a live driver | **3** (SQLite, PostgreSQL, MySQL/MariaDB) | measured: catalogs, queries, edits, transfer, sync and backup run against each |
 | Engines catalogued but not implemented | 4 (SQL Server, Oracle, MongoDB, Redis) | named in the catalog, no driver |
 | Tests | 155 | measured (`grep -rn "#\[test\]"`) |

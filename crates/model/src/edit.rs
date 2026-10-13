@@ -1,6 +1,6 @@
 //! Grid edit buffer → DML. Pure: the UI records edits, this turns them into statements.
 
-use datacraft_core::{quote_ident, quote_qualified, sql_literal, Dialect, Error, Result, Value};
+use nook_core::{quote_ident, quote_qualified, sql_literal, Dialect, Error, Result, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditKind {
@@ -35,7 +35,7 @@ pub fn plan_update(
 ) -> Result<String> {
     if pk.is_empty() {
         return Err(Error::unsupported(format!(
-            "{table} has no primary key, so DataCraft will not guess which row to change"
+            "{table} has no primary key, so Nook will not guess which row to change"
         )));
     }
     if changes.is_empty() {
@@ -99,7 +99,7 @@ fn plan_delete(
 ) -> Result<String> {
     if pk.is_empty() {
         return Err(Error::unsupported(format!(
-            "{table} has no primary key, so DataCraft will not guess which row to delete"
+            "{table} has no primary key, so Nook will not guess which row to delete"
         )));
     }
     Ok(format!(

@@ -4,9 +4,9 @@
 //! command each tab asks for and stores the result, so everything below is a pure function of JSON —
 //! no session, no database, and a test can call all of it.
 
-use datacraft_engine::TableRef;
-use datacraft_model::ResultSet;
 use egui::{Align2, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
+use nook_engine::TableRef;
+use nook_model::ResultSet;
 
 use crate::app::UiState;
 use crate::icons::{self, Glyph};
@@ -49,7 +49,7 @@ impl Tab {
     }
 
     /// The engine command whose result this tab shows. The preview has none: it is a page of rows
-    /// read through [`datacraft_engine::cmd::preview_table`], not a schema command.
+    /// read through [`nook_engine::cmd::preview_table`], not a schema command.
     pub fn command(self) -> Option<&'static str> {
         match self {
             Tab::Columns => Some("schema.columns"),
@@ -158,7 +158,7 @@ pub struct Inspector {
     pub key: String,
     /// One slot per schema tab, in `Tab::cache_slot` order.
     pub cache: [Option<Result<serde_json::Value, String>>; 3],
-    /// The preview's page, typed, because the grid renders `datacraft_core::Value` and not JSON.
+    /// The preview's page, typed, because the grid renders `nook_core::Value` and not JSON.
     pub preview: Option<Result<ResultSet, String>>,
     /// The row count the connection's catalog last reported, for the preview's footer.
     pub total_rows: Option<u64>,

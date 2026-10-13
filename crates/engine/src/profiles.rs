@@ -3,27 +3,27 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use datacraft_core::{ConnectionConfig, Error, Result};
+use nook_core::{ConnectionConfig, Error, Result};
 use serde::{Deserialize, Serialize};
 
-/// Where DataCraft keeps its files. `DATACRAFT_CONFIG_DIR` overrides everything, which is how the
+/// Where Nook keeps its files. `NOOK_CONFIG_DIR` overrides everything, which is how the
 /// tests stay out of the real profile directory; otherwise the platform convention applies.
 pub fn config_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("DATACRAFT_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os("NOOK_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
     if cfg!(target_os = "macos") {
         if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join("Library/Application Support/DataCraft");
+            return PathBuf::from(home).join("Library/Application Support/Nook");
         }
     }
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("datacraft");
+        return PathBuf::from(xdg).join("nook");
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config/datacraft");
+        return PathBuf::from(home).join(".config/nook");
     }
-    PathBuf::from(".datacraft")
+    PathBuf::from(".nook")
 }
 
 pub fn ensure_dir() -> Result<PathBuf> {
@@ -161,12 +161,12 @@ fn restrict_permissions(path: &std::path::Path) {
 
 // ------------------------------------------------------------------ keychain
 
-const KEYCHAIN_SERVICE: &str = "datacraft";
+const KEYCHAIN_SERVICE: &str = "nook";
 
-/// The `security` binary the keychain calls shell out to. `DATACRAFT_SECURITY_BIN` points it at a
+/// The `security` binary the keychain calls shell out to. `NOOK_SECURITY_BIN` points it at a
 /// fake, which is how the tests exercise the accounts without a login keychain.
 pub fn security_bin() -> String {
-    std::env::var("DATACRAFT_SECURITY_BIN").unwrap_or_else(|_| "security".to_string())
+    std::env::var("NOOK_SECURITY_BIN").unwrap_or_else(|_| "security".to_string())
 }
 
 /// The keychain account that holds a connection's SSH password. The database password lives under
@@ -175,13 +175,13 @@ pub fn ssh_account(id: &str) -> String {
     format!("{id}#ssh")
 }
 
-/// The one sentence DataCraft owns for "there is no keychain here": `conn.sshPassword` refuses with
+/// The one sentence Nook owns for "there is no keychain here": `conn.sshPassword` refuses with
 /// it, the dialog shows it beside its disabled toggle, and `--ssh-askpass` has no source for it. A
 /// `ponytail:` the fallback is ssh's own prompt on the terminal the app was started from — an
 /// in-app prompt whose answer is written to the keychain for the length of the run is the upgrade.
 pub const NO_KEYCHAIN: &str =
     "this system has no OS keychain, so the SSH password cannot be saved; \
-leave it empty and ssh asks for it on the terminal DataCraft was started from";
+leave it empty and ssh asks for it on the terminal Nook was started from";
 
 /// `NO_KEYCHAIN` where the caller has no keychain, `None` where there is one: the branch is a value
 /// the tests can check on any platform.
@@ -324,10 +324,7 @@ mod tests {
     #[test]
     fn config_dir_is_under_the_home_directory() {
         let dir = config_dir();
-        assert!(
-            dir.to_string_lossy().contains("DataCraft")
-                || dir.to_string_lossy().contains("datacraft")
-        );
+        assert!(dir.to_string_lossy().contains("Nook") || dir.to_string_lossy().contains("nook"));
     }
 
     #[test]

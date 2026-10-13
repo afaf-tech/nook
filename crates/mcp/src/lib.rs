@@ -6,13 +6,13 @@
     clippy::todo,
     clippy::unreachable
 )]
-//! L5: MCP server. Every DataCraft command is a tool, so an agent can drive the same surface the
+//! L5: MCP server. Every Nook command is a tool, so an agent can drive the same surface the
 //! ribbon does — connect, browse, query, transfer, schedule.
 
 use std::io::{BufRead, Write};
 
-use datacraft_core::{Error, Result};
-use datacraft_engine::{find, registry, Conn, Level, Session};
+use nook_core::{Error, Result};
+use nook_engine::{find, registry, Conn, Level, Session};
 use serde_json::{json, Value};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -70,7 +70,7 @@ pub fn handle(
         "initialize" => reply(json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": { "name": "datacraft", "version": env!("CARGO_PKG_VERSION") },
+            "serverInfo": { "name": "nook", "version": env!("CARGO_PKG_VERSION") },
             "instructions": help,
         })),
         "notifications/initialized" | "notifications/cancelled" => None,
@@ -152,7 +152,7 @@ pub fn call_tool(
             session.conns.push(Conn::new(saved));
         }
         let index = session.conn_index(&id)?;
-        datacraft_engine::cmd::open_now(session, index)?;
+        nook_engine::cmd::open_now(session, index)?;
         opened.push(id);
     }
     let result = session.run(name, Value::Object(map))?;
@@ -171,7 +171,7 @@ pub fn call_tool(
 
 /// Tool schemas: the command's own parameter documentation, plus the connection names to pick from.
 pub fn tool_list() -> Vec<Value> {
-    let store = datacraft_engine::ProfileStore::load().unwrap_or_default();
+    let store = nook_engine::ProfileStore::load().unwrap_or_default();
     let names: Vec<String> = store.list().iter().map(|c| c.id.clone()).collect();
     let hint = if names.is_empty() {
         "no saved connections yet; create one with conn.new first".to_string()
@@ -263,7 +263,7 @@ mod tests {
         )
         .expect("response");
         assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(response["result"]["serverInfo"]["name"], "datacraft");
+        assert_eq!(response["result"]["serverInfo"]["name"], "nook");
         assert!(response["result"]["capabilities"]["tools"].is_object());
     }
 
@@ -339,6 +339,6 @@ mod tests {
         let mut session = Session::new();
         let mut opened = Vec::new();
         let out = call_tool(&mut session, &mut opened, "app.about", json!({})).expect("about");
-        assert_eq!(out["name"], "DataCraft");
+        assert_eq!(out["name"], "Nook");
     }
 }

@@ -3,9 +3,9 @@
 //! frame. The redesign rebuilt the connection editor and nothing else, so two chromes stand side by
 //! side until the next slice moves the rest.
 
-use datacraft_core::{DriverKind, SslMode};
-use datacraft_engine::{Level, Session};
 use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind};
+use nook_core::{DriverKind, SslMode};
+use nook_engine::{Level, Session};
 
 use crate::app::{Confirm, ConnStep, ConnectionForm, SshAuth, TestOutcome, UiState};
 use crate::table;
@@ -79,7 +79,7 @@ fn dialog_shell(
     width: f32,
     add: impl FnOnce(&mut egui::Ui),
 ) -> egui::ModalResponse<()> {
-    egui::Modal::new(egui::Id::new(("datacraft-dialog", id)))
+    egui::Modal::new(egui::Id::new(("nook-dialog", id)))
         .backdrop_color(tokens.scrim)
         .frame(design::dialog_frame(tokens))
         .show(ctx, |ui| {
@@ -341,7 +341,7 @@ fn password_helper(keychain: bool) -> &'static str {
 /// refusal where there is no keychain to promise.
 fn ssh_helper(keychain: bool, auth: SshAuth) -> &'static str {
     if !keychain {
-        return datacraft_engine::profiles::NO_KEYCHAIN;
+        return nook_engine::profiles::NO_KEYCHAIN;
     }
     match auth {
         SshAuth::Password => {
@@ -458,8 +458,7 @@ fn connection_editor(
 fn general_step(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
     let editing = state.connection_editing.is_some();
     let file_based = state.connection_form.kind.is_file_based();
-    let keychain =
-        state.connection_form.keychain && datacraft_engine::profiles::keychain_available();
+    let keychain = state.connection_form.keychain && nook_engine::profiles::keychain_available();
     let form = &mut state.connection_form;
 
     // Connection name (`.fld.grow`) and the engine at the design's 180.
@@ -658,7 +657,7 @@ fn tls_step(ui: &mut egui::Ui, tokens: &Tokens, state: &mut UiState) {
 /// The design's Tunnel step: the jump host, the authentication control, the secret and the local
 /// port. Where there is no keychain the password field and its toggle wear the engine's own refusal.
 fn tunnel_step(ui: &mut egui::Ui, tokens: &Tokens, state: &mut UiState) {
-    let keychain = datacraft_engine::profiles::keychain_available();
+    let keychain = nook_engine::profiles::keychain_available();
     let form = &mut state.connection_form;
     let auth = form.ssh_auth();
 
@@ -747,7 +746,7 @@ fn tunnel_step(ui: &mut egui::Ui, tokens: &Tokens, state: &mut UiState) {
                     keychain,
                 );
                 if !keychain {
-                    password.on_hover_text(datacraft_engine::profiles::NO_KEYCHAIN);
+                    password.on_hover_text(nook_engine::profiles::NO_KEYCHAIN);
                 }
             }
         }
@@ -772,7 +771,7 @@ fn tunnel_step(ui: &mut egui::Ui, tokens: &Tokens, state: &mut UiState) {
             keychain,
         );
         if !keychain {
-            toggle.on_hover_text(datacraft_engine::profiles::NO_KEYCHAIN);
+            toggle.on_hover_text(nook_engine::profiles::NO_KEYCHAIN);
         }
     }
     design::helper_line(ui, tokens, ssh_helper(keychain, auth));
@@ -960,7 +959,7 @@ fn test_line(value: &serde_json::Value) -> String {
 /// and then carried by `conn.edit`, `conn.setSshTunnel` and both password commands, so editing
 /// connection 1 while connection 0 is active can never write to the active one — which is the defect
 /// review 3 found at the old `dialogs.rs:260`.
-fn save_connection(session: &mut Session, state: &mut UiState) -> datacraft_core::Result<()> {
+fn save_connection(session: &mut Session, state: &mut UiState) -> nook_core::Result<()> {
     let form = state.connection_form.clone();
     let editing = state.connection_editing;
     let name = form.name.trim().to_string();
@@ -989,7 +988,7 @@ fn save_connection(session: &mut Session, state: &mut UiState) -> datacraft_core
                 .conns
                 .get(index)
                 .map(|conn| conn.cfg.id.clone())
-                .ok_or_else(|| datacraft_core::Error::config("the connection is gone"))?;
+                .ok_or_else(|| nook_core::Error::config("the connection is gone"))?;
             params["conn"] = serde_json::json!(id);
             session.run("conn.edit", params)?;
             id
@@ -1001,7 +1000,7 @@ fn save_connection(session: &mut Session, state: &mut UiState) -> datacraft_core
                 .iter()
                 .find(|conn| conn.cfg.name == name)
                 .map(|conn| conn.cfg.id.clone())
-                .ok_or_else(|| datacraft_core::Error::config("the connection was not saved"))?
+                .ok_or_else(|| nook_core::Error::config("the connection was not saved"))?
         }
     };
 
@@ -1023,7 +1022,7 @@ fn save_connection(session: &mut Session, state: &mut UiState) -> datacraft_core
     // The database password: the keychain where there is one, the profile file (mode 0600) where
     // there is not — and an empty field leaves whatever is stored alone.
     if !form.password.is_empty() {
-        if form.keychain && datacraft_engine::profiles::keychain_available() {
+        if form.keychain && nook_engine::profiles::keychain_available() {
             session.run(
                 "conn.savePassword",
                 serde_json::json!({ "conn": id, "password": form.password }),
@@ -1037,7 +1036,7 @@ fn save_connection(session: &mut Session, state: &mut UiState) -> datacraft_core
     }
 
     // The SSH password lives under its own account, and only while the toggle says so.
-    if datacraft_engine::profiles::keychain_available() {
+    if nook_engine::profiles::keychain_available() {
         if form.ssh_save_password && !form.ssh_password.is_empty() {
             session.run(
                 "conn.sshPassword",
@@ -1054,7 +1053,7 @@ fn save_connection(session: &mut Session, state: &mut UiState) -> datacraft_core
     if editing.is_none() {
         // Connect straight away: that is what the user asked for.
         let index = session.conn_index(&id).unwrap_or(0);
-        if let Err(error) = datacraft_engine::cmd::open_now(session, index) {
+        if let Err(error) = nook_engine::cmd::open_now(session, index) {
             session.log(Level::Warn, format!("saved, not connected: {error}"));
         }
     }
@@ -1215,7 +1214,7 @@ fn command_runner(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState,
         .show(ui.ctx(), |ui| {
             ui.set_min_width(580.0);
             ui.label(
-                RichText::new("Every action in DataCraft is a command with an id and JSON parameters — this is the same registry the palette, the CLI and MCP use.")
+                RichText::new("Every action in Nook is a command with an id and JSON parameters — this is the same registry the palette, the CLI and MCP use.")
                     .size(11.0)
                     .color(tokens.text_faint),
             );
@@ -1227,7 +1226,7 @@ fn command_runner(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState,
                     .width(320.0)
                     .show_ui(ui, |ui| {
                         let mut group = "";
-                        for spec in datacraft_engine::registry() {
+                        for spec in nook_engine::registry() {
                             if spec.group != group {
                                 group = spec.group;
                                 ui.label(
@@ -1252,11 +1251,11 @@ fn command_runner(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState,
                             }
                         }
                     });
-                if let Some(spec) = datacraft_engine::find(&state.command_id) {
+                if let Some(spec) = nook_engine::find(&state.command_id) {
                     design::chip(ui, tokens, spec.group, tokens.info);
                 }
             });
-            if let Some(spec) = datacraft_engine::find(&state.command_id) {
+            if let Some(spec) = nook_engine::find(&state.command_id) {
                 if !spec.help.is_empty() {
                     ui.label(RichText::new(spec.help).size(11.0).color(tokens.text_faint));
                 }
@@ -1564,7 +1563,7 @@ fn export_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, 
                                 "grid.export",
                                 serde_json::json!({"format": state.export_format, "path": path}),
                             ),
-                            _ => Err(datacraft_core::Error::config("nothing to export")),
+                            _ => Err(nook_core::Error::config("nothing to export")),
                         };
                         match result {
                             Ok(value) => {
@@ -1675,7 +1674,7 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
                     );
                 }
                 ui.add_space(6.0);
-                let compact = session.settings.density == datacraft_engine::Density::Compact;
+                let compact = session.settings.density == nook_engine::Density::Compact;
                 if let Some(index) = design::segmented(
                     ui,
                     tokens,
@@ -1732,15 +1731,11 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
                 for (label, path) in [
                     (
                         "profiles",
-                        datacraft_engine::profiles::profiles_path()
-                            .display()
-                            .to_string(),
+                        nook_engine::profiles::profiles_path().display().to_string(),
                     ),
                     (
                         "jobs",
-                        datacraft_engine::profiles::jobs_path()
-                            .display()
-                            .to_string(),
+                        nook_engine::profiles::jobs_path().display().to_string(),
                     ),
                 ] {
                     ui.horizontal(|ui| {
@@ -1815,7 +1810,7 @@ fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens
             response.request_focus();
             ui.add_space(4.0);
             let needle = state.palette_query.to_ascii_lowercase();
-            let matches: Vec<&'static datacraft_engine::CommandSpec> = datacraft_engine::registry()
+            let matches: Vec<&'static nook_engine::CommandSpec> = nook_engine::registry()
                 .iter()
                 .filter(|spec| {
                     needle.is_empty()
@@ -1943,10 +1938,10 @@ mod tests {
         static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
             std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
         let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join("datacraft-ui-test-config");
+        let dir = std::env::temp_dir().join("nook-ui-test-config");
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::remove_file(dir.join("profiles.json"));
-        std::env::set_var("DATACRAFT_CONFIG_DIR", dir);
+        std::env::set_var("NOOK_CONFIG_DIR", dir);
         guard
     }
 
@@ -2273,7 +2268,7 @@ mod tests {
         assert_eq!(form.ssh_auth(), SshAuth::KeyFile);
 
         // And a profile: the tunnel is on when it has a host, which is the only toggle it has.
-        let mut cfg = datacraft_core::ConnectionConfig::new("jump", DriverKind::Postgres);
+        let mut cfg = nook_core::ConnectionConfig::new("jump", DriverKind::Postgres);
         cfg.ssh.host = "jump.example.com".into();
         cfg.ssh.key_file = "/keys/id".into();
         let form = ConnectionForm::from_config(&cfg);
@@ -2296,21 +2291,18 @@ mod tests {
         // The SSH helper hands the engine's own refusal back where there is nothing to promise.
         assert_eq!(
             ssh_helper(false, SshAuth::Password),
-            datacraft_engine::profiles::NO_KEYCHAIN
+            nook_engine::profiles::NO_KEYCHAIN
         );
         assert_eq!(
             ssh_helper(false, SshAuth::KeyFile),
-            datacraft_engine::profiles::NO_KEYCHAIN
+            nook_engine::profiles::NO_KEYCHAIN
         );
         for auth in [SshAuth::KeyFile, SshAuth::Agent, SshAuth::Password] {
-            assert_ne!(
-                ssh_helper(true, auth),
-                datacraft_engine::profiles::NO_KEYCHAIN
-            );
+            assert_ne!(ssh_helper(true, auth), nook_engine::profiles::NO_KEYCHAIN);
         }
         assert_eq!(
             ConnectionForm::default().keychain,
-            datacraft_engine::profiles::keychain_available()
+            nook_engine::profiles::keychain_available()
         );
     }
 

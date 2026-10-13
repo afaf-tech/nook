@@ -1,12 +1,12 @@
 [package]
-name = "datacraft-drivers"
+name = "nook-drivers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-datacraft-core = { workspace = true }
-datacraft-model = { workspace = true }
+nook-core = { workspace = true }
+nook-model = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true, features = ["column_decltype"] }

@@ -1,7 +1,7 @@
 //! Schema commands: the table designer, object DDL, indexes and foreign keys.
 
-use datacraft_core::{quote_ident, quote_qualified, Dialect, Error, Result};
-use datacraft_model::ddl;
+use nook_core::{quote_ident, quote_qualified, Dialect, Error, Result};
+use nook_model::ddl;
 use serde_json::json;
 
 use crate::cmd::{dialect_name, run_sql};
@@ -60,7 +60,7 @@ pub fn commands() -> Vec<CommandSpec> {
 }
 
 /// Parameters that describe a column, as the designer sends them.
-fn column_from_params(p: &Params) -> Result<datacraft_model::Column> {
+fn column_from_params(p: &Params) -> Result<nook_model::Column> {
     let name = p
         .str_opt("name")
         .or_else(|| p.str_opt("column"))
@@ -69,7 +69,7 @@ fn column_from_params(p: &Params) -> Result<datacraft_model::Column> {
     if name.trim().is_empty() {
         return Err(Error::config("a column needs a name"));
     }
-    Ok(datacraft_model::Column {
+    Ok(nook_model::Column {
         name,
         type_name,
         nullable: p.bool_opt("nullable", true),
@@ -77,7 +77,7 @@ fn column_from_params(p: &Params) -> Result<datacraft_model::Column> {
         auto_increment: p.bool_opt("auto_increment", false),
         default: p.str_opt("default"),
         comment: p.str_opt("comment").unwrap_or_default(),
-        ..datacraft_model::Column::default()
+        ..nook_model::Column::default()
     })
 }
 
@@ -119,8 +119,7 @@ fn list_tables(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             continue;
         }
         for table in &schema.tables {
-            if !session.settings.show_system_objects
-                && table.kind == datacraft_model::TableKind::System
+            if !session.settings.show_system_objects && table.kind == nook_model::TableKind::System
             {
                 continue;
             }
@@ -138,7 +137,7 @@ fn list_tables(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 fn table_from_params(
     session: &Session,
     p: &Params,
-) -> Result<(usize, TableRef, datacraft_model::Table)> {
+) -> Result<(usize, TableRef, nook_model::Table)> {
     let index = session.resolve_conn(p)?;
     let spec = p
         .str_opt("table")
@@ -209,7 +208,7 @@ fn create_table(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
         .get("columns")
         .and_then(|v| v.as_array())
         .ok_or_else(|| Error::config("pass \"columns\": [{name, type, …}]"))?;
-    let mut table = datacraft_model::Table::new(reference.schema.clone(), reference.table.clone());
+    let mut table = nook_model::Table::new(reference.schema.clone(), reference.table.clone());
     for raw in raw_columns {
         let params = Params::from_json(raw.clone())?;
         let mut column = column_from_params(&params)?;
@@ -226,11 +225,11 @@ fn create_table(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
             let name = params
                 .str_opt("name")
                 .unwrap_or_else(|| format!("ix_{}_{}", table.name, table.indexes.len() + 1));
-            table.indexes.push(datacraft_model::Index {
+            table.indexes.push(nook_model::Index {
                 name,
                 columns: params.list("columns"),
                 unique: params.bool_opt("unique", false),
-                ..datacraft_model::Index::default()
+                ..nook_model::Index::default()
             });
         }
         statements.extend(ddl::create_indexes(&table, dialect));
@@ -448,11 +447,11 @@ fn create_index(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
     let name = p
         .str_opt("name")
         .unwrap_or_else(|| format!("ix_{}_{}", reference.table, columns.join("_")));
-    let index_def = datacraft_model::Index {
+    let index_def = nook_model::Index {
         name,
         columns,
         unique: p.bool_opt("unique", false),
-        ..datacraft_model::Index::default()
+        ..nook_model::Index::default()
     };
     let dialect = session
         .conns
@@ -502,7 +501,7 @@ fn add_foreign_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
     let name = p
         .str_opt("name")
         .unwrap_or_else(|| format!("fk_{}_{}", reference.table, ref_table));
-    let fk = datacraft_model::ForeignKey {
+    let fk = nook_model::ForeignKey {
         name,
         columns,
         ref_schema: p.str_opt("ref_schema").or_else(|| table.schema.clone()),
@@ -619,7 +618,7 @@ fn empty_database(session: &mut Session, p: &Params) -> Result<serde_json::Value
         let mut statements: Vec<String> = Vec::new();
         for schema in &catalog.schemas {
             for table in &schema.tables {
-                if table.kind == datacraft_model::TableKind::Table {
+                if table.kind == nook_model::TableKind::Table {
                     statements.push(ddl::drop_table_cascade(
                         table.schema.as_deref(),
                         &table.name,
@@ -638,7 +637,7 @@ fn empty_database(session: &mut Session, p: &Params) -> Result<serde_json::Value
     execute_ddl(session, index, &statements).map(|_| json!({ "dropped": count }))
 }
 
-/// Exposed for the CLI's `datacraft-cli describe`: dialect name of a connection.
+/// Exposed for the CLI's `nook-cli describe`: dialect name of a connection.
 pub fn dialect_of(session: &Session, index: usize) -> Option<String> {
     session
         .conns

@@ -715,95 +715,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "datacraft"
-version = "0.1.0"
-dependencies = [
- "datacraft-core",
- "datacraft-engine",
- "datacraft-ui",
- "eframe",
-]
-
-[[package]]
-name = "datacraft-cli"
-version = "0.1.0"
-dependencies = [
- "datacraft-core",
- "datacraft-drivers",
- "datacraft-engine",
- "datacraft-mcp",
- "datacraft-model",
- "serde_json",
-]
-
-[[package]]
-name = "datacraft-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "datacraft-drivers"
-version = "0.1.0"
-dependencies = [
- "datacraft-core",
- "datacraft-model",
- "mysql",
- "native-tls",
- "postgres",
- "postgres-native-tls",
- "rusqlite",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "datacraft-engine"
-version = "0.1.0"
-dependencies = [
- "datacraft-core",
- "datacraft-drivers",
- "datacraft-model",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "datacraft-mcp"
-version = "0.1.0"
-dependencies = [
- "datacraft-core",
- "datacraft-engine",
- "serde_json",
-]
-
-[[package]]
-name = "datacraft-model"
-version = "0.1.0"
-dependencies = [
- "datacraft-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "datacraft-ui"
-version = "0.1.0"
-dependencies = [
- "datacraft-core",
- "datacraft-drivers",
- "datacraft-engine",
- "datacraft-model",
- "eframe",
- "egui",
- "png 0.17.16",
- "rfd",
- "serde_json",
-]
-
-[[package]]
 name = "derive_utils"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2133,6 +2044,95 @@ name = "nohash-hasher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
+name = "nook"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "nook-core",
+ "nook-engine",
+ "nook-ui",
+]
+
+[[package]]
+name = "nook-cli"
+version = "0.1.0"
+dependencies = [
+ "nook-core",
+ "nook-drivers",
+ "nook-engine",
+ "nook-mcp",
+ "nook-model",
+ "serde_json",
+]
+
+[[package]]
+name = "nook-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nook-drivers"
+version = "0.1.0"
+dependencies = [
+ "mysql",
+ "native-tls",
+ "nook-core",
+ "nook-model",
+ "postgres",
+ "postgres-native-tls",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nook-engine"
+version = "0.1.0"
+dependencies = [
+ "nook-core",
+ "nook-drivers",
+ "nook-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nook-mcp"
+version = "0.1.0"
+dependencies = [
+ "nook-core",
+ "nook-engine",
+ "serde_json",
+]
+
+[[package]]
+name = "nook-model"
+version = "0.1.0"
+dependencies = [
+ "nook-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nook-ui"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "nook-core",
+ "nook-drivers",
+ "nook-engine",
+ "nook-model",
+ "png 0.17.16",
+ "rfd",
+ "serde_json",
+]
 
 [[package]]
 name = "num-bigint"
@@ -4381,8 +4381,8 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "datacraft-drivers",
- "datacraft-engine",
+ "nook-drivers",
+ "nook-engine",
 ]
 
 [[package]]

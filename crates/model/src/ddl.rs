@@ -1,6 +1,6 @@
 //! DDL for all three dialects: the table designer, the structure diff and the dump all call these.
 
-use datacraft_core::{quote_ident, quote_qualified, Dialect, Error, Result};
+use nook_core::{quote_ident, quote_qualified, Dialect, Error, Result};
 
 use crate::{Column, ForeignKey, Index, Table};
 

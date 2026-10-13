@@ -21,9 +21,9 @@ pub mod tunnel;
 
 use std::collections::BTreeMap;
 
-use datacraft_core::{ConnectionConfig, Error, Result, Value};
-use datacraft_drivers::Driver;
-use datacraft_model::{Catalog, ResultSet, ServerInfo, Table};
+use nook_core::{ConnectionConfig, Error, Result, Value};
+use nook_drivers::Driver;
+use nook_model::{Catalog, ResultSet, ServerInfo, Table};
 use serde_json::json;
 
 pub use catalog::{catalog as feature_catalog, CatalogEntry};
@@ -164,7 +164,7 @@ pub struct CommandSpec {
     pub group: &'static str,
     /// Keyboard shortcut as displayed, e.g. `cmd+n`.
     pub shortcut: &'static str,
-    /// Parameter documentation printed by `datacraft-cli commands`.
+    /// Parameter documentation printed by `nook-cli commands`.
     pub params: &'static str,
     pub help: &'static str,
     pub run: fn(&mut Session, &Params) -> Result<serde_json::Value>,
@@ -332,7 +332,7 @@ impl TableRef {
 /// One pending change in the grid, shown as a badge until applied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingEdit {
-    pub kind: datacraft_model::EditKind,
+    pub kind: nook_model::EditKind,
     pub row: usize,
     pub column: String,
     pub value: Value,
@@ -343,7 +343,7 @@ pub struct PendingEdit {
 pub struct GridState {
     pub result: ResultSet,
     pub table: Option<TableRef>,
-    pub columns: Vec<datacraft_model::Column>,
+    pub columns: Vec<nook_model::Column>,
     pub primary_key: Vec<String>,
     pub page: usize,
     pub page_size: usize,
@@ -395,9 +395,9 @@ impl GridState {
         let mut counts = (0, 0, 0);
         for edit in &self.pending {
             match edit.kind {
-                datacraft_model::EditKind::InsertRow => counts.0 += 1,
-                datacraft_model::EditKind::SetCell => counts.1 += 1,
-                datacraft_model::EditKind::DeleteRow => counts.2 += 1,
+                nook_model::EditKind::InsertRow => counts.0 += 1,
+                nook_model::EditKind::SetCell => counts.1 += 1,
+                nook_model::EditKind::DeleteRow => counts.2 += 1,
             }
         }
         counts
@@ -552,7 +552,7 @@ impl Default for Settings {
             theme: "dark".into(),
             density: Density::Compact,
             page_size: 200,
-            max_rows: datacraft_drivers::MAX_ROWS,
+            max_rows: nook_drivers::MAX_ROWS,
             font_size: 13.0,
             confirm_destructive: true,
             auto_commit_edits: false,
@@ -616,7 +616,7 @@ impl Session {
             next_tab_id: 1,
             home,
         };
-        session.log(Level::Info, "DataCraft ready");
+        session.log(Level::Info, "Nook ready");
         session
     }
 
@@ -874,18 +874,18 @@ pub(crate) mod test_support {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join("datacraft-test-config");
+        let dir = std::env::temp_dir().join("nook-test-config");
         let _ = std::fs::create_dir_all(&dir);
         // Start from an empty store every time: a leftover jobs.json from a previous run would
         // change what the test sees.
         for file in ["jobs.json", "profiles.json"] {
             let _ = std::fs::remove_file(dir.join(file));
         }
-        std::env::set_var("DATACRAFT_CONFIG_DIR", dir);
+        std::env::set_var("NOOK_CONFIG_DIR", dir);
         guard
     }
 
-    /// A fake `security` on `DATACRAFT_SECURITY_BIN`: it records every call's arguments in a log and
+    /// A fake `security` on `NOOK_SECURITY_BIN`: it records every call's arguments in a log and
     /// answers a lookup for `account` with `secret`, so the keychain paths can be exercised without
     /// the login keychain. It reads nothing on stdin and never prompts, and it succeeds on a store
     /// without writing anything, which is what lets a test assert the secret arrived as the store
@@ -897,7 +897,7 @@ pub(crate) mod test_support {
         secret: &str,
     ) -> (MutexGuard<'static, ()>, std::path::PathBuf) {
         let guard = scratch_config();
-        let dir = std::env::temp_dir().join("datacraft-test-security");
+        let dir = std::env::temp_dir().join("nook-test-security");
         let _ = std::fs::create_dir_all(&dir);
         let log = dir.join("calls.log");
         let _ = std::fs::remove_file(&log);
@@ -915,7 +915,7 @@ pub(crate) mod test_support {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
         }
-        std::env::set_var("DATACRAFT_SECURITY_BIN", &script);
+        std::env::set_var("NOOK_SECURITY_BIN", &script);
         (guard, log)
     }
 }
@@ -996,7 +996,7 @@ mod tests {
     fn editable_grid() -> GridState {
         GridState {
             table: Some(TableRef::parse("users")),
-            columns: vec![datacraft_model::Column {
+            columns: vec![nook_model::Column {
                 name: "id".into(),
                 ..Default::default()
             }],
@@ -1005,7 +1005,7 @@ mod tests {
         }
     }
 
-    fn pending(kind: datacraft_model::EditKind) -> PendingEdit {
+    fn pending(kind: nook_model::EditKind) -> PendingEdit {
         PendingEdit {
             kind,
             row: 0,
@@ -1040,24 +1040,18 @@ mod tests {
     fn pending_counts_start_empty_and_tally_each_kind() {
         let mut grid = GridState::default();
         assert_eq!(grid.pending_counts(), (0, 0, 0));
-        grid.pending
-            .push(pending(datacraft_model::EditKind::InsertRow));
-        grid.pending
-            .push(pending(datacraft_model::EditKind::SetCell));
-        grid.pending
-            .push(pending(datacraft_model::EditKind::DeleteRow));
+        grid.pending.push(pending(nook_model::EditKind::InsertRow));
+        grid.pending.push(pending(nook_model::EditKind::SetCell));
+        grid.pending.push(pending(nook_model::EditKind::DeleteRow));
         assert_eq!(grid.pending_counts(), (1, 1, 1));
     }
 
     #[test]
     fn pending_counts_tally_a_mixed_buffer() {
         let mut grid = GridState::default();
-        grid.pending
-            .push(pending(datacraft_model::EditKind::SetCell));
-        grid.pending
-            .push(pending(datacraft_model::EditKind::SetCell));
-        grid.pending
-            .push(pending(datacraft_model::EditKind::DeleteRow));
+        grid.pending.push(pending(nook_model::EditKind::SetCell));
+        grid.pending.push(pending(nook_model::EditKind::SetCell));
+        grid.pending.push(pending(nook_model::EditKind::DeleteRow));
         assert_eq!(grid.pending_counts(), (0, 2, 1));
     }
 

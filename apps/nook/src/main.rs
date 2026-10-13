@@ -6,28 +6,28 @@
     clippy::todo,
     clippy::unreachable
 )]
-//! The DataCraft desktop app.
+//! The Nook desktop app.
 
-use datacraft_ui::Options;
+use nook_ui::Options;
 
 fn usage() -> String {
-    "datacraft — database administration for SQLite, PostgreSQL and MySQL
+    "nook — database administration for SQLite, PostgreSQL and MySQL
 
-  datacraft                                  start with your saved connections
-  datacraft --demo                           start with a sample SQLite database
-  datacraft --conn postgres://localhost/shop open a connection at launch
-  datacraft --sql \"select * from users\"      start with this query
-  datacraft --control 7981                   serve the JSON control channel
-  datacraft --shot /tmp/shot.png             render one frame to a PNG and exit
-  datacraft --ssh-askpass <id>               print the connection's stored SSH password (ssh runs this)
+  nook                                  start with your saved connections
+  nook --demo                           start with a sample SQLite database
+  nook --conn postgres://localhost/shop open a connection at launch
+  nook --sql \"select * from users\"      start with this query
+  nook --control 7981                   serve the JSON control channel
+  nook --shot /tmp/shot.png             render one frame to a PNG and exit
+  nook --ssh-askpass <id>               print the connection's stored SSH password (ssh runs this)
 
-The same commands are available from the shell (`datacraft-cli commands`) and over MCP
-(`datacraft-cli mcp`)."
+The same commands are available from the shell (`nook-cli commands`) and over MCP
+(`nook-cli mcp`)."
         .to_string()
 }
 
 /// The helper `ssh` execs when a tunnel needs the stored SSH password: print one line and exit. The
-/// connection id arrives in argv, or in `DATACRAFT_ASKPASS_CONN` because ssh's askpass protocol
+/// connection id arrives in argv, or in `NOOK_ASKPASS_CONN` because ssh's askpass protocol
 /// passes only the prompt — the password itself is read here, in the helper, so it never reaches the
 /// parent's arguments or environment.
 fn askpass(id: Option<String>) -> i32 {
@@ -35,13 +35,13 @@ fn askpass(id: Option<String>) -> i32 {
         eprintln!("--ssh-askpass needs a connection id");
         return 2;
     };
-    match datacraft_engine::profiles::ssh_askpass_line(&id) {
+    match nook_engine::profiles::ssh_askpass_line(&id) {
         Ok(secret) => {
             println!("{secret}");
             0
         }
         Err(e) => {
-            eprintln!("datacraft --ssh-askpass: {e}");
+            eprintln!("nook --ssh-askpass: {e}");
             1
         }
     }
@@ -49,7 +49,7 @@ fn askpass(id: Option<String>) -> i32 {
 
 /// Is this process `ssh` asking for the password, and for which connection? `ssh` execs `SSH_ASKPASS`
 /// with the prompt and nothing else, so the invocation is one non-flag argument plus the id in
-/// `DATACRAFT_ASKPASS_CONN`; `None` means an ordinary launch, which a stray environment cannot turn
+/// `NOOK_ASKPASS_CONN`; `None` means an ordinary launch, which a stray environment cannot turn
 /// into one.
 fn askpass_invocation(args: &[String], env: Option<String>) -> Option<Option<String>> {
     let mut rest = args.iter();
@@ -72,10 +72,7 @@ fn main() {
     // `ssh` runs the app this way — with the prompt as its only argument and the id in the
     // environment — so it is answered before any option is parsed, and it prints one line and exits
     // instead of starting up.
-    if let Some(id) = askpass_invocation(
-        &args,
-        std::env::var(datacraft_engine::ASKPASS_CONN_ENV).ok(),
-    ) {
+    if let Some(id) = askpass_invocation(&args, std::env::var(nook_engine::ASKPASS_CONN_ENV).ok()) {
         std::process::exit(askpass(id));
     }
     let mut options = Options::default();
@@ -130,8 +127,8 @@ fn main() {
         }
         index += 1;
     }
-    if let Err(e) = datacraft_ui::run(options) {
-        eprintln!("datacraft: {e}");
+    if let Err(e) = nook_ui::run(options) {
+        eprintln!("nook: {e}");
         std::process::exit(1);
     }
 }
@@ -141,7 +138,7 @@ mod tests {
     use super::*;
 
     /// Which invocations are `ssh` asking for a password. `ssh` execs `SSH_ASKPASS` with the prompt
-    /// as its only argument, so the id can only come from `DATACRAFT_ASKPASS_CONN`; the flag form is
+    /// as its only argument, so the id can only come from `NOOK_ASKPASS_CONN`; the flag form is
     /// the manual one, and a stray environment must not turn an ordinary launch into a helper.
     #[test]
     fn ssh_askpass_is_recognised_by_its_own_invocation() {

@@ -14,13 +14,13 @@ pub mod pg;
 pub mod sqlite;
 pub mod transfer;
 
-use datacraft_core::{quote_qualified, ConnectionConfig, Dialect, DriverKind, Error, Result};
-use datacraft_model::{Catalog, DbProcess, DbUser, ResultSet, ServerInfo};
+use nook_core::{quote_qualified, ConnectionConfig, Dialect, DriverKind, Error, Result};
+use nook_model::{Catalog, DbProcess, DbUser, ResultSet, ServerInfo};
 
 /// Rows a single fetch may hold before the driver stops reading. Grid pages ask for far fewer.
 pub const MAX_ROWS: usize = 50_000;
 
-/// Everything DataCraft can ask of a database. Introspection methods default to "not supported here"
+/// Everything Nook can ask of a database. Introspection methods default to "not supported here"
 /// so a new driver only writes what it can actually do.
 pub trait Driver: Send {
     fn kind(&self) -> DriverKind;

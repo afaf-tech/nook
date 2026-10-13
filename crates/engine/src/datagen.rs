@@ -1,8 +1,8 @@
 //! Test-data generation, the feature Navicat sells as "Data Generation".
 //! Deterministic for a given seed, so the same script can be reproduced.
 
-use datacraft_core::{quote_ident, quote_qualified, sql_literal, Dialect, Error, Result, Value};
-use datacraft_model::{Column, Table};
+use nook_core::{quote_ident, quote_qualified, sql_literal, Dialect, Error, Result, Value};
+use nook_model::{Column, Table};
 
 /// xorshift64*: small, seedable, no dependency.
 #[derive(Debug, Clone)]

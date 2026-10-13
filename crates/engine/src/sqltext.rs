@@ -1,7 +1,7 @@
 //! SQL text tools: formatting, completion and the keyword list shared with the editor's highlighter.
 
-use datacraft_core::{quote_ident, Dialect};
-use datacraft_model::Catalog;
+use nook_core::{quote_ident, Dialect};
+use nook_model::Catalog;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeywordCase {
@@ -634,7 +634,7 @@ fn statement_under_caret(sql: &str, offset: usize) -> Option<(usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datacraft_model::{Column, Schema, Table};
+    use nook_model::{Column, Schema, Table};
 
     fn catalog() -> Catalog {
         let mut users = Table::new(None, "users");

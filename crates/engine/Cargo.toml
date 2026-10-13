@@ -1,12 +1,12 @@
 [package]
-name = "datacraft-engine"
+name = "nook-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-datacraft-core = { workspace = true }
-datacraft-model = { workspace = true }
-datacraft-drivers = { workspace = true }
+nook-core = { workspace = true }
+nook-model = { workspace = true }
+nook-drivers = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

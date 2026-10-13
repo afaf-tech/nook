@@ -2,9 +2,9 @@
 //! Every one of them is built from the same pieces: a context toolbar, chips for the facts, cards
 //! for the details and the shared table widget wherever rows are involved.
 
-use datacraft_core::Value as Cell;
-use datacraft_engine::{Level, Session, TabKind};
 use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, Vec2};
+use nook_core::Value as Cell;
+use nook_engine::{Level, Session, TabKind};
 
 use crate::app::UiState;
 use crate::table::{self, TableColumn, TableView};
@@ -1372,7 +1372,7 @@ pub fn jobs(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
                     tokens,
                     &format!(
                         "store {}",
-                        datacraft_engine::profiles::jobs_path()
+                        nook_engine::profiles::jobs_path()
                             .file_name()
                             .map(|f| f.to_string_lossy().into_owned())
                             .unwrap_or_default()
@@ -1860,7 +1860,7 @@ pub fn users(
 
 /// The start page: what this is, what to do first, and the measured feature coverage.
 pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
-    let report = datacraft_engine::parity::measure();
+    let report = nook_engine::parity::measure();
     egui::ScrollArea::vertical()
         .id_salt("welcome")
         .auto_shrink([false, false])
@@ -1879,7 +1879,7 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                 );
                 ui.add_space(14.0);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("DataCraft").size(26.0).color(tokens.text));
+                    ui.label(RichText::new("Nook").size(26.0).color(tokens.text));
                     ui.label(
                         RichText::new("Database administration for SQLite, PostgreSQL and MySQL — native, one command registry behind the UI, the CLI, the control channel and MCP.")
                             .size(12.5)

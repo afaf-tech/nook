@@ -1,6 +1,6 @@
 //! Application-level commands: settings, tabs, snippets, help, project files.
 
-use datacraft_core::{Error, Result};
+use nook_core::{Error, Result};
 use serde_json::json;
 
 use crate::sqltext::KeywordCase;
@@ -19,11 +19,11 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("Recent messages, oldest first."),
         CommandSpec::new("app.clearLog", "Clear the message log", "App", clear_log),
         CommandSpec::new("app.help", "Command help", "Help", help).params(r#"{"id":"sql.run"}"#),
-        CommandSpec::new("app.about", "About DataCraft", "Help", about),
+        CommandSpec::new("app.about", "About Nook", "Help", about),
         CommandSpec::new("app.platform", "Platform information", "Help", platform)
             .help("Build target, UI toolkit and where the configuration lives."),
         CommandSpec::new("app.mcp", "MCP server", "Help", mcp_info)
-            .help("How an agent reaches DataCraft: every command is an MCP tool."),
+            .help("How an agent reaches Nook: every command is an MCP tool."),
         CommandSpec::new("tab.new", "New query tab", "App", new_query_tab)
             .params(r#"{"conn":"local","sql":"select 1"}"#)
             .shortcut("cmd+t"),
@@ -160,7 +160,7 @@ fn help(_session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> 
 
 fn about(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
     Ok(json!({
-        "name": "DataCraft",
+        "name": "Nook",
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Fast, open database administration: SQLite, PostgreSQL and MySQL in one native app.",
         "license": "MIT OR Apache-2.0",
@@ -172,7 +172,7 @@ fn platform(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Va
     Ok(json!({
         "target": format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
         "ui": "egui on the GPU (native window, no Electron, no browser)",
-        "lanes": ["desktop app", "datacraft-cli", "MCP over stdio", "JSON control channel"],
+        "lanes": ["desktop app", "nook-cli", "MCP over stdio", "JSON control channel"],
         "config_dir": crate::profiles::config_dir().to_string_lossy(),
         "profiles_file": crate::profiles::profiles_path().to_string_lossy(),
         "jobs_file": crate::profiles::jobs_path().to_string_lossy(),
@@ -185,7 +185,7 @@ fn mcp_info(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Va
     Ok(json!({
         "transport": "stdio",
         "protocol": "2025-06-18",
-        "entry": "datacraft-cli mcp",
+        "entry": "nook-cli mcp",
         "tools": crate::registry().len(),
         "note": "tool names are command ids, arguments are command parameters",
         "groups": {
