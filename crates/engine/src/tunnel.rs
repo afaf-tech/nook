@@ -136,6 +136,13 @@ impl Tunnel {
                 "the SSH tunnel needs a jump host and a user name",
             ));
         }
+        // `-L` forwards to the profile's own host and port: without them ssh is handed an empty
+        // target (`-L 15432::0`) and answers "Bad local forwarding specification".
+        if cfg.host.trim().is_empty() || cfg.port == 0 {
+            return Err(Error::config(
+                "the SSH tunnel needs the server's host and port to forward to",
+            ));
+        }
         let local_port = if cfg.ssh.local_port == 0 {
             Tunnel::free_port()?
         } else {
@@ -249,6 +256,39 @@ mod tests {
         cfg.ssh = SshTunnel {
             enabled: true,
             host: String::new(),
+            port: 22,
+            user: "ops".into(),
+            key_file: String::new(),
+            local_port: 0,
+        };
+        assert!(Tunnel::start(&cfg, SshSecret::None).is_err());
+    }
+
+    #[test]
+    fn tunnel_refuses_a_profile_with_nothing_to_forward_to() {
+        // A SQLite profile has no host and no port, so `-L <port>::0` is the only thing ssh could be
+        // handed — which it rejects with "Bad local forwarding specification". Say what is missing.
+        let mut cfg = ConnectionConfig::sqlite("/tmp/x.db");
+        cfg.ssh = SshTunnel {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 22,
+            user: "ops".into(),
+            key_file: String::new(),
+            local_port: 0,
+        };
+        let error = Tunnel::start(&cfg, SshSecret::None).expect_err("nothing to forward to");
+        assert!(
+            error.to_string().contains("forward to"),
+            "a clear refusal, not ssh's own: {error}"
+        );
+
+        // The same where only the port is missing.
+        let mut cfg = ConnectionConfig::new("pg", DriverKind::Postgres);
+        cfg.host = "10.0.0.5".into();
+        cfg.ssh = SshTunnel {
+            enabled: true,
+            host: "127.0.0.1".into(),
             port: 22,
             user: "ops".into(),
             key_file: String::new(),
