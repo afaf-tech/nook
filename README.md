@@ -36,7 +36,7 @@ registered command shared by all three surfaces.
 ## Install and build
 
 ```sh
-git clone <repo-url> && cd nook
+git clone https://github.com/kasfulk/nook.git && cd nook
 cargo build --release -p nook -p nook-cli
 ```
 
