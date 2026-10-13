@@ -40,7 +40,7 @@ impl Postgres {
     fn simple(&mut self, sql: &str) -> Result<Vec<SimpleQueryMessage>> {
         self.client
             .simple_query(sql)
-            .map_err(|e| Error::query(describe(&e)))
+            .map_err(|e| Error::query(describe(&e, None)))
     }
 
     /// Column names and server types for a statement. Prepared but never executed: this is how the
@@ -115,7 +115,7 @@ fn connect(cfg: &ConnectionConfig) -> Result<Client> {
     if cfg.ssl == nook_core::SslMode::Disable {
         return pc
             .connect(NoTls)
-            .map_err(|e| Error::connect(format!("{target}: {}", describe(&e))));
+            .map_err(|e| Error::connect(format!("{target}: {}", describe(&e, Some(cfg)))));
     }
     let verify = matches!(
         cfg.ssl,
@@ -127,17 +127,27 @@ fn connect(cfg: &ConnectionConfig) -> Result<Client> {
         .build()
         .map_err(|e| Error::config(format!("tls: {e}")))?;
     pc.connect(MakeTlsConnector::new(builder))
-        .map_err(|e| Error::connect(format!("{target}: {}", describe(&e))))
+        .map_err(|e| Error::connect(format!("{target}: {}", describe(&e, Some(cfg)))))
 }
 
 /// The sentence to show for a failed connect. tokio-postgres's `Display` prints the error's *kind*
-/// alone, so the server's own answer to a rejected login arrives as the bare "db error"; its `DbError`
-/// carries the sentence the user needs ("password authentication failed for user \"postgres\"").
-fn describe(error: &postgres::Error) -> String {
-    match error.as_db_error() {
-        Some(db) => db.to_string(),
-        None => error.to_string(),
+/// alone, so the server's own answer to a rejected login arrives as the bare "db error", and its
+/// "password missing" — raised when the server asks and the config carries none — arrives as the bare
+/// "invalid configuration". Both leave the user with nothing to act on.
+fn describe(error: &postgres::Error, cfg: Option<&ConnectionConfig>) -> String {
+    if let Some(db) = error.as_db_error() {
+        return db.to_string();
     }
+    let text = error.to_string();
+    // On a connect, host, port and user are always set, which leaves "password missing" as the one
+    // `Kind::Config` failure there is — and `Kind::Config`'s own message never reaches `Display`. If
+    // the wording ever changes, the raw text is what the user reads: no worse than before.
+    if text == "invalid configuration" && cfg.is_some_and(|cfg| cfg.password.is_none()) {
+        return "no password: this profile carries none and the server asked for one — type it in \
+                Password and save, so the keychain keeps it"
+            .to_string();
+    }
+    text
 }
 
 fn parse_value(raw: Option<&str>, ty: &Type) -> Value {
