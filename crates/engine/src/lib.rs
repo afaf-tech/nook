@@ -607,13 +607,6 @@ impl Session {
         {
             settings.density = density;
         }
-        // The AI settings are one nested object, so a field added in a later version does not
-        // invalidate a blob an older run wrote — `serde` defaults fill the gaps.
-        if let Some(ai) = profiles.settings().get("ai") {
-            if let Ok(cfg) = serde_json::from_value::<nook_ai::AiConfig>(ai.clone()) {
-                settings.ai = cfg;
-            }
-        }
         let mut session = Session {
             conns: Vec::new(),
             active_conn: None,
@@ -628,6 +621,21 @@ impl Session {
             next_tab_id: 1,
             home,
         };
+        // The AI settings are one nested object, so a field added in a later version does not
+        // invalidate a blob an older run wrote — `serde` defaults fill the gaps. A blob that cannot
+        // be read at all is said out loud: the settings in it are the user's, and silently running on
+        // the defaults would look like the app forgetting them.
+        if let Some(ai) = session.profiles.settings().get("ai").cloned() {
+            match serde_json::from_value::<nook_ai::AiConfig>(ai) {
+                Ok(cfg) => session.settings.ai = cfg,
+                Err(e) => session.log(
+                    Level::Warn,
+                    format!(
+                        "the saved AI settings could not be read, so the defaults are in use: {e}"
+                    ),
+                ),
+            }
+        }
         session.log(Level::Info, "Nook ready");
         session
     }
@@ -962,6 +970,47 @@ mod tests {
         let mut s = Session::new();
         let e = s.run("does.not.exist", json!({}));
         assert!(e.is_err());
+    }
+
+    #[test]
+    fn a_settings_file_that_names_a_provider_the_way_a_person_would_still_loads() {
+        let _guard = test_support::scratch_config();
+        let file = profiles::config_dir().join("profiles.json");
+        let written = json!({
+            "version": 1,
+            "profiles": [],
+            "settings": {"ai": {"provider": "moonshot", "model": "moonshot-v1-8k"}}
+        });
+        std::fs::write(&file, written.to_string()).expect("write the settings file");
+
+        let session = Session::new();
+        assert_eq!(session.settings.ai.provider, nook_ai::Provider::Kimi);
+        assert_eq!(session.settings.ai.model, "moonshot-v1-8k");
+    }
+
+    #[test]
+    fn an_ai_blob_that_cannot_be_read_is_said_out_loud() {
+        let _guard = test_support::scratch_config();
+        let file = profiles::config_dir().join("profiles.json");
+        let written = json!({
+            "version": 1,
+            "profiles": [],
+            "settings": {"ai": {"provider": "opemai"}}
+        });
+        std::fs::write(&file, written.to_string()).expect("write the settings file");
+
+        // The defaults stand in, but running on them silently would look like the app forgot the
+        // settings rather than like the file naming a provider that does not exist.
+        let session = Session::new();
+        assert_eq!(session.settings.ai.provider, nook_ai::Provider::OpenAi);
+        assert!(
+            session
+                .messages
+                .iter()
+                .any(|m| m.level == Level::Warn && m.text.contains("AI settings")),
+            "the file named a provider that does not exist, and nothing was said: {:?}",
+            session.messages
+        );
     }
 
     #[test]

@@ -510,6 +510,8 @@ exit {status}
         let previous = std::env::var("NOOK_CURL_BIN").ok();
         std::env::set_var("NOOK_CURL_BIN", &script);
         f(&dir);
+        // The scratch holds the prompt and the key in clear text, so it does not outlive the test.
+        let _ = std::fs::remove_dir_all(&dir);
         match previous {
             Some(value) => std::env::set_var("NOOK_CURL_BIN", value),
             None => std::env::remove_var("NOOK_CURL_BIN"),

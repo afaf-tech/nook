@@ -16,7 +16,7 @@ pub enum Wire {
 }
 
 /// The providers this build knows how to talk to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     OpenAi,
@@ -26,6 +26,21 @@ pub enum Provider {
     Glm,
     Ollama,
     Vllm,
+}
+
+/// Reading goes through [`Provider::parse`], so a settings file that names a provider the way a
+/// person would — `moonshot`, `z.ai`, `Claude` — loads as the provider it means instead of failing
+/// and taking the rest of the blob's settings down with it. Writing stays the canonical id.
+impl<'de> Deserialize<'de> for Provider {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Provider, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Provider::parse(&name).ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom(format!("unknown AI provider '{name}'"))
+        })
+    }
 }
 
 impl Provider {
@@ -188,5 +203,19 @@ mod tests {
         assert_eq!(json, "\"vllm\"");
         let back: Provider = serde_json::from_str("\"openai\"").expect("deserialise");
         assert_eq!(back, Provider::OpenAi);
+    }
+
+    #[test]
+    fn serde_reads_a_name_a_person_would_write() {
+        // A settings file is hand-editable, so reading is as forgiving as the settings command.
+        for (name, expected) in [
+            ("\"moonshot\"", Provider::Kimi),
+            ("\"z.ai\"", Provider::Glm),
+            ("\"Claude\"", Provider::Anthropic),
+        ] {
+            let read: Provider = serde_json::from_str(name).expect("deserialise");
+            assert_eq!(read, expected, "{name}");
+        }
+        assert!(serde_json::from_str::<Provider>("\"opemai\"").is_err());
     }
 }
