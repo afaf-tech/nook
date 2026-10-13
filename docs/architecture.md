@@ -138,3 +138,12 @@ implementations:
   sites that render a real grid decide per frame (`grid.rs`, `editor.rs`); `views::list` pins
   `theme::ROW_H`. The design demonstrates comfortable rows on its grid register, so the lists keep the
   compact measure until an explore register asks otherwise — then `list` takes a row height too.
+- **The explore preview is a page, not a pager.** `datacraft_engine::cmd::preview_table` runs the same
+  `page_select` the grid does, without a history entry and without registering a command of its own, so
+  `cargo xtask parity` stays honest. `ponytail:` there is no control-protocol surface for it and no
+  second page; add a command and an offset argument when the preview needs to scroll past
+  `PREVIEW_ROWS`.
+- **The inspector's Foreign-keys tab states the outgoing half only.** Listing what references a table
+  needs a scan no command performs, so the model paints the `Outgoing` group and, when it is empty,
+  the design's sentence rather than a second group it cannot fill. `ponytail:` add a
+  `schema.scanReferences` command and a second `Group` when the incoming half is worth a round trip.
