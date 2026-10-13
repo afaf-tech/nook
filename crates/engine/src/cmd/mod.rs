@@ -22,6 +22,17 @@ pub fn open_now(session: &mut Session, index: usize) -> Result<()> {
     open_conn(session, index)
 }
 
+/// The config a driver dials with: the profile's own, plus the password the keychain holds for it.
+/// Both dial sites — `open_conn` here and `conn.test` in the editor — go through this, so a profile
+/// whose password was saved cannot reach a driver without it.
+pub(crate) fn dial_config(
+    cfg: &nook_core::ConnectionConfig,
+) -> Result<nook_core::ConnectionConfig> {
+    let mut effective = cfg.clone();
+    effective.password = crate::profiles::db_password(cfg)?;
+    Ok(effective)
+}
+
 /// Open a connection: tunnel if asked, connect, read server info, fetch the catalog.
 pub(crate) fn open_conn(session: &mut Session, index: usize) -> Result<()> {
     let cfg = session
@@ -44,7 +55,7 @@ pub(crate) fn open_conn(session: &mut Session, index: usize) -> Result<()> {
         return Err(Error::unsupported(message));
     }
 
-    let mut effective = cfg.clone();
+    let mut effective = dial_config(&cfg)?;
     let mut tunnel = None;
     if cfg.ssh.enabled {
         let t = Tunnel::start(&cfg, SshSecret::for_connection(&cfg.id))?;

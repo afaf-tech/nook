@@ -273,6 +273,17 @@ pub fn keychain_lookup(id: &str) -> Result<Option<String>> {
     Ok(Some(secret))
 }
 
+/// The database password a dial should use. `conn.new` puts a typed password in the login keychain and
+/// clears it from the profile (under the bare id, where `ssh_account` cannot reach it), so the profile
+/// alone is not the whole answer and every dial asks here: the profile's own password when it has one,
+/// the keychain's copy when it does not, nothing when there is no keychain to ask.
+pub fn db_password(cfg: &ConnectionConfig) -> Result<Option<String>> {
+    if cfg.password.is_some() {
+        return Ok(cfg.password.clone());
+    }
+    keychain_lookup(&cfg.id)
+}
+
 pub fn keychain_delete(id: &str) -> Result<()> {
     if !keychain_available() {
         return Ok(());
@@ -325,6 +336,35 @@ mod tests {
     fn config_dir_is_under_the_home_directory() {
         let dir = config_dir();
         assert!(dir.to_string_lossy().contains("Nook") || dir.to_string_lossy().contains("nook"));
+    }
+
+    #[test]
+    fn a_dial_finds_the_password_the_keychain_holds() {
+        // The state `conn.new` leaves behind: the profile has no password, the login keychain holds it.
+        let (_guard, log) = crate::test_support::fake_security("local", "hunter2");
+        let mut cfg = ConnectionConfig::new("local", nook_core::DriverKind::Postgres);
+        cfg.password = None;
+        assert_eq!(
+            db_password(&cfg).expect("resolve").as_deref(),
+            Some("hunter2"),
+            "the keychain's copy stands in for a profile that has none"
+        );
+
+        // A profile that carries its own password needs no keychain call at all.
+        let before = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        cfg.password = Some("from-the-profile".into());
+        assert_eq!(
+            db_password(&cfg).expect("resolve").as_deref(),
+            Some("from-the-profile")
+        );
+        let after = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(after, before, "no lookup for a profile that has its own");
     }
 
     #[test]

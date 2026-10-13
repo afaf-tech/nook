@@ -284,7 +284,7 @@ fn test(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     let cfg = session.conns[index].cfg.clone();
     let mut probe = crate::Conn::new(cfg.clone());
     let started = std::time::Instant::now();
-    let mut effective = cfg.clone();
+    let mut effective = super::dial_config(&cfg)?;
     let mut tunnel = None;
     if cfg.ssh.enabled {
         let t = crate::Tunnel::start(&cfg, SshSecret::for_connection(&cfg.id))?;
