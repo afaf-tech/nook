@@ -1,24 +1,26 @@
 # Nook architecture
 
-> **Last reviewed:** 2026-10-12 · **Target:** Navicat Premium 17 workflows
+> **Last reviewed:** 2026-10-13 · **Target:** Navicat Premium 17 workflows
 
 How Nook is built today. The conventions for working in the code are in
 [`conventions.md`](conventions.md).
 
 ## Layers
 
-~25,500 lines of Rust in 6 crates, 2 apps and `xtask`. `cargo xtask layers` enforces the ordering:
-a crate may only depend on crates below it, and nothing below L5 depends on egui.
+~42,400 lines of Rust in 7 crates, 2 apps and `xtask` (counted with `wc -l` over every `.rs` under
+each tree, tests included). `cargo xtask layers` enforces the ordering: a crate may only depend on
+crates below it, and nothing below L5 depends on egui.
 
 | Layer | Crate | Lines | Job |
 |---|---|---|---|
-| L0 | `nook-core` | 1.0k | `Error`/`Result`, `Value` (the one cell type), `ConnectionConfig` with SSH and SSL settings, dialect quoting and literals, `returns_rows` |
+| L0 | `nook-core` | 1.1k | `Error`/`Result`, `Value` (the one cell type), `ConnectionConfig` with SSH and SSL settings, dialect quoting and literals, `returns_rows` |
 | L1 | `nook-model` | 1.8k | `Catalog`, `Schema`, `Table`, `Column`, `Index`, `ForeignKey`, `DbProcess`, `DbUser`, `ServerInfo`, `ResultSet`; grid edit plans; DDL for all three dialects; structure diff; ER layout |
+| L2 | `nook-ai` | 1.1k | chat client for the 7 providers over two wire formats, endpoint normalisation, API keys, and the `@table` prompt context |
 | L2 | `nook-drivers` | 3.8k | `Driver` trait + `sqlite`, `pg`, `mysql`; statement splitter; data transfer; row-level sync; `.sql` dump; backup and restore through the vendor tools |
-| L3 | `nook-engine` | 10.1k | `Session` (connections, tabs, grid buffer, history, messages), 140 commands in `cmd/*.rs`, the Navicat feature catalog, parity measurement, jobs and the scheduler, data generation, reports, profiles and the keychain, the SSH tunnel |
+| L3 | `nook-engine` | 12.6k | `Session` (connections, tabs, grid buffer, history, messages), 146 commands in `cmd/*.rs`, the Navicat feature catalog, parity measurement, jobs and the scheduler, data generation, reports, profiles and the keychain, the SSH tunnel |
 | L4 | `nook-mcp` | 0.3k | MCP server over stdio: every command is a tool, connections open on demand |
-| L5 | `nook-ui` | 6.9k | egui front end: design tokens, table widget, app shell, sidebar, grid, editor, designer, diagram, charts, monitor, jobs, dialogs, control channel, `--shot` |
-| apps | `nook`, `nook-cli` | 1.3k | desktop binary and the command line |
+| L5 | `nook-ui` | 20.0k | egui front end: design tokens, table widget, app shell, sidebar, grid, editor, designer, diagram, charts, monitor, jobs, dialogs, control channel, `--shot` |
+| apps | `nook`, `nook-cli` | 1.6k | desktop binary and the command line |
 
 ## Data flow
 
@@ -85,12 +87,34 @@ implementations:
   catalog, `SHOW CREATE TABLE` gives DDL, and the MySQL-specific boolean and date shapes are mapped in
   one function.
 
+## AI
+
+`nook-ai` is provider-agnostic. The seven providers are one row of data each
+(`crates/ai/src/provider.rs`), and there are two wire formats: the OpenAI one
+(`{base}/chat/completions`, `Authorization: Bearer`) carries OpenAI, DeepSeek, Kimi, GLM, Ollama and
+vLLM, and Anthropic's (`{base}/messages`, `x-api-key` plus `anthropic-version`) carries Claude. A
+provider's base URL is a setting, so a gateway, a proxy or a local server is a change of address
+rather than a change of code. `ai.generate` resolves every `@table` mention against the live catalog
+into that table's columns, types, keys and indexes, names the active connection's dialect, and sends
+one system turn plus the user's sentence.
+
+Transport is the system `curl` as a child process: the workspace has no HTTP client and this phase
+adds none. The request body arrives on `stdin` and the headers, including the key, come from a config
+file written mode `0600` and removed once the child exits, so no secret reaches `argv`. The ceiling
+and the measurements behind that choice are recorded on `crates/ai/src/client.rs`.
+
+**Ceiling: a stored key is the `security` child's own argument.** `keychain_store` hands the secret to
+`security add-generic-password -w <secret>`; while that child lives, the same user can read it from the
+process table. This is the pre-existing path for SSH and database passwords too, and the door out (a
+`setsid` between fork and exec) needs `unsafe` or a detach crate, both outside this phase's scope.
+
 ## Testing
 
-- 294 `#[test]` functions across the workspace, 104 of them in the UI crate: quoting and literals,
+- 331 `#[test]` functions across the workspace, 104 of them in the UI crate: quoting and literals,
   catalog types, DDL per dialect, structure diff, ER layout, statement splitting, edit planning, data
-  generation determinism, report shaping, schedules, profiles, MCP JSON-RPC, and every command against
-  junk parameters (`commands_run_with_junk_parameters_never_panic`).
+  generation determinism, report shaping, schedules, profiles, MCP JSON-RPC, the AI wire formats and
+  prompt building, and every command against junk parameters
+  (`commands_run_with_junk_parameters_never_panic`).
 - Live checks that need a server are run with the CLI rather than in the unit suite, because they
   mutate databases:
   - PostgreSQL 17: `nook-cli tables|sql|describe|ddl|monitor|users`, transfer SQLite → PostgreSQL,
