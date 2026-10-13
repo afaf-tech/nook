@@ -63,7 +63,24 @@ pub(crate) fn generate_with(
     let cfg = session.settings.ai.clone();
     cfg.validate()?;
 
-    let conn = session.resolve_conn(p).ok();
+    // A caller that names a connection gets that connection or an error. Silently drafting
+    // MySQL-shaped SQL in the SQLite dialect because a name was mistyped, or because the connection
+    // was never opened, is worse than refusing: the dialect is the whole reason to pass `conn`. With
+    // no name the session decides, which is the active connection when there is one.
+    let conn = match p.conn_id() {
+        Some(id) => {
+            let index = session.conn_index(&id)?;
+            match session.conns.get(index).map(|conn| conn.driver.is_some()) {
+                Some(true) => Some(index),
+                _ => {
+                    return Err(Error::config(format!(
+                        "connection '{id}' is not open; open it first"
+                    )))
+                }
+            }
+        }
+        None => session.resolve_conn(p).ok(),
+    };
     let dialect = match conn {
         Some(index) => connection_dialect(session, index),
         None => Dialect::Sqlite,
@@ -91,12 +108,11 @@ pub(crate) fn generate_with(
                         used.push(table.key());
                     }
                     // A mention that matches nothing is a typo, not a reason to refuse: the request
-                    // still goes, one table lighter, and the log says which one was dropped.
-                    Err(_) => session.log(
+                    // still goes, one table lighter, and the log says which one was dropped and why
+                    // — `no such table`, or the catalog has not been read yet.
+                    Err(e) => session.log(
                         Level::Warn,
-                        format!(
-                            "ai: no table '{name}' in this catalog; the prompt goes without it"
-                        ),
+                        format!("ai: '{name}' was not added to the prompt: {e}"),
                     ),
                 }
             }
@@ -108,7 +124,7 @@ pub(crate) fn generate_with(
         None => {}
     }
 
-    let key = crate::profiles::ai_key(cfg.provider.as_str())?;
+    let key = crate::profiles::ai_key(cfg.provider)?;
     if cfg.provider.needs_key() && key.as_deref().unwrap_or("").trim().is_empty() {
         return Err(Error::config(format!(
             "no API key for {}; run ai.setKey, or set NOOK_AI_KEY for the run",
@@ -155,7 +171,7 @@ fn providers(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let mut list = Vec::new();
     for provider in nook_ai::Provider::ALL {
         let key_set = matches!(
-            crate::profiles::ai_key(provider.as_str()),
+            crate::profiles::ai_key(provider),
             Ok(Some(key)) if !key.trim().is_empty()
         );
         list.push(json!({
@@ -414,6 +430,34 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.level == Level::Warn && m.text.contains("ghost")));
+    }
+
+    #[test]
+    fn a_named_connection_that_does_not_exist_or_is_not_open_is_refused() {
+        let (_guard, mut session) = session_with_tables();
+        let client = Scripted::new("SELECT 1;");
+
+        // A mistyped name used to fall through to "no connection is open" and draft SQLite SQL.
+        let missing = generate_with(
+            &mut session,
+            &params(json!({"conn": "nope", "prompt": "count rows in @users"})),
+            &client,
+        )
+        .expect_err("an unknown connection is an error");
+        assert!(missing.to_string().contains("nope"), "{missing}");
+        assert_eq!(client.captured().0, "", "nothing was sent");
+
+        // A connection that exists but was never opened has no dialect to read, so the request is
+        // refused rather than guessed at in SQLite.
+        session.conns[0].driver = None;
+        let closed = generate_with(
+            &mut session,
+            &params(json!({"conn": "local", "prompt": "count rows in @users"})),
+            &client,
+        )
+        .expect_err("a closed connection is an error");
+        assert!(closed.to_string().contains("not open"), "{closed}");
+        assert_eq!(client.captured().0, "", "nothing was sent");
     }
 
     #[test]

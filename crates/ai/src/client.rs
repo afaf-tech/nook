@@ -152,18 +152,36 @@ pub fn run_curl(bin: &str, args: &[String], stdin_body: &str) -> Result<Output> 
 }
 
 /// A config file the current user alone can read, removed by the caller.
+///
+/// The mode is set when the file is **created**, not after: between a create and a later `chmod` the
+/// key inside is readable at whatever the umask allows, and a `chmod` that failed would return before
+/// the caller's `remove_file` ever ran, leaving the key on disk. `create_new` refuses a path that
+/// already exists, so a leftover from a killed run — or a symlink someone planted in a shared `/tmp`
+/// — is never followed and never overwritten; a fresh name is taken instead.
 fn write_rc(text: &str) -> Result<PathBuf> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("nook-ai-{}-{n}.rc", std::process::id()));
-    std::fs::write(&path, text).map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| Error::io(format!("chmod {}: {e}", path.display())))?;
+    for _ in 0..8 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("nook-ai-{}-{n}.rc", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(text.as_bytes()) {
+                    return Err(Error::io(format!("write {}: {e}", path.display())));
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(Error::io(format!("open {}: {e}", path.display()))),
+        }
     }
-    Ok(path)
+    Err(Error::io("no free temporary file name for the curl config"))
 }
 
 /// The arguments `curl` is run with. The body arrives on stdin and the headers come from the config
@@ -438,5 +456,120 @@ mod tests {
                 .any(|a| a.contains("Bearer") || a.contains("sk-") || a.contains("api-key")),
             "{args:?}"
         );
+    }
+
+    /// A fake `curl` in a scratch directory: it records its own arguments, a copy of the config file
+    /// it was handed, that file's mode and path, and its standard input, then answers `reply` on
+    /// stdout and exits `status`. The keychain tests use the same trick — a script where the real
+    /// binary would be — because the transport is what carries the key and nothing else can watch it.
+    fn fake_curl(dir: &Path, reply: &str, status: u8) -> PathBuf {
+        let script = dir.join("curl");
+        let text = format!(
+            r#"#!/bin/sh
+dir="{dir}"
+rc=""
+previous=""
+for argument in "$@"; do
+  case "$previous" in -K) rc="$argument" ;; esac
+  printf '%s\n' "$argument" >> "$dir/argv.log"
+  previous="$argument"
+done
+if [ -n "$rc" ]; then
+  cp "$rc" "$dir/rc.copy"
+  printf '%s' "$rc" > "$dir/rc.path"
+  {{ stat -c %a "$rc" 2>/dev/null || stat -f %Lp "$rc"; }} > "$dir/rc.mode"
+fi
+cat > "$dir/body.copy"
+if [ {status} -ne 0 ]; then
+  printf '%s\n' "curl: ({status}) the fake failed" >&2
+fi
+printf '%s' '{reply}'
+exit {status}
+"#,
+            dir = dir.display(),
+        );
+        std::fs::write(&script, text).expect("write the fake curl");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("make the fake curl executable");
+        }
+        script
+    }
+
+    /// Run `f` with the fake in place of `curl`, and hand it the directory to read. `NOOK_CURL_BIN` is
+    /// process-wide, so the lock is held for as long as `f` runs and the tests here do not overlap.
+    fn with_fake_curl(reply: &str, status: u8, f: impl FnOnce(&Path)) {
+        static CURL_BIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = CURL_BIN.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("nook-ai-transport-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let script = fake_curl(&dir, reply, status);
+        let previous = std::env::var("NOOK_CURL_BIN").ok();
+        std::env::set_var("NOOK_CURL_BIN", &script);
+        f(&dir);
+        match previous {
+            Some(value) => std::env::set_var("NOOK_CURL_BIN", value),
+            None => std::env::remove_var("NOOK_CURL_BIN"),
+        }
+        drop(guard);
+    }
+
+    fn read(dir: &Path, name: &str) -> String {
+        std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    #[test]
+    fn the_transport_puts_the_body_on_stdin_and_the_key_in_a_file_only_its_owner_can_read() {
+        let reply = r#"{"choices":[{"message":{"content":"SELECT 42;"}}]}"#;
+        with_fake_curl(reply, 0, |dir| {
+            let answer = chat_via_curl(
+                &cfg(Provider::OpenAi),
+                Some("sk-transport"),
+                "SYSTEM TURN",
+                "USER TURN",
+            )
+            .expect("the fake answered with SQL");
+
+            // The answer came off the wire and was parsed the way the provider writes it.
+            assert_eq!(answer, "SELECT 42;");
+
+            // The prompt rides on stdin, so it is in no argument either.
+            let body = read(dir, "body.copy");
+            assert!(body.contains("SYSTEM TURN"), "{body}");
+            assert!(body.contains("USER TURN"), "{body}");
+
+            // The key is in the config file, and in no argument.
+            let argv = read(dir, "argv.log");
+            assert!(!argv.contains("sk-transport"), "{argv}");
+            let rc = read(dir, "rc.copy");
+            assert!(rc.contains("Bearer sk-transport"), "{rc}");
+
+            // Created 0600, so there is no window in which the key is readable by anyone else.
+            #[cfg(unix)]
+            assert_eq!(read(dir, "rc.mode").trim(), "600");
+
+            // And the file holding the key is gone once the child is done with it.
+            let path = read(dir, "rc.path");
+            assert!(!Path::new(path.trim()).exists(), "left behind: {path}");
+        });
+    }
+
+    #[test]
+    fn a_failing_curl_is_an_error_and_still_takes_the_file_with_the_key_with_it() {
+        with_fake_curl("", 7, |dir| {
+            let error = chat_via_curl(&cfg(Provider::OpenAi), Some("sk-transport"), "sys", "user")
+                .expect_err("a non-zero exit is an error");
+            assert!(error.to_string().contains("(7)"), "{error}");
+            assert!(error.to_string().contains("OpenAI"), "{error}");
+
+            let path = read(dir, "rc.path");
+            assert!(
+                !Path::new(path.trim()).exists(),
+                "the key file outlived the failed call: {path}"
+            );
+        });
     }
 }

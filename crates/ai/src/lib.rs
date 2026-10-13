@@ -6,7 +6,7 @@
     clippy::todo,
     clippy::unreachable
 )]
-//! L1: drafting SQL with an AI provider.
+//! L2: drafting SQL with an AI provider.
 //!
 //! The crate is small on purpose. A provider is a row of data (`provider.rs`), the request shape is
 //! one function per wire format (`client.rs`), and turning a sentence plus a table's structure into

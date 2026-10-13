@@ -10,6 +10,11 @@ use nook_model::Table;
 /// live catalog. Something that merely looks like a mention — `me@example.com` in a sentence — is
 /// dropped when no such table exists, and a name that only matches part of a word (`@users_backup`
 /// next to a `users` table) is not silently truncated to fit.
+///
+/// ponytail: a name is read as a plain identifier, so a table whose name carries a dot or a space
+/// cannot be mentioned — `@a.b` resolves as schema `a`, table `b`, and `@"odd name"` stops at the
+/// quote. Quoted-identifier support, the same way `TableRef` reads a name everywhere else, is the
+/// upgrade.
 pub fn mentioned(prompt: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut chars = prompt.chars().peekable();

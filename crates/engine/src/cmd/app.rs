@@ -62,7 +62,7 @@ fn get_settings(session: &mut Session, _p: &crate::Params) -> Result<serde_json:
             "max_tokens": s.ai.max_tokens,
             "temperature": s.ai.temperature,
             "timeout_secs": s.ai.timeout_secs,
-            "key_set": matches!(crate::profiles::ai_key(s.ai.provider.as_str()), Ok(Some(_))),
+            "key_set": matches!(crate::profiles::ai_key(s.ai.provider), Ok(Some(_))),
         },
         "config_dir": crate::profiles::config_dir().to_string_lossy(),
         "profiles": session.profiles.list().len(),

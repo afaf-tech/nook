@@ -187,22 +187,31 @@ pub const NO_KEYCHAIN_AI: &str =
     "this system has no OS keychain, so the AI key cannot be saved; set NOOK_AI_KEY in the \
 environment for the run instead";
 
-/// The key for a provider: `NOOK_AI_KEY` first, then the login keychain.
+/// The key a request carries: `NOOK_AI_KEY` for a provider that needs one, else whatever the keychain
+/// holds for that provider.
 ///
-/// The environment comes first on purpose — it is the only source on a platform with no keychain,
-/// and it is how a key stays out of every file for a single run. `None` means there is no key,
-/// which is a normal state for a local server and a refusal for a hosted one.
-pub fn ai_key(provider: &str) -> Result<Option<String>> {
-    if let Some(key) = std::env::var("NOOK_AI_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-    {
-        return Ok(Some(key));
+/// The environment comes first on purpose — it is the only source on a platform with no keychain, and
+/// it is how a key stays out of every file for a single run. But it names no provider, so it is read
+/// only for a provider that expects a key: exporting it to draft with OpenAI must not then put that
+/// key on the wire to a local Ollama, or to whichever host `ai.base_url` points at. A provider that
+/// needs no key can still be given one — `ai.setKey ollama`, for a vLLM behind an API key — and that
+/// one is per provider, so it is sent.
+///
+/// `None` means there is no key, which is a normal state for a local server and a refusal for a
+/// hosted one.
+pub fn ai_key(provider: nook_ai::Provider) -> Result<Option<String>> {
+    if provider.needs_key() {
+        if let Some(key) = std::env::var("NOOK_AI_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+        {
+            return Ok(Some(key));
+        }
     }
     if !keychain_available() {
         return Ok(None);
     }
-    keychain_lookup(&ai_account(provider))
+    keychain_lookup(&ai_account(provider.as_str()))
 }
 
 pub fn save_ai_key(provider: &str, key: &str) -> Result<()> {
