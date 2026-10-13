@@ -383,6 +383,32 @@ impl GridState {
     pub fn dirty(&self) -> bool {
         !self.pending.is_empty()
     }
+
+    /// True when `cmd::grid::edit_cell` would accept an edit: it refuses through `pk_values` an unbound or keyless table, so the UI must offer nothing the engine rejects.
+    pub fn editable(&self) -> bool {
+        self.error.is_none()
+            && self.table.is_some()
+            && !self.columns.is_empty()
+            && !self.primary_key.is_empty()
+    }
+
+    /// Active filter clauses. `filter` holds one raw `WHERE` clause (`grid.filter`), so this counts 0 or 1.
+    pub fn filter_count(&self) -> usize {
+        usize::from(!self.filter.trim().is_empty())
+    }
+
+    /// Pending edits as (inserts, updates, deletes), so the UI prints `+n / ●n / −n` without re-deriving the kinds.
+    pub fn pending_counts(&self) -> (usize, usize, usize) {
+        let mut counts = (0, 0, 0);
+        for edit in &self.pending {
+            match edit.kind {
+                datacraft_model::EditKind::InsertRow => counts.0 += 1,
+                datacraft_model::EditKind::SetCell => counts.1 += 1,
+                datacraft_model::EditKind::DeleteRow => counts.2 += 1,
+            }
+        }
+        counts
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -908,5 +934,84 @@ mod tests {
         ids.dedup();
         assert_eq!(before, ids.len(), "duplicate command ids in the registry");
         assert!(before > 80, "expected a real command surface, got {before}");
+    }
+
+    /// A grid the engine would accept a cell edit for: bound to a table, with a key column.
+    fn editable_grid() -> GridState {
+        GridState {
+            table: Some(TableRef::parse("users")),
+            columns: vec![datacraft_model::Column {
+                name: "id".into(),
+                ..Default::default()
+            }],
+            primary_key: vec!["id".into()],
+            ..GridState::default()
+        }
+    }
+
+    fn pending(kind: datacraft_model::EditKind) -> PendingEdit {
+        PendingEdit {
+            kind,
+            row: 0,
+            column: String::new(),
+            value: Value::Null,
+            sql: String::new(),
+        }
+    }
+
+    #[test]
+    fn editable_follows_the_primary_key() {
+        let mut grid = editable_grid();
+        assert!(grid.editable());
+        grid.primary_key.clear();
+        assert!(!grid.editable());
+    }
+
+    #[test]
+    fn editable_is_false_when_the_page_failed_or_is_unusable() {
+        let mut grid = editable_grid();
+        grid.error = Some("connection reset".into());
+        assert!(!grid.editable());
+        let mut grid = editable_grid();
+        grid.columns.clear();
+        assert!(!grid.editable());
+        let mut grid = editable_grid();
+        grid.table = None;
+        assert!(!grid.editable());
+    }
+
+    #[test]
+    fn pending_counts_start_empty_and_tally_each_kind() {
+        let mut grid = GridState::default();
+        assert_eq!(grid.pending_counts(), (0, 0, 0));
+        grid.pending
+            .push(pending(datacraft_model::EditKind::InsertRow));
+        grid.pending
+            .push(pending(datacraft_model::EditKind::SetCell));
+        grid.pending
+            .push(pending(datacraft_model::EditKind::DeleteRow));
+        assert_eq!(grid.pending_counts(), (1, 1, 1));
+    }
+
+    #[test]
+    fn pending_counts_tally_a_mixed_buffer() {
+        let mut grid = GridState::default();
+        grid.pending
+            .push(pending(datacraft_model::EditKind::SetCell));
+        grid.pending
+            .push(pending(datacraft_model::EditKind::SetCell));
+        grid.pending
+            .push(pending(datacraft_model::EditKind::DeleteRow));
+        assert_eq!(grid.pending_counts(), (0, 2, 1));
+    }
+
+    #[test]
+    fn filter_count_is_zero_or_one() {
+        let mut grid = GridState::default();
+        assert_eq!(grid.filter_count(), 0);
+        grid.filter = "status = 'live'".into();
+        assert_eq!(grid.filter_count(), 1);
+        grid.filter = "   ".into();
+        assert_eq!(grid.filter_count(), 0);
     }
 }

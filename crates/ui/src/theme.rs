@@ -56,6 +56,16 @@ pub const INSPECTOR_W: f32 = 320.0;
 pub const PANE_HEAD_H: f32 = 132.0;
 pub const INDENT_STEP: f32 = 14.0;
 pub const INDICATOR_W: f32 = 2.0;
+
+/// The grid's own band heights. `.fchips` is 32 — the design's 18px chip with 7px of air above and
+/// below — and `.stalestrip` is the status bar's 26. `.pkbadge` and `.taglite` are 16px boxes.
+pub const FCHIP_H: f32 = 18.0;
+const FCHIP_AIR: f32 = 7.0;
+pub const FCHIPS_H: f32 = FCHIP_H + 2.0 * FCHIP_AIR;
+pub const STALE_STRIP_H: f32 = STATUS_H;
+pub const MICRO_TAG_H: f32 = 16.0;
+/// `.errband` and `.robanner` keep 10px of air above and below their two lines.
+pub const NOTICE_PAD_V: f32 = 10.0;
 /// Activity rail: a 44px column of 32px workspace buttons.
 pub const RAIL_W: f32 = 44.0;
 pub const RAIL_BUTTON: f32 = 32.0;
@@ -968,6 +978,332 @@ pub fn state_chip(
     response
 }
 
+/// Measure one line of `text`, so a band can reserve room before it paints.
+fn measured(ui: &Ui, font: FontId, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER)
+        .size()
+        .x
+}
+
+/// `.fchips` height: an 18px chip with 7px of air above and below, the design's 32.
+pub fn filter_row_h(chip_h: f32) -> f32 {
+    chip_h + 2.0 * FCHIP_AIR
+}
+
+/// One micro tag: the shape `.pkbadge` and `.taglite` share — a 16px box, a pill or 3px radius, a
+/// 1px border and one line of text, sized from its own measurement.
+fn micro_tag(
+    ui: &mut Ui,
+    text: &str,
+    font: FontId,
+    ink: Color32,
+    fill: Color32,
+    border: Color32,
+    radius: u8,
+) -> Response {
+    let width = measured(ui, font.clone(), text) + 2.0 * f32::from(S3) + 2.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, MICRO_TAG_H), Sense::hover());
+    let painter = ui.painter();
+    if fill != Color32::TRANSPARENT {
+        painter.rect_filled(rect, CornerRadius::same(radius), fill);
+    }
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(radius),
+        Stroke::new(1.0, border),
+        StrokeKind::Inside,
+    );
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, font, ink);
+    response
+}
+
+/// `.pkbadge`: the primary-key mark the design puts beside a table's name and in the grid head — a
+/// 16px box, a 3px radius, an `accent_line` border over `accent_soft`, 11px mono ink.
+pub fn pk_badge(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
+    micro_tag(
+        ui,
+        text,
+        tokens.mono(T_XS),
+        tokens.text,
+        tokens.accent_dim,
+        tokens.accent_line,
+        3,
+    )
+}
+
+/// `.taglite`: the design's micro tag for one quiet fact about the grid, e.g. `read-only`.
+pub fn tag_lite(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
+    micro_tag(
+        ui,
+        text,
+        tokens.font(T_XS),
+        tokens.text_dim,
+        Color32::TRANSPARENT,
+        tokens.stroke_strong,
+        R_CHIP,
+    )
+}
+
+/// Height of `.errband` and `.robanner`: 10px of padding above and below a 16px title line and a
+/// 16px message line, 2px apart.
+pub fn notice_band_h() -> f32 {
+    2.0 * NOTICE_PAD_V + 16.0 + f32::from(S1) + 16.0
+}
+
+/// `.errband`: the page that failed to load — an `error_soft` fill, a 1px `--error` bottom border,
+/// the h4, the engine's message in mono, and the caller's actions pinned to the right.
+pub fn error_band(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    title: &str,
+    message: &str,
+    add: impl FnOnce(&mut Ui),
+) -> egui::Rect {
+    notice_band(
+        ui,
+        tokens,
+        tokens.error_fill,
+        tokens.error,
+        tokens.error,
+        title,
+        message,
+        add,
+    )
+}
+
+/// `.robanner`: the same box in `warn_soft`, for the grid that cannot be edited.
+pub fn ro_banner(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    title: &str,
+    text: &str,
+    add: impl FnOnce(&mut Ui),
+) -> egui::Rect {
+    notice_band(
+        ui,
+        tokens,
+        tokens.warn_fill,
+        tokens.warn,
+        tokens.text_dim,
+        title,
+        text,
+        add,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn notice_band(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    fill: Color32,
+    edge: Color32,
+    message_ink: Color32,
+    title: &str,
+    message: &str,
+    add: impl FnOnce(&mut Ui),
+) -> egui::Rect {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, notice_band_h()), Sense::hover());
+    {
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::ZERO, fill);
+        painter.hline(
+            rect.left()..=rect.right(),
+            rect.bottom() - 0.5,
+            Stroke::new(1.0, edge),
+        );
+    }
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + f32::from(S5), rect.top() + NOTICE_PAD_V),
+        egui::pos2(rect.right() - f32::from(S5), rect.bottom() - NOTICE_PAD_V),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+    );
+    child.spacing_mut().item_spacing.y = f32::from(S1);
+    child.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(title).size(T_MD).color(tokens.text));
+            ui.label(
+                RichText::new(message)
+                    .size(T_SM)
+                    .monospace()
+                    .color(message_ink),
+            );
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| add(ui));
+    });
+    rect
+}
+
+/// `.stalestrip`: the 26px `surface-2` row between the error band and the grid, its note on the
+/// left and one mono fact on the right.
+pub fn stale_strip(ui: &mut Ui, tokens: &Tokens, note: &str, fact: &str) -> egui::Rect {
+    let rect = band_fill(
+        ui,
+        STALE_STRIP_H,
+        tokens.panel_alt,
+        S4,
+        egui::Align::Center,
+        |ui| {
+            ui.label(RichText::new(note).size(T_XS).color(tokens.text_dim));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(fact)
+                        .size(T_XS)
+                        .monospace()
+                        .color(tokens.text_dim),
+                );
+            });
+        },
+    );
+    band_hairline(ui, tokens, rect);
+    rect
+}
+
+/// What the `.pend` cluster's buttons asked for this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingAction {
+    Revert,
+    Apply,
+}
+
+/// `.pend`'s sentence: `1 pending`, `3 pending`.
+pub fn pending_sentence(counts: (usize, usize, usize)) -> String {
+    format!("{} pending", pending_total(counts))
+}
+
+/// The staged buffer's size: inserts + updates + deletes.
+pub fn pending_total(counts: (usize, usize, usize)) -> usize {
+    counts.0 + counts.1 + counts.2
+}
+
+/// `.pend`'s counts by kind in the design's order — `+2 ●1 −3` — each kind left out when it is zero.
+pub fn pending_counts_text(counts: (usize, usize, usize)) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if counts.0 > 0 {
+        parts.push(format!("+{}", counts.0));
+    }
+    if counts.1 > 0 {
+        parts.push(format!("●{}", counts.1));
+    }
+    if counts.2 > 0 {
+        parts.push(format!("−{}", counts.2));
+    }
+    parts.join(" ")
+}
+
+/// The cluster's Apply label: `Apply 3`.
+pub fn apply_label(n: usize) -> String {
+    format!("Apply {n}")
+}
+
+/// The drawer footer's Apply label: `Apply 1 change`, `Apply 3 changes`.
+pub fn apply_changes_label(n: usize) -> String {
+    let noun = crate::table::plural(n as u64, "change", "changes");
+    format!("Apply {n} {noun}")
+}
+
+/// `.fchips`' right-hand fact: `1,204 matches`.
+pub fn matches_label(n: u64) -> String {
+    let noun = crate::table::plural(n, "match", "matches");
+    format!("{} {noun}", crate::table::grouped(n))
+}
+
+/// `.pend`: the design's warn-soft cluster pinned to the toolbar's right edge and as tall as the
+/// band it sits in — the counts by kind, Revert and `Apply n`. Returns `None` for an empty buffer:
+/// with nothing staged there is no cluster, which is also what the design draws for its own
+/// `0 pending` states.
+pub fn pending_cluster(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    counts: (usize, usize, usize),
+) -> Option<PendingAction> {
+    let total = pending_total(counts);
+    if total == 0 {
+        return None;
+    }
+    let sentence = pending_sentence(counts);
+    let apply = apply_label(total);
+    let counts_text = pending_counts_text(counts);
+    // The two buttons are 24px boxes with the style's 10px of padding each side and a hairline; the
+    // counts and the sentence are one line each, 8px apart, inside S5 of padding and a 1px edge.
+    let button = |label: &str| measured(ui, tokens.font(T_SM), label) + 2.0 * 10.0 + 2.0;
+    let pieces: [f32; 4] = [
+        measured(ui, tokens.font(T_SM), &sentence),
+        measured(ui, tokens.mono(T_XS), &counts_text),
+        button("Revert"),
+        button(&apply),
+    ];
+    let width = pieces.iter().sum::<f32>()
+        + f32::from(S4) * pieces.len() as f32
+        + 2.0 * f32::from(S5)
+        + f32::from(S2);
+
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, ui.available_height()), Sense::hover());
+    {
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::ZERO, tokens.warn_fill);
+        painter.vline(
+            rect.left() + 0.5,
+            rect.top()..=rect.bottom(),
+            Stroke::new(1.0, tokens.stroke),
+        );
+    }
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + f32::from(S5), rect.top()),
+        egui::pos2(rect.right() - f32::from(S5), rect.bottom()),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    child.spacing_mut().item_spacing.x = f32::from(S4);
+    let mut action = None;
+    if primary_button(&mut child, tokens, &apply, true)
+        .on_hover_text("Run the pending statements in one transaction")
+        .clicked()
+    {
+        action = Some(PendingAction::Apply);
+    }
+    if ghost_button(&mut child, tokens, "Revert", true)
+        .on_hover_text("Throw the pending statements away")
+        .clicked()
+    {
+        action = Some(PendingAction::Revert);
+    }
+    if counts.2 > 0 {
+        child.label(
+            RichText::new(format!("−{}", counts.2))
+                .size(T_XS)
+                .monospace()
+                .color(tokens.error),
+        );
+    }
+    if counts.1 > 0 {
+        child.label(
+            RichText::new(format!("●{}", counts.1))
+                .size(T_XS)
+                .monospace()
+                .color(tokens.warn),
+        );
+    }
+    if counts.0 > 0 {
+        child.label(
+            RichText::new(format!("+{}", counts.0))
+                .size(T_XS)
+                .monospace()
+                .color(tokens.ok),
+        );
+    }
+    child.label(RichText::new(&sentence).size(T_SM).color(tokens.warn));
+    action
+}
+
 /// Filled rectangle with a hairline border.
 pub fn outlined(ui: &Ui, rect: egui::Rect, tokens: &Tokens, radius: CornerRadius, fill: Color32) {
     ui.painter().rect_filled(rect, radius, fill);
@@ -997,6 +1333,36 @@ mod tests {
             PANE_HEAD_H,
             "the inspector's bands no longer add up to the pane head"
         );
+    }
+
+    #[test]
+    fn the_filter_row_centres_its_chip_in_the_designs_thirty_two() {
+        assert_eq!(FCHIPS_H, 32.0, "the design's `.fchips` is 32px tall");
+        assert_eq!(filter_row_h(FCHIP_H), FCHIPS_H);
+        assert_eq!(FCHIP_AIR, (FCHIPS_H - FCHIP_H) / 2.0);
+        assert_eq!(STALE_STRIP_H, 26.0);
+        assert_eq!(notice_band_h(), 54.0, "10 + title + 2 + message + 10");
+        assert_eq!(MICRO_TAG_H, 16.0);
+    }
+
+    #[test]
+    fn the_pending_cluster_counts_each_kind_and_drops_the_empty_ones() {
+        assert_eq!(pending_total((3, 0, 4)), 7);
+        assert_eq!(pending_sentence((1, 0, 0)), "1 pending");
+        assert_eq!(pending_sentence((0, 2, 1)), "3 pending");
+        assert_eq!(pending_counts_text((1, 1, 1)), "+1 ●1 −1");
+        assert_eq!(pending_counts_text((0, 2, 0)), "●2");
+        assert_eq!(pending_counts_text((0, 0, 0)), "");
+    }
+
+    #[test]
+    fn an_apply_or_match_label_pluralises_or_groups_its_count() {
+        assert_eq!(apply_label(1), "Apply 1");
+        assert_eq!(apply_changes_label(1), "Apply 1 change");
+        assert_eq!(apply_changes_label(3), "Apply 3 changes");
+        assert_eq!(matches_label(1), "1 match");
+        assert_eq!(matches_label(0), "0 matches");
+        assert_eq!(matches_label(12_481), "12,481 matches");
     }
 
     #[test]

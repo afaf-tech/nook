@@ -34,6 +34,13 @@ pub fn show(
         .iter()
         .map(|edit| format!("{:?} · {}", edit.kind, edit.sql))
         .collect();
+    // `Copy to SQL` copies the statements themselves, not the drawer's `kind · sql` lines.
+    let pending_sql: Vec<String> = tab
+        .grid
+        .pending
+        .iter()
+        .map(|edit| edit.sql.clone())
+        .collect();
     let dirty_cells: Vec<(usize, usize)> = tab
         .grid
         .pending
@@ -63,6 +70,9 @@ pub fn show(
     let error = tab.grid.error.clone();
     let conn = tab.conn;
     let pending = pending_statements.len();
+    let editable = tab.grid.editable();
+    let filter_count = tab.grid.filter_count();
+    let counts = tab.grid.pending_counts();
 
     let mut reload = false;
     let mut command: Option<(&str, serde_json::Value)> = None;
@@ -74,11 +84,22 @@ pub fn show(
     };
 
     // Context toolbar: what this tab is, how to page it, what to do with it.
-    let toolbar = design::band(ui, tokens, |ui| {
+    design::band(ui, tokens, |ui| {
         ui.set_min_height(design::TOOLBAR_H);
         ui.horizontal_centered(|ui| {
-            ui.label(RichText::new(&table_name).size(13.5).color(tokens.text));
+            ui.label(
+                RichText::new(&table_name)
+                    .size(design::T_MD)
+                    .color(tokens.text),
+            );
             ui.add_space(2.0);
+            // `.pkbadge` beside the name, and the `.taglite` that says the grid cannot be edited.
+            if !primary_key.is_empty() {
+                design::pk_badge(ui, tokens, "PK");
+            }
+            if !editable {
+                design::tag_lite(ui, tokens, "read-only");
+            }
             design::chip(ui, tokens, &format!("{} rows", rows.len()), tokens.text_dim);
             if truncated {
                 let chip = design::chip(ui, tokens, "truncated", tokens.warn);
@@ -172,24 +193,17 @@ pub fn show(
                 }
             }
 
-            // Right cluster: the two actions that matter while editing.
+            // Right cluster: the `.pend` cluster pinned to the edge, then Export. With nothing
+            // staged there is no cluster — `pending_cluster` returns `None` for an empty buffer.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = if pending > 0 {
-                    format!("Apply {pending}")
-                } else {
-                    "Apply".to_owned()
-                };
-                if design::primary_button(ui, tokens, &label, pending > 0)
-                    .on_hover_text("Run the pending statements in one transaction")
-                    .clicked()
-                {
-                    command = Some(("grid.apply", serde_json::json!({})));
-                }
-                if design::ghost_button(ui, tokens, "Revert", pending > 0)
-                    .on_hover_text("Throw the pending statements away")
-                    .clicked()
-                {
-                    command = Some(("grid.revert", serde_json::json!({})));
+                match design::pending_cluster(ui, tokens, counts) {
+                    Some(design::PendingAction::Apply) => {
+                        command = Some(("grid.apply", serde_json::json!({})));
+                    }
+                    Some(design::PendingAction::Revert) => {
+                        command = Some(("grid.revert", serde_json::json!({})));
+                    }
+                    None => {}
                 }
                 ui.menu_button(RichText::new("Export").size(12.5), |ui| {
                     for (format, label) in [
@@ -209,43 +223,114 @@ pub fn show(
         });
     });
 
-    // Filter row: the WHERE clause, on its own line under the toolbar.
-    let filter_band = design::band(ui, tokens, |ui| {
-        ui.horizontal_centered(|ui| {
-            ui.label(RichText::new("Filter").size(12.0).color(tokens.text_dim));
-            let mut filter_edit = state.filter_edit.clone();
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut filter_edit)
-                    .desired_width(ui.available_width().min(460.0) - 90.0)
-                    .hint_text("WHERE clause, e.g. city = 'London'"),
-            );
-            if response.changed() {
-                state.filter_edit = filter_edit.clone();
+    // `.fchips`: one chip per active filter, the add chip, the match count and `Clear all`.
+    //
+    // ponytail: egui has no dashed stroke, so the add chip draws a solid hairline at the design's
+    // weight instead of its dashes; upgrade path: stroke the dashes by hand along the chip's top
+    // and bottom edges.
+    let field_id = egui::Id::new(("grid-filter-field", tab_index));
+    let mut field_open = ui
+        .data_mut(|d| d.get_temp::<bool>(field_id))
+        .unwrap_or(false);
+    let fchips = design::band_fill(
+        ui,
+        design::filter_row_h(design::FCHIP_H),
+        tokens.panel_alt,
+        design::S4,
+        egui::Align::Center,
+        |ui| {
+            if filter_count > 0 {
+                design::chip(ui, tokens, &filter, tokens.text);
             }
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                command = Some(("grid.filter", serde_json::json!({"where": filter_edit})));
-            }
-            if !filter.is_empty() {
-                design::chip(ui, tokens, &filter, tokens.info);
-                if design::ghost_button(ui, tokens, "Clear", true).clicked() {
-                    command = Some(("grid.clearFilter", serde_json::json!({})));
+            if field_open || !state.filter_edit.is_empty() {
+                let mut filter_edit = state.filter_edit.clone();
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut filter_edit)
+                        .desired_width(320.0)
+                        .hint_text("WHERE clause, e.g. city = 'London'"),
+                );
+                if response.changed() {
+                    state.filter_edit = filter_edit.clone();
+                }
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    command = Some(("grid.filter", serde_json::json!({"where": filter_edit})));
+                    field_open = false;
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    field_open = false;
+                }
+            } else {
+                let add = egui::Frame::new()
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::new(1.0, tokens.stroke_strong))
+                    .corner_radius(egui::CornerRadius::same(design::R_CHIP))
+                    .inner_margin(egui::Margin {
+                        left: design::S4,
+                        right: design::S4,
+                        top: 1,
+                        bottom: 1,
+                    })
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("+ Add filter")
+                                .size(design::T_XS)
+                                .color(tokens.text_dim),
+                        )
+                    });
+                if add.response.interact(egui::Sense::click()).clicked() {
+                    field_open = true;
                 }
             }
-        });
-    });
-    ui.painter().hline(
-        toolbar.left()..=filter_band.right(),
-        filter_band.bottom() - 0.5,
-        egui::Stroke::new(1.0, tokens.stroke),
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if filter_count > 0
+                    && design::accent_button(ui, tokens, "Clear all", true).clicked()
+                {
+                    state.filter_edit.clear();
+                    command = Some(("grid.clearFilter", serde_json::json!({})));
+                }
+                ui.label(
+                    RichText::new(design::matches_label(total.unwrap_or(rows.len() as u64)))
+                        .size(design::T_XS)
+                        .monospace()
+                        .color(tokens.text_dim),
+                );
+            });
+        },
     );
+    ui.data_mut(|d| d.insert_temp(field_id, field_open));
+    design::band_hairline(ui, tokens, fchips);
 
+    // `.errband` over the page that failed, then the `.stalestrip` that says what was asked for.
     if let Some(e) = &error {
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(format!("last load failed: {e}"))
-                .size(12.0)
-                .color(tokens.error),
+        design::error_band(
+            ui,
+            tokens,
+            "Query failed — could not read page 1",
+            e,
+            |ui| {
+                if design::accent_button(ui, tokens, "Retry", true).clicked() {
+                    reload = true;
+                }
+                if design::ghost_button(ui, tokens, "Details", true).clicked() {
+                    state.log_open = true;
+                }
+            },
         );
+        design::stale_strip(
+            ui,
+            tokens,
+            &stale_note(&filter, &order),
+            &format!("page {}", page + 1),
+        );
+    }
+
+    // `.robanner`: the grid is on screen but the engine would refuse every edit.
+    if !editable {
+        let (title, text) = read_only_note(&primary_key, error.is_some(), columns.len());
+        design::ro_banner(ui, tokens, title, text, |ui| {
+            if design::ghost_button(ui, tokens, "Reload", true).clicked() {
+                reload = true;
+            }
+        });
     }
 
     // The table itself.
@@ -268,8 +353,21 @@ pub fn show(
             .to_owned();
         (name, desc)
     });
-    // The table needs room for its own header plus the hint bar below it.
-    let available = (ui.available_height() - 96.0).max(140.0);
+    // The design keeps the head of an empty page: the `.empty` block below it says which of the two
+    // empty states this is, so the widget only needs room for its header.
+    let empty = empty_state(rows.len(), filter_count);
+    let available = match empty {
+        EmptyState::None => (ui.available_height() - 96.0).max(140.0),
+        _ => design::HEAD_H,
+    };
+    let (title, body) = empty_copy(&empty, &table_name);
+    // The widget's own line only appears when it has no columns to head — a tab with no table
+    // behind it — and the grid's copy would then name a table that is not there.
+    let fallback = if specs.is_empty() {
+        "No table is open in this tab.".to_owned()
+    } else {
+        title.clone()
+    };
     let view = TableView {
         columns: &specs,
         rows: &rows,
@@ -277,12 +375,12 @@ pub fn show(
         inserted: inserted_rows.clone(),
         selected,
         sort,
-        editable: true,
+        editable,
         sortable: true,
         gutter: true,
         height: available,
         row_h: design::row_h(session.settings.density),
-        empty_text: "No rows on this page. Change the filter, turn the page, or insert a row.",
+        empty_text: fallback.as_str(),
     };
     ui.add_space(2.0);
     let event = crate::table::show(
@@ -325,6 +423,31 @@ pub fn show(
             ));
         }
         TableEvent::None => {}
+    }
+
+    // `.empty`, painted after the widget so the head stays on screen. The widget's own fallback copy
+    // only appears when it has no columns to head, which is the one case this block skips.
+    if empty != EmptyState::None && !specs.is_empty() {
+        match empty {
+            EmptyState::NoMatch => empty_block(ui, tokens, &title, body, |ui| {
+                if design::accent_button(ui, tokens, "Clear all filters", true).clicked() {
+                    state.filter_edit.clear();
+                    command = Some(("grid.clearFilter", serde_json::json!({})));
+                }
+                if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
+                    reload = true;
+                }
+            }),
+            EmptyState::NoRows => empty_block(ui, tokens, &title, body, |ui| {
+                if design::accent_button(ui, tokens, "+ Row", true).clicked() {
+                    command = Some(("grid.insertRow", serde_json::json!({"values": {}})));
+                }
+                if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
+                    reload = true;
+                }
+            }),
+            EmptyState::None => {}
+        }
     }
 
     // Selected cell: what it is and the two shortcuts that act on it.
@@ -394,11 +517,11 @@ pub fn show(
         egui::Stroke::new(1.0, tokens.stroke),
     );
 
-    // Pending statements, exactly as they will be sent.
+    // Pending statements, exactly as they will be sent, and the drawer's `.dfoot`.
     if pending > 0 {
         egui::CollapsingHeader::new(
-            RichText::new(format!("Pending changes ({pending})"))
-                .size(12.0)
+            RichText::new(design::pending_sentence(counts))
+                .size(design::T_MD)
                 .color(tokens.warn),
         )
         .id_salt(format!("pending-{tab_index}"))
@@ -411,12 +534,55 @@ pub fn show(
                     for statement in &pending_statements {
                         ui.label(
                             RichText::new(statement)
-                                .size(11.5)
+                                .size(design::T_SM)
                                 .monospace()
                                 .color(tokens.text_dim),
                         );
                     }
                 });
+            // `.dfoot`: one transaction for the whole buffer, so the note says what Apply does and
+            // the three actions copy the statements, drop them or run them.
+            let foot = design::band_fill(
+                ui,
+                design::TOOLBAR_H,
+                tokens.panel_alt,
+                design::S4,
+                egui::Align::Center,
+                |ui| {
+                    ui.label(
+                        RichText::new("one transaction · rolled back on the first failure")
+                            .size(design::T_XS)
+                            .monospace()
+                            .color(tokens.text_dim),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if design::primary_button(
+                            ui,
+                            tokens,
+                            &design::apply_changes_label(pending),
+                            true,
+                        )
+                        .on_hover_text("Run the pending statements in one transaction")
+                        .clicked()
+                        {
+                            command = Some(("grid.apply", serde_json::json!({})));
+                        }
+                        if design::ghost_button(ui, tokens, "Revert", true)
+                            .on_hover_text("Throw the pending statements away")
+                            .clicked()
+                        {
+                            command = Some(("grid.revert", serde_json::json!({})));
+                        }
+                        if design::ghost_button(ui, tokens, "Copy to SQL", true)
+                            .on_hover_text("Copy the pending statements to the clipboard")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(pending_sql.join(";\n"));
+                        }
+                    });
+                },
+            );
+            design::band_top_hairline(ui, tokens, foot);
         });
     }
 
@@ -446,5 +612,174 @@ pub fn show(
         if let Err(e) = datacraft_engine::cmd::load_grid(session, tab_index) {
             session.log(Level::Error, e.to_string());
         }
+    }
+}
+
+/// Which `.empty` block the grid paints under its head, if either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyState {
+    /// No rows, but a filter is doing the excluding.
+    NoMatch,
+    /// No rows and nothing asked for them: the table itself is empty.
+    NoRows,
+    /// There are rows, so the block has nothing to say.
+    None,
+}
+
+/// The empty state follows two facts only: whether the page came back empty, and whether a filter is
+/// active. `GridState::filter_count` is the engine's answer to the second, so the chip row and the
+/// block cannot disagree about it.
+fn empty_state(rows: usize, filter_count: usize) -> EmptyState {
+    match (rows, filter_count) {
+        (0, 0) => EmptyState::NoRows,
+        (0, _) => EmptyState::NoMatch,
+        _ => EmptyState::None,
+    }
+}
+
+/// `.empty`'s h4 and paragraph, in the design's two variants. The no-match body points at the WHERE
+/// clause rather than at the design's filter chip, because this app's filter is one raw clause.
+fn empty_copy(state: &EmptyState, table: &str) -> (String, &'static str) {
+    match state {
+        EmptyState::NoMatch => (
+            "No rows match these filters.".to_owned(),
+            "The filters above are excluding every row. Remove one, or edit the WHERE clause.",
+        ),
+        EmptyState::NoRows => (
+            format!("{table} has no rows yet."),
+            "Insert a row here, or write an INSERT in the query editor — nothing is staged until you apply.",
+        ),
+        EmptyState::None => (String::new(), ""),
+    }
+}
+
+/// `.empty`: left-aligned, 28px above the h4 and 30px below the paragraph, with the actions under
+/// them and no fill of its own.
+fn empty_block(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    title: &str,
+    body: &str,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 20,
+            right: 20,
+            top: 28,
+            bottom: 30,
+        })
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = f32::from(design::S3);
+                ui.label(RichText::new(title).size(design::T_MD).color(tokens.text));
+                ui.label(
+                    RichText::new(body)
+                        .size(design::T_SM)
+                        .color(tokens.text_dim),
+                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = f32::from(design::S3);
+                    add(ui);
+                });
+            });
+        });
+}
+
+/// `.robanner`'s title and body: the reason `GridState::editable` is false, in the same order the
+/// engine checks them, so the banner never blames the primary key for a page that failed to load.
+fn read_only_note(
+    primary_key: &[String],
+    failed: bool,
+    columns: usize,
+) -> (&'static str, &'static str) {
+    if failed {
+        (
+            "Editing is disabled — the page did not load",
+            "DataCraft will not edit rows it has not read. Retry the page, or check the connection.",
+        )
+    } else if columns == 0 {
+        (
+            "Editing is disabled — the table's columns are unknown",
+            "Reopen the table from the tree so DataCraft can read its shape, then edit it.",
+        )
+    } else if primary_key.is_empty() {
+        (
+            "Editing is disabled — this table has no primary key",
+            "Without a unique key DataCraft cannot identify the single row to update or delete. Selection, copy and export stay available; run an UPDATE in the query editor if you really mean it.",
+        )
+    } else {
+        (
+            "Editing is disabled — the grid is not bound to a table",
+            "Open a table from the tree to edit its rows; this page has no table behind it.",
+        )
+    }
+}
+
+/// `.stalestrip`'s note: the order and the filter the grid is still asking for, so a reload that
+/// failed cannot hide what the last good page was read with.
+///
+/// ponytail: the engine clears the page on a failed load, so the strip carries the last good order
+/// and filter but not the last good rows; upgrade path: keep the previous `ResultSet` in
+/// `GridState` and paint it inside the design's `.stale` block.
+fn stale_note(filter: &str, order: &str) -> String {
+    let filter = if filter.trim().is_empty() {
+        "no filter".to_owned()
+    } else {
+        format!("filter {filter}")
+    };
+    let order = if order.trim().is_empty() {
+        "unsorted".to_owned()
+    } else {
+        format!("order by {order}")
+    };
+    format!("Stale page · the last good page was read with {filter} · {order}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_empty_state_follows_the_rows_and_the_filter() {
+        assert_eq!(empty_state(0, 1), EmptyState::NoMatch);
+        assert_eq!(empty_state(0, 0), EmptyState::NoRows);
+        assert_eq!(empty_state(4, 1), EmptyState::None);
+        assert_eq!(empty_state(4, 0), EmptyState::None);
+    }
+
+    #[test]
+    fn the_two_empty_variants_keep_the_designs_copy() {
+        let (title, body) = empty_copy(&EmptyState::NoMatch, "main.customers");
+        assert_eq!(title, "No rows match these filters.");
+        assert!(body.contains("WHERE"), "the no-match body names the clause");
+        let (title, _) = empty_copy(&EmptyState::NoRows, "main.customers");
+        assert_eq!(title, "main.customers has no rows yet.");
+        assert_eq!(empty_copy(&EmptyState::None, "main.customers").0, "");
+    }
+
+    #[test]
+    fn the_read_only_banner_names_the_reason_the_engine_gave() {
+        let key = vec!["id".to_owned()];
+        assert!(read_only_note(&key, true, 3).0.contains("did not load"));
+        assert!(read_only_note(&key, false, 0)
+            .0
+            .contains("columns are unknown"));
+        assert!(read_only_note(&[], false, 3).0.contains("no primary key"));
+        assert!(read_only_note(&key, false, 3)
+            .0
+            .contains("not bound to a table"));
+    }
+
+    #[test]
+    fn the_stale_strip_carries_the_last_order_and_filter() {
+        assert_eq!(
+            stale_note("", ""),
+            "Stale page · the last good page was read with no filter · unsorted"
+        );
+        assert_eq!(
+            stale_note("status = 'live'", "\"id\" DESC"),
+            "Stale page · the last good page was read with filter status = 'live' · order by \"id\" DESC"
+        );
     }
 }

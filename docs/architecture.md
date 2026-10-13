@@ -130,6 +130,13 @@ implementations:
   chart built from a query result, and there is no "new report" verb, so Reports selects an existing
   report tab and is disabled when none is open. Fake workspaces would have needed a state the engine
   does not have.
+- **No loading skeleton in the grid.** The design draws a `.sk` state (8px `surface_3` bars inside the
+  row rhythm, pager disabled, a ghost Cancel) for a page that is on its way. Every load in this app is
+  synchronous — `grid.rs` reads a page, a count or a schema and returns with the result in the same
+  frame — so no frame exists in which the grid has no rows *and* knows that more are coming. Painting a
+  skeleton from a flag that is set and cleared inside one frame would be a state nothing can ever show.
+  The upgrade path is real asynchrony (a job that reports its own progress); the design's state can be
+  added then with the flag it needs.
 - **Bar bands.** `theme::bar_frame` contributes no stroke and no margin, and every panel is built with
   `show_separator_line(false)`, so a bar's height is its token plus the hairline painted inside it.
   The ceiling is that any future panel must paint its own edges to be visible.
@@ -147,3 +154,20 @@ implementations:
   needs a scan no command performs, so the model paints the `Outgoing` group and, when it is empty,
   the design's sentence rather than a second group it cannot fill. `ponytail:` add a
   `schema.scanReferences` command and a second `Group` when the incoming half is worth a round trip.
+- **The `.fchips` add chip has a solid border.** The design draws `border-style: dashed`; egui has one
+  stroke per shape and no dash pattern, so the chip keeps the design's weight, radius and `border`
+  colour with a solid hairline. `ponytail:` the ceiling is that the chip is not visually distinct from
+  a real filter chip at a glance; the upgrade path is painting the dashes by hand along its top and
+  bottom edges.
+- **The `.stalestrip` carries the last order and filter, not the last rows.** `load_grid` clears
+  `GridState::result` when the page fails, so the strip can say what the grid is still asking for but
+  the design's `.stale` block — the previous page kept on screen under the error — has no rows to
+  paint. `ponytail:` the upgrade path is keeping the previous `ResultSet` in `GridState` and painting
+  it inside a `.stale` wrapper.
+- **One changes surface, two thirds of the design's.** The design draws both the toolbar's `.pend`
+  cluster and a drawer with a `.dfoot`; this app keeps the persistent `.pend` cluster (only while the
+  buffer is non-empty, as the design's own `0 pending` states do) and the drawer, whose footer now
+  carries `Copy to SQL`, Revert and `Apply n changes`. `ponytail:` the drawer body is still the
+  `CollapsingHeader` of `kind · sql` lines rather than the design's grouped `.dgrp`/`.dchg` list; the
+  grouped list needs per-kind headers and a per-change undo, which the engine's `Vec<PendingEdit>` can
+  address when the drawer is worth the second pass.

@@ -82,6 +82,9 @@ pub enum TableEvent {
 }
 
 pub struct TableView<'a> {
+    // `editable` is the widget's read-only switch: false for the inspector's preview, for the results
+    // of a statement, and for a grid whose table the engine would refuse to edit (no primary key).
+    // It gates the inline editor and the dirty stripe, so a read-only view cannot look editable.
     pub columns: &'a [TableColumn],
     pub rows: &'a [Vec<Value>],
     /// Cells with an unsaved edit, as (row, column).
@@ -423,7 +426,8 @@ pub fn show(
                                 Vec2::new(widths[column_index], view.row_h),
                             );
                             let editing = state.editing == Some((row_index, column_index));
-                            let dirty = view.pending.contains(&(row_index, column_index)) || is_new;
+                            let dirty = view.editable
+                                && (view.pending.contains(&(row_index, column_index)) || is_new);
                             let value = row.get(column_index).cloned().unwrap_or(Value::Null);
                             let response = ui.interact(
                                 cell,
@@ -518,7 +522,7 @@ pub fn show(
                                 if response.clicked() {
                                     event = TableEvent::Select(row_index, column_index);
                                 }
-                                if response.double_clicked() {
+                                if view.editable && response.double_clicked() {
                                     event = TableEvent::BeginEdit(row_index, column_index);
                                 }
                             }
