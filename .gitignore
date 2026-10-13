@@ -3,3 +3,10 @@
 .DS_Store
 *.log
 plan/
+graphify-out/
+.agile/
+.agents/
+.claude/
+opendesign/
+skills-lock.json
+~/
