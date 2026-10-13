@@ -68,6 +68,23 @@ impl View {
     fn all() -> [View; 2] {
         [View::Grid, View::Json]
     }
+
+    /// The view a control-protocol `view` asks for: exactly the labels the segment paints, so
+    /// `ui.setResultView` cannot accept a name this register has no button for.
+    pub fn from_name(name: &str) -> Option<View> {
+        View::all()
+            .into_iter()
+            .find(|view| view.label().eq_ignore_ascii_case(name.trim()))
+    }
+
+    /// The names [`View::from_name`] accepts, for a refusal that lists what is.
+    pub fn names() -> String {
+        View::all()
+            .into_iter()
+            .map(|view| view.label().to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// The register's own state, one per query tab: which statement is on screen, in which view, and the
@@ -981,7 +998,8 @@ fn statement_label(statement: &str) -> String {
 
 /// `.eband`'s tag and message, split out of the engine's single sentence: every error in the house
 /// type displays as `kind: message`, so the code is the first segment and the message follows it.
-fn split_error(error: &str) -> (&str, &str) {
+/// The editor's statement band reads the same split, so the two bands cannot name one code two ways.
+pub(crate) fn split_error(error: &str) -> (&str, &str) {
     match error.split_once(": ") {
         Some((code, message)) if !code.is_empty() && !code.contains(' ') => (code, message),
         _ => ("error", error),
@@ -1711,6 +1729,22 @@ mod tests {
             "the click still selects the cell"
         );
         assert_eq!(table.editing, None, "a result set is not editable");
+    }
+
+    /// The control channel's two faces of one list: the names a `view` may be, and the refusal that
+    /// lists them. Both read `View::label`, the same string the segment paints.
+    #[test]
+    fn the_view_names_are_the_labels_the_segment_paints() {
+        assert_eq!(View::names(), "grid, json");
+        for view in View::all() {
+            assert_eq!(View::from_name(view.label()), Some(view));
+        }
+        assert_eq!(View::from_name(" Grid "), Some(View::Grid));
+        assert_eq!(View::from_name("JSON"), Some(View::Json));
+        // `text` is the design's third segment and nothing renders it, so it is refused rather than
+        // quietly mapped onto the grid.
+        assert_eq!(View::from_name("text"), None);
+        assert_eq!(View::from_name(""), None);
     }
 
     /// The actions the bands advertise are the product's own: the CSV of the active result, the

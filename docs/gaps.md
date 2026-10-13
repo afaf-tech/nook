@@ -61,6 +61,11 @@ A long query cannot be stopped from the app: each run is bounded by `max_rows`, 
 not time. Needs a driver-level cancel (Postgres `pg_cancel_backend` on the same backend, MySQL `KILL
 QUERY`). (`sql.stop`)
 
+The UI's half is built: the editor's `Stop` control exists and is painted disabled, and its hover text
+is the command registry's own `sql.stop` help, so the button cannot claim more than the engine can do.
+`sql.run` blocks the UI thread, which is why no frame claims a statement is running. The ceiling is a
+job id the UI can poll plus a driver-level cancel, at which point `Stop` becomes a live button.
+
 ## 8. Visual explain plans and a profiler
 
 `EXPLAIN` output is tabular. A plan graph and a per-query profile are what Navicat's monitor tab

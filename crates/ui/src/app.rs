@@ -177,6 +177,13 @@ pub struct UiState {
     pub want_demo: bool,
     pub apply_after_edit: bool,
     pub editor_dirty: bool,
+    /// The results register of each query tab, keyed by tab index: the view of its last run. A
+    /// closed tab's entry goes with it, and a run that lands rebuilds the entry around its own
+    /// statements.
+    pub registers: std::collections::BTreeMap<usize, crate::register::Register>,
+    /// Where the caret sits in the active query tab's script, for the editor's and the status bar's
+    /// `Ln x, Col y`. `None` until the editor has painted a caret.
+    pub caret: Option<crate::editor::Caret>,
     /// The object inspector: what the tree has selected and what it has fetched about it.
     pub inspector: crate::inspector::Inspector,
     /// Which objects the tree lists: the design's All/Connections/Tables/Views control.
@@ -222,6 +229,8 @@ impl Default for UiState {
             want_demo: false,
             apply_after_edit: false,
             editor_dirty: false,
+            registers: std::collections::BTreeMap::new(),
+            caret: None,
             inspector: crate::inspector::Inspector::default(),
             tree_scope: crate::tree::Scope::default(),
             log_open: false,
@@ -239,6 +248,24 @@ impl UiState {
     /// Inline-editor state for one tab.
     pub fn table(&mut self, index: usize) -> &mut TableState {
         self.tables.entry(index).or_default()
+    }
+
+    /// A closed tab takes its results register with it, and the registers of the tabs that moved down
+    /// follow — otherwise the next tab along would wear the closed one's view of its run.
+    pub fn forget_tab(&mut self, index: usize) {
+        let mut kept = std::collections::BTreeMap::new();
+        for (key, register) in std::mem::take(&mut self.registers) {
+            match key.cmp(&index) {
+                std::cmp::Ordering::Less => {
+                    kept.insert(key, register);
+                }
+                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Greater => {
+                    kept.insert(key - 1, register);
+                }
+            }
+        }
+        self.registers = kept;
     }
 
     pub fn open_connection_dialog(&mut self, index: Option<usize>) {
@@ -506,6 +533,12 @@ impl DatacraftApp {
                     } else {
                         serde_json::json!({"ok": false, "error": "no such tab"})
                     }
+                }
+                "ui.selectResult" => {
+                    DatacraftApp::select_result(&self.session, &mut self.state, &request.params)
+                }
+                "ui.setResultView" => {
+                    DatacraftApp::set_result_view(&self.session, &mut self.state, &request.params)
                 }
                 "ui.selectTable" => {
                     let table = request
@@ -1343,6 +1376,8 @@ impl DatacraftApp {
                 .run("tab.close", serde_json::json!({"index": index}))
             {
                 self.session.log(Level::Warn, e.to_string());
+            } else {
+                self.state.forget_tab(index);
             }
         }
     }
@@ -1360,7 +1395,7 @@ impl DatacraftApp {
         match kind {
             TabKind::Welcome => views::welcome(ui, &mut self.session, &mut self.state, tokens),
             TabKind::Query => {
-                crate::editor::show(ui, &mut self.session, index, &mut self.state, tokens)
+                crate::editor::show(ui, &mut self.session, index, &mut self.state, tokens);
             }
             TabKind::Data => grid::show(ui, &mut self.session, index, &mut self.state, tokens),
             TabKind::Design => views::design(ui, &mut self.session, index, &mut self.state, tokens),
@@ -1479,6 +1514,19 @@ impl DatacraftApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The design's rightmost fact: where the caret sits in the query tab's script.
+                    let caret = self
+                        .session
+                        .active_tab
+                        .filter(|index| self.session.tabs[*index].kind == TabKind::Query)
+                        .and(self.state.caret);
+                    if let Some(caret) = caret {
+                        ui.label(
+                            RichText::new(crate::editor::caret_note(caret))
+                                .font(tokens.mono(t::T_XS))
+                                .color(tokens.text_dim),
+                        );
+                    }
                     if let Some(control) = &self.state.control {
                         t::chip(
                             ui,
@@ -1665,6 +1713,80 @@ impl DatacraftApp {
         }
     }
 
+    /// `ui.selectResult`: which of the active query tab's results the register shows. A tab that has
+    /// never run builds the register `ui.setResultView` then moves; the refusal names the results
+    /// that do exist, because the caller has no other way to learn them.
+    fn select_result(session: &Session, state: &mut UiState, params: &Value) -> Value {
+        let index = match DatacraftApp::query_tab(session) {
+            Ok(index) => index,
+            Err(error) => return serde_json::json!({"ok": false, "error": error}),
+        };
+        let sql = &session.tabs[index].sql;
+        let runs = sql.results.len();
+        let wanted = params.get("index").and_then(Value::as_i64).unwrap_or(0);
+        if wanted < 0 || wanted as usize >= runs {
+            return serde_json::json!({
+                "ok": false,
+                "error": format!(
+                    "no result {wanted}: the run holds {runs} ({})",
+                    DatacraftApp::result_range(runs)
+                ),
+            });
+        }
+        state
+            .registers
+            .entry(index)
+            .or_insert_with(|| crate::register::Register::from(sql, None))
+            .active = wanted as usize;
+        serde_json::json!({"ok": true, "result": wanted, "results": runs})
+    }
+
+    /// `ui.setResultView`: show the active query tab's register as a grid or as JSON. The refusal
+    /// lists the views the segment actually paints, so the two can never drift apart.
+    fn set_result_view(session: &Session, state: &mut UiState, params: &Value) -> Value {
+        let index = match DatacraftApp::query_tab(session) {
+            Ok(index) => index,
+            Err(error) => return serde_json::json!({"ok": false, "error": error}),
+        };
+        let name = params
+            .get("view")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(view) = crate::register::View::from_name(name) else {
+            return serde_json::json!({
+                "ok": false,
+                "error": format!(
+                    "unknown view {name:?}: valid views are {}",
+                    crate::register::View::names()
+                ),
+            });
+        };
+        state
+            .registers
+            .entry(index)
+            .or_insert_with(|| crate::register::Register::from(&session.tabs[index].sql, None))
+            .view = view;
+        serde_json::json!({"ok": true, "view": name, "views": crate::register::View::names()})
+    }
+
+    /// The active tab, when it is a query tab: the two register methods act on the script on screen.
+    fn query_tab(session: &Session) -> Result<usize, String> {
+        match session.active_tab {
+            None => Err("no active tab".into()),
+            Some(index) if session.tabs[index].kind == TabKind::Query => Ok(index),
+            Some(_) => Err("the active tab is not a query tab".into()),
+        }
+    }
+
+    /// The result indices a run of `runs` holds, for a refusal that lists what is.
+    fn result_range(runs: usize) -> String {
+        match runs {
+            0 => "none yet".into(),
+            1 => "0".into(),
+            _ => format!("0..{}", runs - 1),
+        }
+    }
+
     /// Resolve the connection a control request points at: the index it names, or the active one when
     /// it names none. `close_conn` leaves the catalog behind, so naming a table is not evidence the
     /// connection can be described — a connection that is missing, not numeric or closed is refused
@@ -1848,6 +1970,8 @@ impl DatacraftApp {
                     .run("tab.close", serde_json::json!({"index": index}))
                 {
                     self.session.log(Level::Warn, e.to_string());
+                } else {
+                    self.state.forget_tab(index);
                 }
             }
         }

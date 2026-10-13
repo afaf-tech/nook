@@ -102,13 +102,37 @@ implementations:
 - UI verification: `cargo run -p datacraft -- --shot /tmp/shot.png` renders a frame and writes a PNG.
   For a real check, start `datacraft --demo --control <port>` and drive it over the control channel:
   `ui.selectTab` (a negative index shows the start page), `engine.run`, `ui.setEditorText`,
-  `ui.setTheme` (so both palettes can be shot without touching the window), `ui.shot` per view,
+  `ui.selectResult` and `ui.setResultView` (so every statement of a run and both result views can be
+  shot), `ui.setTheme` (so both palettes can be shot without touching the window), `ui.shot` per view,
   `ui.quit`. The frames are then reviewed as images, and anything visual is fixed and
   re-shot. `ui.shot` writes the file and leaves the app running; only a `--shot` launch quits after
   capture.
 
 ## Known design choices and their ceilings
 
+- **The editor pane carries no running state.** The design's `.prog` hairline, its `Executing…` pill
+  and its running footer are not painted: `sql.run` is a blocking call on the UI thread, so a frame
+  that says a statement is running would be a frame the app cannot draw while it runs. `Stop` exists
+  and is painted disabled, with the command registry's own `sql.stop` help as its hover text, so the
+  control cannot describe the engine differently from the engine. The ceiling is a driver-level cancel
+  with a job id the UI can poll; until then the run is bounded by `max_rows` (see `docs/gaps.md` §7).
+- **The register has two views, grid and JSON.** `docs/edge-cases.md` and the design's mockup show a
+  `Text` view too; it is not built, and `ui.setResultView` lists only the two it accepts. The upgrade
+  path is one more `View` arm beside the JSON one, which is the same serialisation with different
+  wrapping.
+- **A result tab cannot be closed.** The register's tab row is one tab per statement of the last run —
+  the run's own shape — so closing one would ask what the editor should then run. Re-running a script
+  reopens every tab it holds; the upgrade path is a per-tab `closed` flag the next run respects.
+- **The editor's toolbar is a cut-down version of the design's.** The design's full set plus its
+  connection chip does not fit the pane's 776px, measured by the test at the same sizes: `Chart`,
+  `Pivot`, `Save snippet` and `Export ▾` are dropped, and the connection chip with them, because the
+  status bar already names the connection. The kept set is `Run`, `Run statement`, `Stop`, `Explain`,
+  `Format`, `Clear` and the caret read-out. The ceiling: an overflow menu, or icons instead of labels,
+  when one of the dropped actions is asked for.
+- **History's surface is gone.** The editor's `History` band (`.hist`, the run list the mockup shows
+  above the register) is not painted: `SqlState.results` is the current run only, and the register's
+  tab row already names each statement's outcome. The ceiling is a session-level run log, which the
+  engine would have to keep.
 - **Text protocol for PostgreSQL.** `numeric` precision is exact and the code is small; the price is
   no binary results and no bind parameters. A prepared path can be added behind the same trait when a
   feature needs it.

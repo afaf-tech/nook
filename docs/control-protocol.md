@@ -30,6 +30,8 @@ A bad key is refused with `{"id":…,"error":"bad key; read …"}`.
 | `ui.selectTab` | `{"index":0}` | `{"ok":true,"active_tab":0}` |
 | `ui.selectTable` | `{"conn":0,"schema":"main","table":"customers","tab":"columns"}` | points the object inspector at a table; `conn` defaults to the active connection and `tab` (`columns`, `indexes`, `foreign keys`, `preview`) to the one already showing |
 | `ui.setEditorText` | `{"sql":"select 1"}` | replaces the active tab's editor text |
+| `ui.selectResult` | `{"index":1}` | puts the results register on that statement of the last run; an index the register does not hold answers `{"error":"no result 7: the run holds 2 (0..1)"}` |
+| `ui.setResultView` | `{"view":"json"}` | paints the active result as `grid` or `json`; anything else answers `{"error":"unknown view \"csv\": valid views are grid, json"}` |
 | `ui.setTheme` | `{"theme":"light"}` | sets the preference through `app.setSetting`, so `dark`, `light` and `system` are accepted and anything else answers the command's own error; returns the settings list |
 | `ui.messages` | `{}` | the last 50 messages, newest first, with their level |
 | `ui.commands` | `{}` | the number of registered commands and every id |
