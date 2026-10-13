@@ -37,6 +37,10 @@ pub enum Glyph {
     Warning,
     /// A padlock: the `.robanner`'s leading mark (the design's `.ri`), beside a grid it cannot edit.
     Lock,
+    /// Two sheets: the register's `.rbar` Copy button.
+    Copy,
+    /// An arrow onto a shelf: the register's `.rbar` Export button.
+    Export,
 }
 
 /// The design's stroke, in its 14-unit box.
@@ -257,8 +261,55 @@ fn geometry(glyph: Glyph, at: &impl Fn(f32, f32) -> Pos2, scale: f32) -> (Lines,
             Vec::new(),
             vec![(box_of(at, 3.25, 6.25, 7.5, 4.75), 1.0)],
         ),
+        Glyph::Copy => {
+            // The sheet behind the front one: up its right edge, then three rounded corners, and it
+            // stops where the front sheet covers it.
+            let mut behind = vec![at(9.5, 4.5), at(9.5, 2.5)];
+            behind.extend(cubic(
+                at,
+                (9.5, 2.5),
+                (9.5, 2.5 - QUARTER_ARC),
+                (8.5 + QUARTER_ARC, 1.5),
+                (8.5, 1.5),
+            ));
+            behind.push(at(2.5, 1.5));
+            behind.extend(cubic(
+                at,
+                (2.5, 1.5),
+                (2.5 - QUARTER_ARC, 1.5),
+                (1.5, 1.5 + QUARTER_ARC),
+                (1.5, 2.5),
+            ));
+            behind.push(at(1.5, 8.5));
+            behind.extend(cubic(
+                at,
+                (1.5, 8.5),
+                (1.5, 8.5 + QUARTER_ARC),
+                (2.5 - QUARTER_ARC, 9.5),
+                (2.5, 9.5),
+            ));
+            behind.push(at(4.5, 9.5));
+            (
+                vec![behind],
+                Vec::new(),
+                vec![(box_of(at, 4.5, 4.5, 8.0, 8.0), 1.5)],
+            )
+        }
+        Glyph::Export => (
+            vec![
+                vec![at(7.0, 1.5), at(7.0, 9.5)],
+                vec![at(4.0, 6.5), at(7.0, 9.5), at(10.0, 6.5)],
+                vec![at(1.5, 12.5), at(12.5, 12.5)],
+            ],
+            Vec::new(),
+            Vec::new(),
+        ),
     }
 }
+
+/// The cubic control-point distance that traces a quarter circle of radius 1 (`4/3 · tan(π/8)`).
+/// [`Glyph::Copy`] is a rectangle with three rounded corners, and its own path data states the arcs.
+const QUARTER_ARC: f32 = 0.5523;
 
 /// A rounded box from the design's `x`, `y`, `width`, `height`.
 fn box_of(at: &impl Fn(f32, f32) -> Pos2, x: f32, y: f32, width: f32, height: f32) -> Rect {
@@ -282,7 +333,7 @@ fn bounds(paths: &[Vec<Pos2>], rings: &[(Pos2, Vec2)], boxes: &[(Rect, f32)]) ->
 mod tests {
     use super::*;
 
-    const ALL: [Glyph; 11] = [
+    const ALL: [Glyph; 13] = [
         Glyph::Database,
         Glyph::Queries,
         Glyph::Jobs,
@@ -294,6 +345,8 @@ mod tests {
         Glyph::Table,
         Glyph::Warning,
         Glyph::Lock,
+        Glyph::Copy,
+        Glyph::Export,
     ];
 
     /// The invariant that matters: a glyph never paints outside the rectangle it is handed, at any
@@ -338,6 +391,8 @@ mod tests {
             (Glyph::Table, 2, 0, 1),
             (Glyph::Warning, 3, 0, 0),
             (Glyph::Lock, 1, 0, 1),
+            (Glyph::Copy, 1, 0, 1),
+            (Glyph::Export, 3, 0, 0),
         ] {
             let rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(32.0));
             let (paths, ring_list, box_list) = geometry(glyph, &mapper(rect), scale_of(rect));
