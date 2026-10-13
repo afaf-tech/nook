@@ -215,14 +215,27 @@ fn summarize(
 }
 
 fn run(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
-    let conn = session.resolve_conn(p)?;
     let sql = sql_from_params_or_editor(session, p)?;
+    let statements = split(&sql);
+    run_statements(session, p, &sql, statements)
+}
+
+/// Run a request's statements and record them under `ran_script`: the text the request was issued
+/// against, which `begin_run` stamps for the register's stale rule. `statements` are what actually
+/// runs — the text's whole split for `sql.run`, and the one statement a selection resolves to for the
+/// paths that cut a statement out of that text — so the stamp stays the source and never the cut.
+fn run_statements(
+    session: &mut Session,
+    p: &Params,
+    ran_script: &str,
+    statements: Vec<String>,
+) -> Result<serde_json::Value> {
+    let conn = session.resolve_conn(p)?;
     let limit = match p.int_opt("limit", 0) {
         n if n > 0 => Some(n.clamp(1, 5_000_000) as usize),
         _ => None,
     };
-    let statements = split(&sql);
-    begin_run(session, &sql, statements.clone());
+    begin_run(session, ran_script, statements.clone());
     let mut run_so_far = ResultSet::default();
     let mut results: Vec<serde_json::Value> = Vec::new();
     for (index, statement) in statements.iter().enumerate() {
@@ -287,8 +300,11 @@ fn run_selection(session: &mut Session, p: &Params) -> Result<serde_json::Value>
     let statement = sqltext::statement_at(&sql, start)
         .ok_or_else(|| Error::config("no statement under the selection"))?;
     let _ = end;
-    let params = p.with("sql", json!(statement));
-    run(session, &params)
+    // The register is stamped with the text the selection was taken from, not with the statement cut
+    // out of it: `Register::stale` compares that stamp with the editor's whole text, so a cut reports
+    // an unchanged script as `stale · the script changed since this run` the moment it runs. The
+    // executed text stays the statement, which is what the run's results and history describe.
+    run_statements(session, p, &sql, vec![statement])
 }
 
 fn statements(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
@@ -752,6 +768,41 @@ mod tests {
         run_statement(&mut session, &p).expect("the parameter's statement runs");
         assert_eq!(
             session.tabs[tab].sql.ran_script, "select 2 as two;\n",
+            "the register is stamped with the text the request came from"
+        );
+    }
+
+    /// `Run selection` cuts its statement out of the text the request came from, so the register has
+    /// to be stamped with that text rather than with the cut, exactly as `Run statement` and explain
+    /// are: an unchanged, newline-terminated script used to read `stale · the script changed since
+    /// this run` the moment its own selection ran, because the register compares the editor's whole
+    /// text. The statement still runs — the results and history are the selected statement's.
+    #[test]
+    fn a_selection_run_stamps_the_text_the_selection_came_from() {
+        let (_guard, mut session, tab) = live_session();
+        session.tabs[tab].sql.text = "select 1 as one;\nselect 2 as two;\n".to_owned();
+        let p = Params::from_json(json!({"start": 0})).expect("params");
+        let out = run_selection(&mut session, &p).expect("the selection runs");
+        assert_eq!(
+            out["results"][0]["statement"], "select 1 as one;",
+            "the statement the selection cut out is what runs"
+        );
+        assert_eq!(
+            session.tabs[tab].sql.results[0].statement, "select 1 as one;",
+            "the register's own run names the statement that ran, not the whole text"
+        );
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, "select 1 as one;\nselect 2 as two;\n",
+            "the register is stamped with the text the selection came from, not the statement cut out of it"
+        );
+
+        // And a selection given a text of its own is stamped with that text, so the register can still
+        // say the editor has moved on since it: the statement came from the parameter, not the tab.
+        let p =
+            Params::from_json(json!({"start": 0, "sql": "select 3 as three;\n"})).expect("params");
+        run_selection(&mut session, &p).expect("the parameter's selection runs");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, "select 3 as three;\n",
             "the register is stamped with the text the request came from"
         );
     }

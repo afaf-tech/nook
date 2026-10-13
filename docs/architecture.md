@@ -125,9 +125,10 @@ implementations:
   reopens every tab it holds; the upgrade path is a per-tab `closed` flag the next run respects.
 - **The register's staleness is the text the run's request came from.** `SqlState::ran_script` is
   stamped in `begin_run` from the text the command was issued against: the `sql` it resolved —
-  `sql.run`'s parameter, and `sql.runSelection` through it — which is the tab's own text when the
-  command was given none. `run_statement` and `sql.explain` cut their statement out of that text and
-  are stamped with it rather than with the cut: an unchanged, newline-terminated script used to report
+  `sql.run`'s parameter — which is the tab's own text when the command was given none. The three
+  paths that cut a statement out of that text — `run_statement`, `sql.runSelection` and `sql.explain`
+  — run their statement but are stamped with the text they cut it from, not with the cut: an
+  unchanged, newline-terminated script used to report
   `stale · the script changed since this run` the moment its own statement ran, because the register
   compares the editor's whole text. The register records `ran_script` and `stale` is that comparison,
   in both directions — a rerun of on-screen text clears it, and a run whose source differed from the

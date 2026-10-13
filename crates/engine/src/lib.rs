@@ -139,13 +139,6 @@ impl Params {
         self.str_opt("conn").or_else(|| self.str_opt("connection"))
     }
 
-    /// A copy of these parameters with one key replaced, for commands that delegate.
-    pub fn with(&self, key: &str, value: serde_json::Value) -> Params {
-        let mut map = self.0.clone();
-        map.insert(key.to_string(), value);
-        Params(map)
-    }
-
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -431,9 +424,9 @@ pub struct SqlState {
     /// The text the last run's request was issued against: the `sql` the command was given, or the
     /// editor's own text when it was not — never the statement some path reduced that text to. So a
     /// run from the control channel or the palette is stamped with what it ran rather than with
-    /// whatever the editor happened to hold, and `Run statement` is stamped with the editor's whole
-    /// text. The results register records it as the source of the rows it shows and calls itself stale
-    /// when the editor has moved on since.
+    /// whatever the editor happened to hold, and `Run statement` and `Run selection` are stamped with
+    /// the editor's whole text. The results register records it as the source of the rows it shows and
+    /// calls itself stale when the editor has moved on since.
     pub ran_script: String,
     /// One entry per statement of the last run, in run order. The next run replaces them.
     pub results: Vec<StatementRun>,

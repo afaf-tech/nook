@@ -95,9 +95,9 @@ pub struct Register {
     pub active: usize,
     pub view: View,
     /// The text the run behind these rows was issued against — [`SqlState::ran_script`], which is the
-    /// editor's own text for a run started from the editor (a single statement or an explain
-    /// included) and the `sql` a run was given for one from the control channel, the palette or
-    /// `sql.runSelection`. [`Register::stale`] compares it with the live text, so the register can say
+    /// editor's own text for a run started from the editor (a single statement, a selection or an
+    /// explain all included) and the `sql` a run was given for one from the control channel or the
+    /// palette. [`Register::stale`] compares it with the live text, so the register can say
     /// its results no longer match the editor, and the editor rebuilds the register when the engine
     /// has run something this stamp does not describe.
     pub script: String,
