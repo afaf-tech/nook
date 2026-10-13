@@ -14,12 +14,13 @@ use crate::table::{TableColumn, TableState};
 use crate::theme::{self as design, Tokens};
 use crate::views::{self, List};
 
-/// The design's `.ih`: the header band, 24px for the top line and the meta line under it.
 /// `.ih`: the object header. With the tab strip and the list head it makes the pane head, which
 /// [`design::PANE_HEAD_H`] pins against the tree's.
 pub const HEADER_H: f32 = 64.0;
-/// `.lhead` and `.ghead`, the two 28px heads a list can start with.
-const LIST_HEAD_H: f32 = 28.0;
+/// `.lhead` and `.ghead`, the two heads a list can start with. The design uses the same 28 as the
+/// grid's head, so this is `HEAD_H` rather than a second literal: the pane-head contract is asserted
+/// against `HEAD_H`, and a private copy could drift while that test still passed.
+const LIST_HEAD_H: f32 = design::HEAD_H;
 /// `.crow`: the design's `--h-tree`, two lines of facts per object.
 const CROW_H: f32 = design::TREE_H;
 /// The inspector's `.chip`, which is 16px rather than the top bar's 24px state chip.
@@ -144,7 +145,6 @@ pub struct Model {
 #[derive(Default)]
 pub struct Inspector {
     pub tab: Tab,
-    /// The connection index and the table the tree has selected.
     /// The described object and the connection holding it. The connection is named by its **id**
     /// rather than its index: `conn.delete` removes an element and shifts every later connection
     /// down, so a stored index would silently come to mean a different server.
@@ -389,9 +389,10 @@ pub fn keys(json: &serde_json::Value) -> Model {
             }
         })
         .collect::<Vec<_>>();
+    // The design's `.gnote` names the object: "main.customers defines no foreign keys."
     let note = rows
         .is_empty()
-        .then(|| "This object defines no foreign keys.".to_owned());
+        .then(|| format!("{} defines no foreign keys.", text(&json["table"])));
     Model {
         head: "Foreign key".into(),
         legend: format!("{} defined", rows.len()),
@@ -424,22 +425,14 @@ pub fn model(
     }
 }
 
-/// Paint the whole panel. `state.inspector` says what to paint and carries the caches.
-pub fn show(ui: &mut egui::Ui, state: &mut UiState, tokens: &Tokens) -> Action {
-    // The pane's bands are contiguous in the design — 64 + 40 + 28 with no gap — so the panel's
-    // default `item_spacing` must not creep between them or the body lands below the 132 contract.
-    ui.spacing_mut().item_spacing.y = 0.0;
-    let inspector = &mut state.inspector;
-    if inspector.selected.is_none() {
-        return Action::None;
-    }
-    let action = if header(ui, inspector, tokens) {
-        Action::OpenData
-    } else {
-        Action::None
-    };
-
-    // The design's `.tabs`: a 40px band holding the pane variant of the segmented control.
+/// The design's `.tabs`: a 40px band holding the pane variant of the segmented control. `enabled` is
+/// false for the empty pane, whose four labels are painted but inert and unringed.
+fn tabs_band(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    options: &[(&str, bool)],
+    enabled: bool,
+) -> Option<usize> {
     let (band, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), design::TOOLBAR_H),
         Sense::hover(),
@@ -453,23 +446,53 @@ pub fn show(ui: &mut egui::Ui, state: &mut UiState, tokens: &Tokens) -> Action {
             .max_rect(inner)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    let options = Tab::ALL.map(|tab| (tab.label(), tab == inspector.tab));
-    if let Some(index) = design::pane_segmented(
+    let clicked = design::pane_segmented(
         &mut band_ui,
         tokens,
-        &options,
+        options,
         inner.width(),
         design::SEG_H,
         2.0,
         tokens.accent,
-    ) {
-        inspector.tab = Tab::ALL[index];
-    }
+    );
     ui.painter().hline(
         band.left()..=band.right(),
         band.bottom() - 0.5,
         Stroke::new(1.0, tokens.stroke),
     );
+    if enabled {
+        clicked
+    } else {
+        None
+    }
+}
+
+/// Paint the whole panel. `state.inspector` says what to paint and carries the caches.
+pub fn show(ui: &mut egui::Ui, state: &mut UiState, tokens: &Tokens) -> Action {
+    // The pane's bands are contiguous in the design — 64 + 40 + 28 with no gap — so the panel's
+    // default `item_spacing` must not creep between them or the body lands below the 132 contract.
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let inspector = &mut state.inspector;
+    if inspector.selected.is_none() {
+        // The design keeps the pane while nothing is selected: its header says so, the section switch
+        // is greyed and inert, and the body explains where to pick an object. Hiding the pane instead
+        // made the whole layout jump on the first click.
+        let _ = header(ui, inspector, tokens);
+        let options = Tab::ALL.map(|tab| (tab.label(), false));
+        let _ = tabs_band(ui, tokens, &options, false);
+        empty_pane(ui, tokens);
+        return Action::None;
+    }
+    let action = if header(ui, inspector, tokens) {
+        Action::OpenData
+    } else {
+        Action::None
+    };
+
+    let options = Tab::ALL.map(|tab| (tab.label(), tab == inspector.tab));
+    if let Some(index) = tabs_band(ui, tokens, &options, true) {
+        inspector.tab = Tab::ALL[index];
+    }
 
     if inspector.tab == Tab::Preview {
         // The design puts the preview's page footer at the bottom of the pane — "5 of 12,481 rows"
@@ -812,6 +835,31 @@ fn paint_chip(ui: &egui::Ui, tokens: &Tokens, rect: egui::Rect, text: &str, kind
     );
 }
 
+/// The design's empty pane: `.empty` in the inspector with the `.et` headline and the `.eb` sentence
+/// telling the reader where an object is chosen.
+fn empty_pane(ui: &mut egui::Ui, tokens: &Tokens) {
+    ui.add_space(f32::from(design::S8));
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+        icons::glyph(ui, rect, Glyph::Table, tokens.text_faint);
+        ui.add_space(f32::from(design::S4));
+        ui.label(
+            RichText::new("Nothing selected")
+                .size(design::T_MD)
+                .color(tokens.text),
+        );
+        ui.add_space(f32::from(design::S2));
+        ui.label(
+            RichText::new(
+                "Choose a table or view in the connection tree to inspect its columns, indexes, \
+                 foreign keys and rows.",
+            )
+            .size(design::T_SM)
+            .color(tokens.text_dim),
+        );
+    });
+}
+
 /// The design's `.empty`: a faint glyph and a line saying why there is nothing here.
 fn empty(ui: &mut egui::Ui, tokens: &Tokens, text: &str) {
     ui.add_space(f32::from(design::S8));
@@ -1060,7 +1108,11 @@ mod tests {
         let model = keys(&json!({"table": "main.customers", "foreign_keys": []}));
         assert_eq!(model.legend, "0 defined");
         assert!(model.groups[0].rows.is_empty());
-        assert!(model.groups[0].note.is_some());
+        // The design's `.gnote` names the object, so the sentence has to carry the qualified name.
+        assert_eq!(
+            model.groups[0].note.as_deref(),
+            Some("main.customers defines no foreign keys.")
+        );
     }
 
     #[test]

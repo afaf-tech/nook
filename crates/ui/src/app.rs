@@ -1918,14 +1918,15 @@ impl eframe::App for DatacraftApp {
             .show(ui, |ui| self.sidebar(ui, &tokens));
 
         self.refresh_inspector();
-        if self.state.inspector.selected.is_some() {
-            egui::Panel::right("inspector")
-                .exact_size(t::INSPECTOR_W)
-                .resizable(false)
-                .show_separator_line(false)
-                .frame(t::side_panel_frame(&tokens))
-                .show(ui, |ui| self.inspector_panel(ui, &tokens));
-        }
+        // The pane is part of the design's workbench whether or not something is selected: it explains
+        // itself when it is empty, and showing it only on the first selection made the whole layout
+        // shift under the click.
+        egui::Panel::right("inspector")
+            .exact_size(t::INSPECTOR_W)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(t::side_panel_frame(&tokens))
+            .show(ui, |ui| self.inspector_panel(ui, &tokens));
 
         egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui, &tokens));
 

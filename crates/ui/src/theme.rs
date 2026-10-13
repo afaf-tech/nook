@@ -569,13 +569,6 @@ pub fn segmented(ui: &mut Ui, tokens: &Tokens, options: &[(&str, bool)]) -> Opti
 /// The item rounding inside a pane's segmented control: the design's 3px, one less than `R_CTL`.
 const SEG_ITEM_RADIUS: u8 = 3;
 
-/// The design's other segmented control: the one its panes use (`.tabs .seg` in the inspector,
-/// `.filterblk .seg` in the tree). Same container as [`segmented`], but the items are equal widths
-/// across `width`, `inset` is both the inner padding and the gap between items, and the selection is
-/// marked with an `accent_line` ring rather than the top bar's bottom indicator. `height` and `inset`
-/// are the caller's literals because the design states them per pane: 28 with a 1px inset in the
-/// tree, 26 with a 2px inset in the inspector. The items take what is left over, so the selected
-/// item's ink stays the caller's choice — the inspector names it in `accent`, the tree in `text`.
 /// The room the items of a pane segmented control share: the container less its 1px border and its
 /// inset, less the gaps between the items, split equally. `None` when that leaves under a pixel for
 /// an item — the caller asked for a strip its labels cannot fit, and an inverted child rect panics.
@@ -595,6 +588,13 @@ pub fn segment_item(outer: Vec2, inset: f32, count: usize) -> Option<(f32, f32)>
     Some((item_width, inner.y))
 }
 
+/// The design's other segmented control: the one its panes use (`.tabs .seg` in the inspector,
+/// `.filterblk .seg` in the tree). Same container as [`segmented`], but the items are equal widths
+/// across `width`, `inset` is both the inner padding and the gap between items, and the selection is
+/// marked with an `accent_line` ring rather than the top bar's bottom indicator. `height` and `inset`
+/// are the caller's literals because the design states them per pane: 28 with a 1px inset in the
+/// tree, 26 with a 2px inset in the inspector. The items take what is left over, so the selected
+/// item's ink stays the caller's choice — the inspector names it in `accent`, the tree in `text`.
 pub fn pane_segmented(
     ui: &mut Ui,
     tokens: &Tokens,

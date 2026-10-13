@@ -216,13 +216,28 @@ fn delete(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value>
     Ok(json!({ "removed": cfg.name }))
 }
 
+/// The id a duplicated connection takes: `base`, or `base-2`, `base-3`, … until it names no connection
+/// the session already holds. Ids are what the UI, the catalogue and MCP use to name a connection, so
+/// a duplicate one is not a valid key — and `jobs::now()` is whole seconds, so duplicating the same
+/// connection twice inside one second is reachable. Same guard `new` applies.
+fn unique_id(session: &Session, base: &str) -> String {
+    let mut id = base.to_owned();
+    let mut suffix = 2;
+    while session.conns.iter().any(|conn| conn.cfg.id == id) {
+        id = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    id
+}
+
 fn duplicate(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     let index = session.resolve_conn(p)?;
     let mut cfg = session.conns[index].cfg.clone();
     let new_name = p
         .str_opt("name")
         .unwrap_or_else(|| format!("{} copy", cfg.name));
-    cfg.id = format!("{}-{}", cfg.id, crate::jobs::now());
+    let base = format!("{}-{}", cfg.id, crate::jobs::now());
+    cfg.id = unique_id(session, &base);
     cfg.name = new_name;
     cfg.password = crate::profiles::keychain_lookup(&session.conns[index].cfg.id)?;
     session.profiles.upsert(cfg.clone())?;
@@ -455,6 +470,22 @@ mod tests {
         assert_eq!(out["kind"], "MySQL");
         let params = Params::from_json(json!({"uri": "oracle://x"})).expect("params");
         assert!(parse_uri(&mut session, &params).is_err());
+    }
+
+    #[test]
+    fn a_duplicated_connection_gets_an_id_no_other_one_holds() {
+        let mut session = Session::new();
+        let mut cfg = ConnectionConfig::new("shop-100", DriverKind::Sqlite);
+        cfg.id = "shop-100".into();
+        session.conns.push(Conn::new(cfg));
+        // The second duplicate inside the same second asks for the id the first one already took.
+        assert_eq!(unique_id(&session, "shop-100"), "shop-100-2");
+        let mut cfg = ConnectionConfig::new("shop-100-2", DriverKind::Sqlite);
+        cfg.id = "shop-100-2".into();
+        session.conns.push(Conn::new(cfg));
+        assert_eq!(unique_id(&session, "shop-100"), "shop-100-3");
+        // A free base is taken as it is.
+        assert_eq!(unique_id(&session, "shop-101"), "shop-101");
     }
 
     #[test]
