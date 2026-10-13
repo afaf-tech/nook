@@ -87,7 +87,7 @@ implementations:
 
 ## Testing
 
-- 293 `#[test]` functions across the workspace, 103 of them in the UI crate: quoting and literals,
+- 294 `#[test]` functions across the workspace, 104 of them in the UI crate: quoting and literals,
   catalog types, DDL per dialect, structure diff, ER layout, statement splitting, edit planning, data
   generation determinism, report shaping, schedules, profiles, MCP JSON-RPC, and every command against
   junk parameters (`commands_run_with_junk_parameters_never_panic`).

@@ -103,7 +103,7 @@ fn dialogue_body(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 
 /// `.row`: the step's fields `--s5` apart.
 fn conn_row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = ROW_GAP;
         add(ui);
     });
@@ -2133,6 +2133,60 @@ mod tests {
         let (centre, radius) = dot.expect("the footer's status dot");
         assert!((radius - design::STATUS_DOT / 2.0).abs() <= 0.5, "{radius}");
         assert!(foot.contains(centre), "{centre:?} is not in {foot:?}");
+    }
+
+    /// A form row is one row: every field's label line sits on a single y, and so does every `.inp`
+    /// under them. A column that lets the row place it by its own height staggers the row — the label
+    /// block is 22 tall, so a column that starts at the row's own baseline drifts by 18.
+    #[test]
+    fn every_field_in_a_row_starts_at_the_same_y() {
+        let mut editor = Editor::new();
+        editor.state.connection_form.kind = DriverKind::Postgres;
+        let painted = editor.frame(Vec::new());
+
+        let labels = ["Host", "Port", "Database"].map(|label| {
+            (
+                label,
+                text_pos(&painted, label).unwrap_or_else(|| panic!("the {label} label")),
+            )
+        });
+        for (label, position) in labels {
+            assert!(
+                (position.y - labels[0].1.y).abs() <= 0.5,
+                "the {label} label is not level with the row: {labels:?}"
+            );
+        }
+
+        // A `TextEdit`'s hint lives in a clipped galley the frame does not hand out, so the row's own
+        // evidence is the boxes: each `.inp` is 28 of `panel_alt` directly under its column's label,
+        // and the label's anchor names the column. The box looked for is the first one *below* the
+        // label — the row above's fields share the column's x and would answer first otherwise.
+        let inputs = labels.map(|(label, position)| {
+            let below = |shape: &egui::Shape| match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == editor.tokens.panel_alt
+                        && (rect.rect.height() - design::INPUT_H).abs() <= 0.5
+                        && rect.rect.x_range().contains(position.x)
+                        && rect.rect.top() >= position.y =>
+                {
+                    Some((rect.rect.top() - position.y, rect.rect))
+                }
+                _ => None,
+            };
+            let rect = painted
+                .iter()
+                .filter_map(below)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap_or_else(|| panic!("the {label} field's .inp"))
+                .1;
+            (label, rect, position)
+        });
+        for (label, rect, _) in inputs {
+            assert!(
+                (rect.top() - inputs[0].1.top()).abs() <= 0.5,
+                "the {label} field is not level with the row: {inputs:?}"
+            );
+        }
     }
 
     /// The tabs answer to the form's step and mark it, and a press off the band moves nothing —
