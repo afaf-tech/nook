@@ -15,7 +15,7 @@ pub mod tools;
 use datacraft_core::{Error, Result};
 use datacraft_model::ResultSet;
 
-use crate::{Conn, ConnState, Level, Session, Tab, TableRef, Tunnel};
+use crate::{Conn, ConnState, Level, Session, SshSecret, Tab, TableRef, Tunnel};
 
 /// Public entry point for the CLI and MCP: open a connection by index.
 pub fn open_now(session: &mut Session, index: usize) -> Result<()> {
@@ -47,7 +47,7 @@ pub(crate) fn open_conn(session: &mut Session, index: usize) -> Result<()> {
     let mut effective = cfg.clone();
     let mut tunnel = None;
     if cfg.ssh.enabled {
-        let t = Tunnel::start(&cfg)?;
+        let t = Tunnel::start(&cfg, SshSecret::for_connection(&cfg.id))?;
         effective.ssh.local_port = t.local_port;
         session.log(
             Level::Info,

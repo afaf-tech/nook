@@ -163,6 +163,39 @@ fn restrict_permissions(path: &std::path::Path) {
 
 const KEYCHAIN_SERVICE: &str = "datacraft";
 
+/// The `security` binary the keychain calls shell out to. `DATACRAFT_SECURITY_BIN` points it at a
+/// fake, which is how the tests exercise the accounts without a login keychain.
+pub fn security_bin() -> String {
+    std::env::var("DATACRAFT_SECURITY_BIN").unwrap_or_else(|_| "security".to_string())
+}
+
+/// The keychain account that holds a connection's SSH password. The database password lives under
+/// the bare id (`profiles.rs`'s `savePassword` path), so the two can never collide.
+pub fn ssh_account(id: &str) -> String {
+    format!("{id}#ssh")
+}
+
+/// The one sentence DataCraft owns for "there is no keychain here": `conn.sshPassword` refuses with
+/// it, the dialog shows it beside its disabled toggle, and `--ssh-askpass` has no source for it. A
+/// `ponytail:` the fallback is ssh's own prompt on the terminal the app was started from — an
+/// in-app prompt whose answer is written to the keychain for the length of the run is the upgrade.
+pub const NO_KEYCHAIN: &str =
+    "this system has no OS keychain, so the SSH password cannot be saved; \
+leave it empty and ssh asks for it on the terminal DataCraft was started from";
+
+/// `NO_KEYCHAIN` where the caller has no keychain, `None` where there is one: the branch is a value
+/// the tests can check on any platform.
+pub fn keychain_refusal(available: bool) -> Option<&'static str> {
+    (!available).then_some(NO_KEYCHAIN)
+}
+
+/// The one line `--ssh-askpass` prints for the connection's SSH password: read here, in the helper
+/// `ssh` execs, so the secret never appears in an argument or an environment variable.
+pub fn ssh_askpass_line(id: &str) -> Result<String> {
+    keychain_lookup(&ssh_account(id))?
+        .ok_or_else(|| Error::not_found(format!("no SSH password is stored for '{id}'")))
+}
+
 pub fn keychain_available() -> bool {
     cfg!(target_os = "macos")
 }
@@ -174,7 +207,7 @@ pub fn keychain_store(id: &str, secret: &str) -> Result<()> {
             "keychain storage is macOS only; keep the password in the profile file (mode 0600) instead",
         ));
     }
-    let out = Command::new("security")
+    let out = Command::new(security_bin())
         .args([
             "add-generic-password",
             "-U",
@@ -201,7 +234,7 @@ pub fn keychain_lookup(id: &str) -> Result<Option<String>> {
     if !keychain_available() {
         return Ok(None);
     }
-    let out = Command::new("security")
+    let out = Command::new(security_bin())
         .args([
             "find-generic-password",
             "-s",
@@ -215,12 +248,10 @@ pub fn keychain_lookup(id: &str) -> Result<Option<String>> {
     if !out.status.success() {
         return Ok(None);
     }
-    let mut secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if secret.is_empty() {
         return Ok(None);
     }
-    secret.push('\0');
-    secret.pop();
     Ok(Some(secret))
 }
 
@@ -228,7 +259,7 @@ pub fn keychain_delete(id: &str) -> Result<()> {
     if !keychain_available() {
         return Ok(());
     }
-    let out = Command::new("security")
+    let out = Command::new(security_bin())
         .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id])
         .output()
         .map_err(|e| Error::io(format!("security: {e}")))?;
@@ -279,5 +310,58 @@ mod tests {
             dir.to_string_lossy().contains("DataCraft")
                 || dir.to_string_lossy().contains("datacraft")
         );
+    }
+
+    #[test]
+    fn the_ssh_password_gets_an_account_of_its_own() {
+        assert_eq!(ssh_account("local"), "local#ssh");
+        assert_ne!(ssh_account("local"), "local");
+        // A connection whose id already ends in the suffix must not collide with the other account.
+        assert_ne!(ssh_account("local"), ssh_account(&ssh_account("local")));
+    }
+
+    #[test]
+    fn the_refusal_sentence_names_the_keychain_and_the_fallback() {
+        assert!(keychain_refusal(true).is_none());
+        let sentence = keychain_refusal(false).expect("refusal");
+        assert!(sentence.contains("keychain"), "{sentence}");
+        assert!(
+            sentence.contains("ssh asks"),
+            "the sentence must say what happens instead: {sentence}"
+        );
+    }
+
+    #[test]
+    fn the_ssh_account_round_trips_through_the_keychain() {
+        let (_guard, log) = crate::test_support::fake_security("local#ssh", "hunter2");
+        if !keychain_available() {
+            // Nowhere else has a keychain to store into: the refusal sentence is the whole story.
+            assert!(keychain_store(&ssh_account("local"), "hunter2").is_err());
+            assert_eq!(
+                keychain_lookup(&ssh_account("local")).expect("lookup"),
+                None
+            );
+            return;
+        }
+        keychain_store(&ssh_account("local"), "hunter2").expect("store");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.contains("-a local#ssh"),
+            "the store's account: {calls}"
+        );
+        // The two accounts differ: the one the database password uses holds nothing.
+        assert_eq!(
+            keychain_lookup(&ssh_account("local"))
+                .expect("lookup")
+                .as_deref(),
+            Some("hunter2")
+        );
+        assert_eq!(keychain_lookup("local").expect("lookup"), None);
+        // The one line the askpass helper prints is the account's secret.
+        assert_eq!(ssh_askpass_line("local").expect("askpass"), "hunter2");
+        keychain_delete(&ssh_account("local")).expect("delete");
+        assert!(std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("delete-generic-password"));
     }
 }

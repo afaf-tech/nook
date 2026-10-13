@@ -161,7 +161,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Connection",
         "conn.sshPassword",
         "SSH by password",
-        "not implemented; ssh uses keys and the agent",
+        "macOS login keychain under a separate account; ssh reads it back through --ssh-askpass",
     ),
     (
         "Connection",

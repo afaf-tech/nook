@@ -81,7 +81,7 @@ fn column_from_params(p: &Params) -> Result<datacraft_model::Column> {
     })
 }
 
-fn require_confirm(session: &Session, p: &Params, what: &str) -> Result<()> {
+pub(crate) fn require_confirm(session: &Session, p: &Params, what: &str) -> Result<()> {
     if session.settings.confirm_destructive && !p.bool_opt("confirm", false) {
         return Err(Error::config(format!(
             "refusing to {what} without \"confirm\": true"

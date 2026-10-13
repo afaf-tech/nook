@@ -276,3 +276,21 @@ implementations:
   `CollapsingHeader` of `kind · sql` lines rather than the design's grouped `.dgrp`/`.dchg` list; the
   grouped list needs per-kind headers and a per-change undo, which the engine's `Vec<PendingEdit>` can
   address when the drawer is worth the second pass.
+- **The SSH password lives in the login keychain and nowhere else.** `conn.sshPassword` stores it under
+  the connection's own account — `profiles::ssh_account(id)` is `{id}#ssh`, so it cannot collide with
+  the database password the `{id}` account holds — and `conn.delete` removes both accounts. The tunnel
+  hands it to `ssh` through an askpass helper: `SSH_ASKPASS` is the app's own binary with
+  `SSH_ASKPASS_REQUIRE=force`, `--ssh-askpass` prints one line from the keychain, and the connection id
+  travels in `DATACRAFT_ASKPASS_CONN`, because ssh's askpass protocol passes only the prompt and no
+  arguments of its own. The secret is therefore never in an argument, an environment variable or a
+  file, and `ConnectionConfig` gained no field, so the SSH password never reaches `profiles.json`.
+  Where there is no keychain — every platform but macOS — there is no source for the helper either:
+  `conn.sshPassword` refuses with `profiles::NO_KEYCHAIN`, `SshTunnel::ssh_args` drops `BatchMode=yes`
+  so `ssh` may ask at all, and the tunnel inherits the app's stdin for that prompt. `SshSecret` names
+  the three states, and `SshSecret::for_connection` answers `None` where there is neither a stored
+  secret nor a terminal to ask on, which is what keeps a protocol stream (MCP's stdin) out of ssh's
+  hands. **Ceiling**: the fallback prompt lands on the terminal the app was started from, so a launch
+  with no terminal has no way to answer it and fails with ssh's own sentence, and the helper exists on
+  macOS only — the same ceiling as the keychain it reads. **Upgrade path**: an in-app prompt whose
+  answer is written to the keychain for the length of the run, which is this plumbing with the
+  persistence swapped for a session (`docs/gaps.md` §12).

@@ -3,6 +3,7 @@
 use datacraft_core::{ConnectionConfig, DriverKind, Error, Result, SslMode};
 use serde_json::json;
 
+use crate::tunnel::{tunnel_facts, SshSecret};
 use crate::{CommandSpec, Conn, ConnState, Level, Session};
 
 pub fn commands() -> Vec<CommandSpec> {
@@ -34,6 +35,9 @@ pub fn commands() -> Vec<CommandSpec> {
             .params(r#"{"password":"…"}"#)
             .help("macOS: stored in the login keychain, never in the profile file."),
         CommandSpec::new("conn.forgetPassword", "Remove the saved password", "Connection", forget_password),
+        CommandSpec::new("conn.sshPassword", "SSH password in the keychain", "Connection", ssh_password)
+            .params(r#"{"password":"…"}"#)
+            .help("macOS: the tunnel password is kept in the login keychain under its own account, so ssh reads it back through --ssh-askpass and never from an argument; {\"remove\":true} forgets it. Elsewhere there is no keychain and ssh asks on connect."),
         CommandSpec::new("conn.setReadOnly", "Read-only mode", "Connection", set_read_only)
             .params(r#"{"read_only":true}"#),
         CommandSpec::new("conn.setSshTunnel", "SSH tunnel settings", "Connection", set_ssh)
@@ -196,6 +200,7 @@ fn edit(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
 }
 
 fn delete(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    super::schema::require_confirm(session, p, "delete a connection")?;
     let index = session.resolve_conn(p)?;
     let cfg = session.profiles.remove(&session.conns[index].cfg.id)?;
     super::close_conn(session, index)?;
@@ -211,7 +216,9 @@ fn delete(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value>
         )
     };
     if crate::profiles::keychain_available() {
+        // Both of the connection's accounts, or a deleted profile would leave its SSH password behind.
         let _ = crate::profiles::keychain_delete(&cfg.id);
+        let _ = crate::profiles::keychain_delete(&crate::profiles::ssh_account(&cfg.id));
     }
     Ok(json!({ "removed": cfg.name }))
 }
@@ -273,10 +280,11 @@ fn test(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     let mut effective = cfg.clone();
     let mut tunnel = None;
     if cfg.ssh.enabled {
-        let t = crate::Tunnel::start(&cfg)?;
+        let t = crate::Tunnel::start(&cfg, SshSecret::for_connection(&cfg.id))?;
         effective.ssh.local_port = t.local_port;
         tunnel = Some(t);
     }
+    let facts = tunnel.as_ref().map(tunnel_facts);
     let mut driver = datacraft_drivers::open(&effective)?;
     let server = driver.server_info()?;
     let tables = driver.catalog().map(|c| c.table_count()).unwrap_or(0);
@@ -287,6 +295,7 @@ fn test(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     Ok(json!({
         "ok": true, "version": server.version, "driver": server.driver,
         "tables": tables, "elapsed_ms": ms,
+        "tunnel": facts,
     }))
 }
 
@@ -383,6 +392,27 @@ fn forget_password(session: &mut Session, p: &crate::Params) -> Result<serde_jso
     Ok(json!({ "removed": id }))
 }
 
+/// One id for both directions, because the catalog names one SSH-password feature: a `password`
+/// stores it under the connection's SSH account, `{"remove": true}` deletes that account. The
+/// password never reaches the profile file — `ConnectionConfig` has no SSH password field at all.
+fn ssh_password(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    if let Some(reason) = crate::profiles::keychain_refusal(crate::profiles::keychain_available()) {
+        return Err(Error::unsupported(reason));
+    }
+    let index = session.resolve_conn(p)?;
+    let id = session.conns[index].cfg.id.clone();
+    let account = crate::profiles::ssh_account(&id);
+    if p.bool_opt("remove", false) {
+        crate::profiles::keychain_delete(&account)?;
+        return Ok(json!({ "removed": id, "account": account }));
+    }
+    let password = p
+        .str_opt("password")
+        .ok_or_else(|| Error::config("pass \"password\", or \"remove\": true"))?;
+    crate::profiles::keychain_store(&account, &password)?;
+    Ok(json!({ "stored": true, "keychain": "login", "account": account }))
+}
+
 fn set_read_only(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     let index = session.resolve_conn(p)?;
     let value = p.bool_opt("read_only", true);
@@ -459,6 +489,15 @@ fn parse_uri(_session: &mut Session, p: &crate::Params) -> Result<serde_json::Va
 mod tests {
     use super::*;
     use crate::Params;
+    use crate::ProfileStore;
+    use datacraft_core::SshTunnel;
+
+    /// A saved profile with nothing but an id and a name.
+    fn profile(id: &str) -> ConnectionConfig {
+        let mut cfg = ConnectionConfig::new(id, DriverKind::Postgres);
+        cfg.id = id.to_string();
+        cfg
+    }
 
     #[test]
     fn uri_parsing_reports_the_pieces() {
@@ -495,5 +534,188 @@ mod tests {
         assert_eq!(out["connections"].as_array().map(Vec::len), Some(0));
         assert!(refresh(&mut session, &Params::none()).is_err());
         assert!(open(&mut session, &Params::none()).is_err());
+    }
+
+    #[test]
+    fn the_tunnel_settings_reach_the_connection_they_name_and_survive_a_reload() {
+        let _guard = crate::test_support::scratch_config();
+        let mut session = Session::new();
+        for id in ["first", "second"] {
+            let cfg = profile(id);
+            session.profiles.upsert(cfg.clone()).ok();
+            session.conns.push(Conn::new(cfg));
+        }
+        session.active_conn = Some(0);
+
+        let out = session
+            .run(
+                "conn.setSshTunnel",
+                json!({"conn": "second", "enabled": true, "host": "jump.example.com", "port": 2222,
+                       "user": "ops", "key_file": "/keys/id", "local_port": 15432}),
+            )
+            .expect("set the tunnel");
+        assert_eq!(out["local_port"], 15432);
+
+        // All six fields, on the connection that was named and not on the active one.
+        let second = session.conns[1].cfg.ssh.clone();
+        assert_eq!(
+            second,
+            SshTunnel {
+                enabled: true,
+                host: "jump.example.com".into(),
+                port: 2222,
+                user: "ops".into(),
+                key_file: "/keys/id".into(),
+                local_port: 15432,
+            }
+        );
+        assert_eq!(session.conns[0].cfg.ssh, SshTunnel::default());
+
+        // And the same after a reload: a typed tunnel is a saved tunnel.
+        let reloaded = ProfileStore::load().expect("reload");
+        assert_eq!(reloaded.get("second").map(|c| c.ssh.clone()), Some(second));
+        assert_eq!(
+            reloaded.get("first").map(|c| c.ssh.clone()),
+            Some(SshTunnel::default())
+        );
+    }
+
+    #[test]
+    fn deleting_a_connection_needs_a_confirmation_that_removes_nothing_else() {
+        let _guard = crate::test_support::scratch_config();
+        let mut session = Session::new();
+        let cfg = profile("doomed");
+        session.profiles.upsert(cfg.clone()).ok();
+        session.conns.push(Conn::new(cfg));
+
+        let refused = session
+            .run("conn.delete", json!({"conn": "doomed"}))
+            .expect_err("the gate must refuse");
+        assert!(refused.to_string().contains("confirm"), "{refused}");
+        assert!(
+            session.profiles.get("doomed").is_some(),
+            "the refusal removed the profile"
+        );
+        assert_eq!(session.conns.len(), 1);
+
+        // A connection that is not there is refused too, and removes nothing either.
+        assert!(session
+            .run("conn.delete", json!({"conn": "ghost", "confirm": true}))
+            .is_err());
+        assert!(session.profiles.get("doomed").is_some());
+        assert_eq!(session.conns.len(), 1);
+
+        let removed = session
+            .run("conn.delete", json!({"conn": "doomed", "confirm": true}))
+            .expect("delete");
+        assert_eq!(removed["removed"], "doomed");
+        assert!(session.profiles.get("doomed").is_none());
+        assert!(session.conns.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_connection_takes_both_of_its_keychain_accounts() {
+        let (_guard, log) = crate::test_support::fake_security("doomed#ssh", "hunter2");
+        let mut session = Session::new();
+        let cfg = profile("doomed");
+        session.profiles.upsert(cfg.clone()).ok();
+        session.conns.push(Conn::new(cfg));
+        session
+            .run("conn.delete", json!({"conn": "doomed", "confirm": true}))
+            .expect("delete");
+
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        if !crate::profiles::keychain_available() {
+            // No keychain, so nothing to delete — and no call to the fake either.
+            assert!(!calls.contains("delete-generic-password"), "{calls}");
+            return;
+        }
+        // The database password's account and the SSH one, or a deleted profile leaks a password.
+        assert!(calls.lines().any(|l| l.ends_with("-a doomed")), "{calls}");
+        assert!(
+            calls.lines().any(|l| l.ends_with("-a doomed#ssh")),
+            "{calls}"
+        );
+    }
+
+    #[test]
+    fn the_ssh_password_is_stored_and_forgotten_under_its_own_account() {
+        let (_guard, log) = crate::test_support::fake_security("doomed#ssh", "hunter2");
+        let mut session = Session::new();
+        let cfg = profile("doomed");
+        session.profiles.upsert(cfg.clone()).ok();
+        session.conns.push(Conn::new(cfg));
+
+        if !crate::profiles::keychain_available() {
+            let refused = session
+                .run(
+                    "conn.sshPassword",
+                    json!({"conn": "doomed", "password": "hunter2"}),
+                )
+                .expect_err("no keychain to store into");
+            let sentence = refused.to_string();
+            assert!(sentence.contains("keychain"), "{sentence}");
+            assert!(sentence.contains("ssh asks"), "{sentence}");
+            return;
+        }
+
+        let stored = session
+            .run(
+                "conn.sshPassword",
+                json!({"conn": "doomed", "password": "hunter2"}),
+            )
+            .expect("store");
+        assert_eq!(stored["account"], "doomed#ssh");
+        assert!(std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("-a doomed#ssh"));
+        assert_eq!(
+            crate::profiles::keychain_lookup("doomed#ssh")
+                .expect("lookup")
+                .as_deref(),
+            Some("hunter2")
+        );
+        // Nothing reached the profile file: `ConnectionConfig` has no SSH password field at all.
+        let saved = std::fs::read_to_string(crate::profiles::profiles_path()).unwrap_or_default();
+        assert!(!saved.contains("hunter2"), "{saved}");
+
+        let gone = session
+            .run(
+                "conn.sshPassword",
+                json!({"conn": "doomed", "remove": true}),
+            )
+            .expect("forget");
+        assert_eq!(gone["removed"], "doomed");
+        // Neither direction takes a password from the command line arguments of the app.
+        assert!(session
+            .run("conn.sshPassword", json!({"conn": "doomed"}))
+            .is_err());
+    }
+
+    #[test]
+    fn testing_a_connection_says_so_when_no_tunnel_ran() {
+        let _guard = crate::test_support::scratch_config();
+        let mut session = Session::new();
+        let mut cfg = ConnectionConfig::sqlite(
+            std::env::temp_dir()
+                .join("datacraft-test-conn.db")
+                .to_string_lossy()
+                .to_string(),
+        );
+        cfg.id = "local".into();
+        cfg.name = "local".into();
+        session.profiles.upsert(cfg.clone()).ok();
+        session.conns.push(Conn::new(cfg));
+
+        let out = session
+            .run("conn.test", json!({"conn": "local"}))
+            .expect("test");
+        assert_eq!(out["ok"], true);
+        // Additive: the key is always there, and null exactly when no hop was made.
+        assert!(
+            out.as_object().is_some_and(|o| o.contains_key("tunnel")),
+            "{out}"
+        );
+        assert!(out["tunnel"].is_null(), "{out}");
     }
 }

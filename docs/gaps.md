@@ -93,7 +93,9 @@ The vendor tools write plain files. `gzip` plus an age or GPG wrapper is the sha
 - Bi-directional and rule-based sync (`sync.bidirectional`, `sync.conflictRules`).
 - Blob editing: text and hex editors for `bytea`/`blob` columns (`grid.blobEditor`).
 - Parameterised queries from the editor (`sql.parameterised`).
-- HTTP tunnel and SSH-by-password for locked-down networks (`conn.httpTunnel`, `conn.sshPassword`).
+- An HTTP tunnel for locked-down networks (`conn.httpTunnel`). SSH-by-password is built
+  (`conn.sshPassword`); it needs the login keychain, and `docs/architecture.md` records what happens
+  without one.
 - Data profiling and a data dictionary export (`tools.dataProfiling`, `tools.dataDictionary`).
 - Localisation (`platform.i18n`), Windows and Linux builds (`platform.windows`, `platform.linux`).
 - Cloud and team features: shared query library, synced settings (`cloud.*`).

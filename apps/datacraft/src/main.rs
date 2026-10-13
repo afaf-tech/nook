@@ -19,10 +19,33 @@ fn usage() -> String {
   datacraft --sql \"select * from users\"      start with this query
   datacraft --control 7981                   serve the JSON control channel
   datacraft --shot /tmp/shot.png             render one frame to a PNG and exit
+  datacraft --ssh-askpass <id>               print the connection's stored SSH password (ssh runs this)
 
 The same commands are available from the shell (`datacraft-cli commands`) and over MCP
 (`datacraft-cli mcp`)."
         .to_string()
+}
+
+/// The helper `ssh` execs when a tunnel needs the stored SSH password: print one line and exit. The
+/// connection id arrives in argv, or in `DATACRAFT_ASKPASS_CONN` because ssh's askpass protocol
+/// passes only the prompt — the password itself is read here, in the helper, so it never reaches the
+/// parent's arguments or environment.
+fn askpass(id: Option<String>) -> i32 {
+    let id = id.or_else(|| std::env::var(datacraft_engine::ASKPASS_CONN_ENV).ok());
+    let Some(id) = id else {
+        eprintln!("--ssh-askpass needs a connection id");
+        return 2;
+    };
+    match datacraft_engine::profiles::ssh_askpass_line(&id) {
+        Ok(secret) => {
+            println!("{secret}");
+            0
+        }
+        Err(e) => {
+            eprintln!("datacraft --ssh-askpass: {e}");
+            1
+        }
+    }
 }
 
 fn main() {
@@ -55,6 +78,10 @@ fn main() {
                         std::process::exit(2);
                     }
                 }
+            }
+            "--ssh-askpass" => {
+                // ssh runs the app this way; it prints one line and exits instead of starting up.
+                std::process::exit(askpass(args.get(index + 1).cloned()));
             }
             "--conn" => {
                 index += 1;

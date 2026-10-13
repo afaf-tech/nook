@@ -146,19 +146,28 @@ pub struct SshTunnel {
 }
 
 impl SshTunnel {
-    /// `ssh -N -L …` argument vector, minus the executable.
-    pub fn ssh_args(&self, target_host: &str, target_port: u16, local_port: u16) -> Vec<String> {
+    /// `ssh -N -L …` argument vector, minus the executable. `prompt` drops `BatchMode=yes` so ssh
+    /// may ask for a password — the password itself never travels through these arguments.
+    pub fn ssh_args(
+        &self,
+        target_host: &str,
+        target_port: u16,
+        local_port: u16,
+        prompt: bool,
+    ) -> Vec<String> {
         let mut args = vec![
             "-N".to_string(),
             "-o".into(),
             "ExitOnForwardFailure=yes".into(),
-            "-o".into(),
-            "BatchMode=yes".into(),
-            "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
-            "-p".into(),
-            self.port.to_string(),
         ];
+        if !prompt {
+            args.push("-o".into());
+            args.push("BatchMode=yes".into());
+        }
+        args.push("-o".into());
+        args.push("StrictHostKeyChecking=accept-new".into());
+        args.push("-p".into());
+        args.push(self.port.to_string());
         if !self.key_file.is_empty() {
             args.push("-i".into());
             args.push(self.key_file.clone());
@@ -436,7 +445,7 @@ mod tests {
             key_file: "~/.ssh/id_ed25519".into(),
             local_port: 15432,
         };
-        let args = t.ssh_args("10.0.0.5", 5432, 15432);
+        let args = t.ssh_args("10.0.0.5", 5432, 15432, false);
         assert!(args.contains(&"-L".to_string()));
         assert!(args.contains(&"15432:10.0.0.5:5432".to_string()));
         assert_eq!(
@@ -444,6 +453,37 @@ mod tests {
             Some("ops@jump.example.com")
         );
         assert!(args.contains(&"BatchMode=yes".into()));
+    }
+
+    #[test]
+    fn only_a_prompting_tunnel_lets_ssh_ask_for_a_password() {
+        let t = SshTunnel {
+            enabled: true,
+            host: "jump.example.com".into(),
+            port: 2222,
+            user: "ops".into(),
+            key_file: String::new(),
+            local_port: 15432,
+        };
+        let quiet = t.ssh_args("10.0.0.5", 5432, 15432, false);
+        let asking = t.ssh_args("10.0.0.5", 5432, 15432, true);
+        assert!(quiet.contains(&"BatchMode=yes".into()));
+        assert!(!asking.contains(&"BatchMode=yes".into()));
+        // Asking is exactly the quiet vector minus the `-o BatchMode=yes` pair.
+        let mut without_batch = quiet.clone();
+        let at = without_batch
+            .iter()
+            .position(|a| a == "BatchMode=yes")
+            .expect("BatchMode");
+        without_batch.drain(at - 1..=at);
+        assert_eq!(without_batch, asking);
+        // `-i` is the key file's, not the prompt flag's.
+        assert!(!asking.contains(&"-i".into()));
+        let mut keyed = t.clone();
+        keyed.key_file = "~/.ssh/id_ed25519".into();
+        assert!(keyed
+            .ssh_args("10.0.0.5", 5432, 15432, true)
+            .contains(&"-i".into()));
     }
 
     #[test]

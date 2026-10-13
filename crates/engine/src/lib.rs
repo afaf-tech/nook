@@ -29,7 +29,7 @@ use serde_json::json;
 pub use catalog::{catalog as feature_catalog, CatalogEntry};
 pub use jobs::{Job, JobKind, JobStore};
 pub use profiles::ProfileStore;
-pub use tunnel::Tunnel;
+pub use tunnel::{SshSecret, Tunnel, ASKPASS_CONN_ENV};
 
 /// Command parameters: a JSON object, because the ribbon, the CLI, the control channel and MCP all
 /// dispatch by id and must pass the same shapes.
@@ -883,6 +883,34 @@ pub(crate) mod test_support {
         }
         std::env::set_var("DATACRAFT_CONFIG_DIR", dir);
         guard
+    }
+
+    /// A fake `security` on `DATACRAFT_SECURITY_BIN`: it records every call's arguments in a log and
+    /// answers a lookup for `account` with `secret`, so the keychain paths can be exercised without
+    /// the login keychain. It takes the same lock as `scratch_config` — a process-wide override
+    /// cannot be set while another test reads it — and returns the log the assertions read.
+    pub fn fake_security(
+        account: &str,
+        secret: &str,
+    ) -> (MutexGuard<'static, ()>, std::path::PathBuf) {
+        let guard = scratch_config();
+        let dir = std::env::temp_dir().join("datacraft-test-security");
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("calls.log");
+        let _ = std::fs::remove_file(&log);
+        let script = dir.join("security");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *find-generic-password*{account}*) printf '%s\\n' '{secret}' ;;\nesac\nexit 0\n",
+            log.display()
+        );
+        let _ = std::fs::write(&script, body);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+        }
+        std::env::set_var("DATACRAFT_SECURITY_BIN", &script);
+        (guard, log)
     }
 }
 
