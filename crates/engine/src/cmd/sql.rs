@@ -807,6 +807,172 @@ mod tests {
         );
     }
 
+    /// The stamp every run path owes the register, checked across all four entry points at once:
+    /// `SqlState::ran_script` is the text the request resolved to — the `sql` parameter when the
+    /// command was given one, the tab's own editor text otherwise — and never the statement a path
+    /// cut out of that text. The executed statement, the tab's `results[0]` and the history entry
+    /// still name what actually ran, so the stronger stamp costs no truth elsewhere. Three review
+    /// rounds fixed this one path at a time; this pins the siblings against the same rule.
+    #[test]
+    fn every_run_path_stamps_the_source_and_still_runs_the_statement() {
+        let (_guard, mut session, tab) = live_session();
+
+        // `sql.run`, given a script: the whole parameter is the stamp, both statements run, and the
+        // history records each statement as it always did.
+        let script = "select 1 as one;\nselect 2 as two;\n";
+        let out = session
+            .run("sql.run", json!({"sql": script}))
+            .expect("run with sql");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, script,
+            "sql.run stamps the script the request came from"
+        );
+        assert_eq!(out["results"][0]["statement"], "select 1 as one;");
+        assert_eq!(
+            session.tabs[tab].sql.results[0].statement,
+            "select 1 as one;"
+        );
+        let tail: Vec<&str> = session
+            .history
+            .iter()
+            .rev()
+            .take(2)
+            .map(|h| h.sql.as_str())
+            .collect();
+        assert_eq!(tail, vec!["select 2 as two;", "select 1 as one;"]);
+
+        // `sql.run`, from the editor: with no `sql` the tab's own text is both the source and the stamp.
+        let editor = "select 3 as three;\n";
+        session.tabs[tab].sql.text = editor.to_owned();
+        let out = session
+            .run("sql.run", json!({}))
+            .expect("run from the editor");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, editor,
+            "sql.run with no sql stamps the editor's text"
+        );
+        assert_eq!(out["results"][0]["statement"], "select 3 as three;");
+        assert_eq!(
+            session.history.last().map(|h| h.sql.as_str()),
+            Some("select 3 as three;"),
+            "history still names the statement that ran"
+        );
+
+        // `sql.runStatement`, given a script: the caret's statement runs while the whole script is
+        // the stamp, so the register does not read the unchanged editor as stale.
+        let script = "select 4 as four;\nselect 5 as five;\n";
+        let out = session
+            .run("sql.runStatement", json!({"index": 1, "sql": script}))
+            .expect("run the statement");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, script,
+            "sql.runStatement stamps the text the statement was cut from, not the cut"
+        );
+        assert_eq!(out["statement"], "select 5 as five;");
+        assert_eq!(
+            session.tabs[tab].sql.results[0].statement,
+            "select 5 as five;"
+        );
+        assert_eq!(
+            session.history.last().map(|h| h.sql.as_str()),
+            Some("select 5 as five;"),
+            "history still names the statement that ran"
+        );
+
+        // `sql.runStatement`, from the editor: the pick obeys the index, the stamp stays the text.
+        let editor = "select 6 as six;\nselect 7 as seven;\n";
+        session.tabs[tab].sql.text = editor.to_owned();
+        let out = session
+            .run("sql.runStatement", json!({"index": 0}))
+            .expect("run the caret's statement");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, editor,
+            "sql.runStatement with no sql stamps the editor's whole text"
+        );
+        assert_eq!(out["statement"], "select 6 as six;");
+        assert_eq!(
+            session.tabs[tab].sql.results[0].statement,
+            "select 6 as six;"
+        );
+
+        // `sql.runSelection`, given a script: the selected statement runs, the text it was selected
+        // from is the stamp. This is the assertion the reverted stamp fails.
+        let script = "select 8 as eight;\nselect 9 as nine;\n";
+        let out = session
+            .run("sql.runSelection", json!({"start": 0, "sql": script}))
+            .expect("run the selection");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, script,
+            "sql.runSelection stamps the text the selection came from, not the statement cut out of it"
+        );
+        assert_eq!(out["results"][0]["statement"], "select 8 as eight;");
+        assert_eq!(
+            session.tabs[tab].sql.results[0].statement,
+            "select 8 as eight;"
+        );
+        assert_eq!(
+            session.history.last().map(|h| h.sql.as_str()),
+            Some("select 8 as eight;"),
+            "history still names the statement that ran"
+        );
+
+        // `sql.runSelection`, from the editor: same rule, the tab's text as the source and the stamp.
+        let editor = "select 10 as ten;\nselect 11 as eleven;\n";
+        session.tabs[tab].sql.text = editor.to_owned();
+        let out = session
+            .run("sql.runSelection", json!({"start": 0}))
+            .expect("run the editor's selection");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, editor,
+            "sql.runSelection with no sql stamps the editor's whole text"
+        );
+        assert_eq!(out["results"][0]["statement"], "select 10 as ten;");
+        assert_eq!(
+            session.tabs[tab].sql.results[0].statement,
+            "select 10 as ten;"
+        );
+
+        // `sql.explain`, given a script: the plan is the run, the statement it explains is the run's
+        // name, and the stamp is again the text the request came from.
+        let history_before = session.history.len();
+        let script = "select 12 as twelve;\n";
+        let out = session
+            .run("sql.explain", json!({"sql": script}))
+            .expect("explain with sql");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, script,
+            "sql.explain stamps the text the request came from, not the statement it reduced to"
+        );
+        assert_eq!(out["statement"], "select 12 as twelve;");
+        assert_eq!(
+            session.tabs[tab].sql.results[0].statement, "EXPLAIN select 12 as twelve;",
+            "the register names what the plan run was"
+        );
+        // ponytail: explain plans through the driver, never through `run_sql`, so it writes no
+        // history entry to check; pinned as an absence. If explain ever records one, assert its text.
+        assert_eq!(
+            session.history.len(),
+            history_before,
+            "explain writes no history entry"
+        );
+
+        // `sql.explain`, from the editor: the tab's text is both the source and the stamp.
+        let editor = "select 13 as thirteen;\n";
+        session.tabs[tab].sql.text = editor.to_owned();
+        let out = session
+            .run("sql.explain", json!({}))
+            .expect("explain from the editor");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, editor,
+            "sql.explain with no sql stamps the editor's text"
+        );
+        assert_eq!(out["statement"], "select 13 as thirteen;");
+        assert_eq!(
+            session.tabs[tab].sql.results[0].statement,
+            "EXPLAIN select 13 as thirteen;"
+        );
+    }
+
     #[test]
     fn completion_works_without_a_catalog() {
         let mut session = Session::new();
