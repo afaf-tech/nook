@@ -207,9 +207,12 @@ pub fn keychain_available() -> bool {
 /// pipe form hangs it: `security` opens `/dev/tty` for the confirmation read, never takes the piped
 /// bytes, and the store blocks forever in `wait_with_output` (measured with the same binary and the
 /// same call, differing only in whether the app had a controlling terminal). Keeping the secret out
-/// of `ps` therefore needs `setsid` — a new dependency this phase's non-goals forbid — so the
-/// exposure is recorded here instead: for as long as the child lives, the same user can read the
-/// secret from the process table. Revisit if a session can be detached without a new crate.
+/// of `ps` therefore needs the child to have no controlling terminal, i.e. `setsid` between fork and
+/// exec — reachable only through `unsafe` (a raw `extern "C"` next to a `pre_exec` call; the
+/// workspace has no `unsafe` at all today) or a detach crate such as `nix`, which this phase's
+/// non-goals forbid. So the exposure is recorded here instead: for as long as the child lives, the
+/// same user can read the secret from the process table. Revisit when adding `unsafe` to the
+/// workspace is a decision someone is willing to make on its own merits.
 pub fn keychain_store(id: &str, secret: &str) -> Result<()> {
     if !keychain_available() {
         return Err(Error::unsupported(

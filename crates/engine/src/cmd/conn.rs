@@ -677,15 +677,14 @@ mod tests {
         assert!(calls.contains("-a doomed#ssh"), "{calls}");
         // `security` takes the password as `-w`'s value: the store's recorded ceiling, because a bare
         // `-w` reads it from the terminal when the app has one and hangs there.
+        let with_secret: Vec<&str> = calls
+            .lines()
+            .filter(|line| line.contains("hunter2"))
+            .collect();
+        assert_eq!(with_secret.len(), 1, "{calls}");
         assert!(
-            calls
-                .lines()
-                .any(|line| line.ends_with("-a doomed#ssh -w hunter2")),
-            "{calls}"
-        );
-        assert!(
-            !calls.lines().any(|line| line == "stdin hunter2 hunter2"),
-            "the store went back to stdin, which hangs under a controlling terminal: {calls}"
+            with_secret[0].ends_with("-a doomed#ssh -w hunter2"),
+            "the secret reached the child by something other than `-w`'s value: {calls}"
         );
         assert_eq!(
             crate::profiles::keychain_lookup("doomed#ssh")

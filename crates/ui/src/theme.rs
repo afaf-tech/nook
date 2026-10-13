@@ -146,7 +146,9 @@ pub const STATUS_DOT: f32 = 8.0;
 /// single row is the same band without the second row and its gap: 1 + 12 + 28 + 12 = 53.
 pub const DLG_FOOT_H: f32 = 1.0 + 2.0 * S5 as f32 + S4 as f32 + 2.0 * BUTTON_H;
 pub const DLG_FOOT_ONE_H: f32 = 1.0 + 2.0 * S5 as f32 + BUTTON_H;
-/// The line height the sheet sets on its running text (`.helper`, `.msg`, `.para`, `.note`).
+/// The line height the sheet sets on its running text (`.helper`, `.msg`, `.note`). `.para` is a
+/// sibling class of the same family — `--t-md` ink, `--muted` — but every sheet pins it at 1.5, not
+/// 1.45, so it is not part of this set.
 const DLG_LINE_H: f32 = 1.45;
 /// The `.cb` box's own 2px corner, a square one inside `--r-ctl`, and the 9px `.cb`/`.badge` mark it
 /// and the `.msg` badge print.
