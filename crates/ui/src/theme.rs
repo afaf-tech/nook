@@ -115,6 +115,36 @@ pub const T_LG: f32 = 14.0;
 pub const T_XL: f32 = 18.0;
 pub const T_MONO: f32 = 12.0;
 
+/// The dialog layer's own geometry. `.dlg` is 560 wide and the confirmation's narrow `.dlg` is 440;
+/// `.dlg-h`'s `16 20 12` of padding wraps the title block, so the head is 68; `.tab` is a 32px item and
+/// the strip draws the 1px hairline at its bottom edge, so that band is 33; `.inp` is 28, the dialog's
+/// `.seg` is 28 around 26px items that fit inside its 1px border, `.chip` is 20 and the keychain chip
+/// inside the password field is 18, `.cb` is 14, and the test row's `.dot` is 8.
+pub const DIALOG_W: f32 = 560.0;
+pub const DIALOG_NARROW_W: f32 = 440.0;
+/// `.dlg-h`'s 68: the `--s6` above the title, the title block and the `--s5` below it. The block is a
+/// `T_LG` line, the `--s1` gap and a `T_SM` line, which are 39.7 of it at the sheet's 1.45 line height
+/// — the head's 68 is the design's pixel mark, so that last 0.3 is air, and the block has to fit.
+pub const DLG_HEAD_H: f32 = 68.0;
+pub const DLG_TAB_H: f32 = 32.0;
+pub const DLG_TABS_H: f32 = DLG_TAB_H + 1.0;
+pub const INPUT_H: f32 = 28.0;
+pub const DLG_SEG_H: f32 = 28.0;
+pub const DLG_SEG_ITEM_H: f32 = DLG_SEG_H - 2.0;
+pub const DLG_CHIP_H: f32 = 20.0;
+pub const KEYCHIP_H: f32 = 18.0;
+pub const CHECKBOX: f32 = 14.0;
+pub const STATUS_DOT: f32 = 8.0;
+/// `.dlg-f`'s pinned column: `--s5` of padding around 28px rows `--s5` apart. The editor's two rows
+/// are 92; the confirmation's single row is one row and one gap shorter.
+pub const DLG_FOOT_H: f32 = 3.0 * S5 as f32 + 2.0 * BUTTON_H;
+/// The line height the sheet sets on its running text (`.helper`, `.msg`, `.para`, `.note`).
+const DLG_LINE_H: f32 = 1.45;
+/// The `.cb` box's own 2px corner, a square one inside `--r-ctl`, and the 9px `.cb`/`.badge` mark it
+/// and the `.msg` badge print.
+const CB_RADIUS: u8 = 2;
+const MARK_GLYPH: f32 = 9.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tokens {
     pub dark: bool,
@@ -1621,12 +1651,18 @@ impl Mark {
     }
 }
 
-/// How much a `.btn` insists on being noticed: the design's plain button on its sheet's fill, or its
-/// `.primary` one on `accent`.
+/// How much a `.btn` insists on being noticed: the design's plain button on its sheet's fill, its
+/// `.primary` one on `accent`, its `.danger` one for a destructive action (the dialog's Delete, the
+/// confirmation's Drop) and its `.ghost` one, which paints only its ink. `Off` is the face a disabled
+/// dialog button wears (`panel_high` fill, `text_dim` ink), which is not what a disabled toolbar button
+/// is: [`button_face`]'s `enabled` argument keeps its own transparent face for those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emphasis {
     Plain,
     Primary,
+    Danger,
+    Ghost,
+    Off,
 }
 
 /// What one `.btn` paints: its fill at rest, its 1px border, its ink, and the fill the pointer gets —
@@ -1639,10 +1675,12 @@ pub struct ButtonFace {
     pub hover: Option<Color32>,
 }
 
-/// The design's three `.btn` faces, from the sheet's resting fill: the plain button (`stroke` border,
+/// The design's `.btn` faces, from the sheet's resting fill: the plain button (`stroke` border,
 /// `text` ink, `hover` under the pointer), `.primary` (`accent` fill, `accent_line` border,
-/// `accent_text` ink) and `.off` (transparent, `text_faint` ink, no pointer reaction). Disabled beats
-/// emphasis, because the only disabled button in these frames is the editor's Stop.
+/// `accent_text` ink), `.danger` (`error` fill and border, `panel` ink — the destructive button reads
+/// on the dialog's own surface, not on a chip), `.ghost` (nothing of its own but `text_dim` ink and the
+/// pointer's fill) and `.off` (`panel_high` fill, `stroke` border, `text_dim` ink, no reaction).
+/// Disabled beats emphasis, because the only disabled button in these frames is the editor's Stop.
 pub fn button_face(
     tokens: &Tokens,
     sheet: Color32,
@@ -1662,6 +1700,24 @@ pub fn button_face(
             fill: tokens.accent,
             border: tokens.accent_line,
             ink: tokens.accent_text,
+            hover: None,
+        },
+        Emphasis::Danger => ButtonFace {
+            fill: tokens.error,
+            border: tokens.error,
+            ink: tokens.panel,
+            hover: None,
+        },
+        Emphasis::Ghost => ButtonFace {
+            fill: Color32::TRANSPARENT,
+            border: Color32::TRANSPARENT,
+            ink: tokens.text_dim,
+            hover: Some(tokens.hover),
+        },
+        Emphasis::Off => ButtonFace {
+            fill: tokens.panel_high,
+            border: tokens.stroke,
+            ink: tokens.text_dim,
             hover: None,
         },
         Emphasis::Plain => ButtonFace {
@@ -2074,6 +2130,540 @@ pub fn outlined(ui: &Ui, rect: egui::Rect, tokens: &Tokens, radius: CornerRadius
         Stroke::new(1.0, tokens.stroke),
         StrokeKind::Inside,
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The dialog layer: `.dlg` and the bands inside it — the head, the step strip, the body's fields and
+// the pinned footer. Each helper paints from the tokens alone, so a caller states the design's
+// structure and none of its values. The bands butt against each other, so the caller's own stack spends
+// no item spacing between them (`item_spacing.y = 0` on the dialog's `Ui`); the body's `--s5` gap is
+// the body's stack, which is the caller's too.
+//
+// ponytail: the sheet sets `.dlg-t`, `.tab.on` and its chips to 600 weight and the panes' `.btn` has no
+// weight axis to set — egui's bundled families are single-weight (see `chip`), so those read by colour,
+// the accent run and shape alone. Bundle a bold family if the weight is ever wanted.
+// ---------------------------------------------------------------------------------------------
+
+/// `.dlg`: the design's window — `surface`, a 1px `stroke_strong` border, `--r-box`, no shadow. The
+/// bands inside carry their own padding (`.dlg-h` `16 20 12`, `.dlg-b` `16 20`, `.dlg-f` `12 20`), so
+/// the frame adds none: a margin here would make the dialog wider than its 560.
+pub fn dialog_frame(tokens: &Tokens) -> Frame {
+    Frame::new()
+        .fill(tokens.panel)
+        .stroke(Stroke::new(1.0, tokens.stroke_strong))
+        .corner_radius(CornerRadius::same(R_BOX))
+        .inner_margin(Margin::ZERO)
+        .outer_margin(Margin::ZERO)
+}
+
+/// `.dlg-h`: the 68px head — `--s6` above the title, the `T_LG` title, the `T_SM` `text_dim` subtitle
+/// `--s1` under it, `--s5` below — with the 24px `×` against the inner right edge. `mark` is the
+/// confirmation's 20px `.ig` badge in front of the title (the sheet's only `.ig` is `.ig.err`, so it
+/// wears `error`), and `mono` prints the subtitle in the mono family for a `.dlg-sub.mono` line.
+/// Returns the `×`'s response, so the caller closes when it is clicked.
+pub fn dialogue_head(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    mark: Option<&str>,
+    title: &str,
+    subtitle: &str,
+    mono: bool,
+) -> Response {
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), DLG_HEAD_H), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::ZERO, tokens.panel);
+    let inner = Rect::from_min_max(
+        egui::pos2(rect.left() + f32::from(S7), rect.top() + f32::from(S6)),
+        egui::pos2(rect.right() - f32::from(S7), rect.bottom() - f32::from(S5)),
+    );
+    let close = ui.interact(
+        Rect::from_min_size(
+            egui::pos2(inner.right() - TAB_CLOSE, inner.top()),
+            Vec2::splat(TAB_CLOSE),
+        ),
+        ui.id().with("dlg-close"),
+        Sense::click(),
+    );
+
+    let mut left = inner.left();
+    if let Some(mark) = mark {
+        let badge = Rect::from_min_size(
+            egui::pos2(left, inner.top() + f32::from(S1)),
+            Vec2::splat(f32::from(S7)),
+        );
+        let radius = CornerRadius::same(R_CTL);
+        let painter = ui.painter();
+        painter.rect_stroke(
+            badge,
+            radius,
+            Stroke::new(1.0, tokens.error),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            badge.center(),
+            egui::Align2::CENTER_CENTER,
+            mark,
+            tokens.mono(T_XS),
+            tokens.error,
+        );
+        left = badge.right() + f32::from(S5);
+    }
+
+    let painter = ui.painter();
+    let title_galley = painter.layout_no_wrap(title.to_owned(), tokens.font(T_LG), tokens.text);
+    let subtitle_top = inner.top() + title_galley.size().y + f32::from(S1);
+    painter.galley(egui::pos2(left, inner.top()), title_galley, tokens.text);
+    painter.text(
+        egui::pos2(left, subtitle_top),
+        egui::Align2::LEFT_TOP,
+        subtitle,
+        if mono {
+            tokens.mono(T_SM)
+        } else {
+            tokens.font(T_SM)
+        },
+        tokens.text_dim,
+    );
+    if close.hovered() {
+        ui.painter()
+            .rect_filled(close.rect, CornerRadius::same(R_CTL), tokens.hover);
+    }
+    ui.painter().text(
+        close.rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        tokens.font(T_LG),
+        tokens.text_dim,
+    );
+    close
+}
+
+/// `.tabs`: the step strip — `--s7` of lead-in, `T_MD` items `--s6` apart, the active one in `text`
+/// with the design's 2px `accent` run along its own bottom edge — and the 1px `stroke` hairline the band
+/// draws at its bottom edge, which is why the band is 33 and the hairline lands 100 below the head's
+/// top. Returns the item that was clicked.
+pub fn dialogue_tabs(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    labels: &[&str],
+    active: usize,
+) -> Option<usize> {
+    let font = tokens.font(T_MD);
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|label| measured(ui, font.clone(), label))
+        .collect();
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), DLG_TABS_H), Sense::hover());
+    band_hairline(ui, tokens, rect);
+    let inset = f32::from(S7);
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(
+                egui::pos2(rect.left() + inset, rect.top()),
+                egui::pos2(rect.right() - inset, rect.top() + DLG_TAB_H),
+            ))
+            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+    );
+    child.spacing_mut().item_spacing.x = f32::from(S6);
+    let mut clicked = None;
+    for (index, (label, width)) in labels.iter().zip(&widths).enumerate() {
+        let (item, response) =
+            child.allocate_exact_size(Vec2::new(*width, DLG_TAB_H), Sense::click());
+        let painter = child.painter();
+        if index == active {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(item.left(), item.bottom() - INDICATOR_W),
+                    item.max,
+                ),
+                CornerRadius::ZERO,
+                tokens.accent,
+            );
+        }
+        painter.text(
+            item.center(),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            if index == active {
+                tokens.text
+            } else {
+                tokens.text_dim
+            },
+        );
+        if response.clicked() {
+            clicked = Some(index);
+        }
+    }
+    clicked
+}
+
+/// The dialog's `.seg`: a 28px `panel_alt` container inside a 1px `stroke` border, holding 26px mono
+/// items `--s5` of padding wide, split by the same hairline, the active item on `accent` with
+/// `accent_text` ink. The pane's [`pane_segmented`] is the same idea with the pane's own inset and ring;
+/// the top bar's [`segmented`] marks its selection with the accent indicator instead. Returns the item
+/// that was clicked.
+pub fn dialogue_segmented(ui: &mut Ui, tokens: &Tokens, options: &[(&str, bool)]) -> Option<usize> {
+    if options.is_empty() {
+        return None;
+    }
+    let font = tokens.mono(T_SM);
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|(label, _)| measured(ui, font.clone(), label) + 2.0 * f32::from(S5))
+        .collect();
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(widths.iter().sum::<f32>() + 2.0, DLG_SEG_H),
+        Sense::hover(),
+    );
+    let radius = CornerRadius::same(R_CTL);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink(1.0))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.spacing_mut().item_spacing.x = 0.0;
+    let mut clicked = None;
+    for (index, ((label, selected), width)) in options.iter().zip(&widths).enumerate() {
+        let (item, response) =
+            child.allocate_exact_size(Vec2::new(*width, DLG_SEG_ITEM_H), Sense::click());
+        // The container's `overflow: hidden`: the first and last fills take its rounding.
+        let fill_radius = match (index, options.len()) {
+            (0, 1) => radius,
+            (0, _) => CornerRadius {
+                nw: R_CTL,
+                sw: R_CTL,
+                ..CornerRadius::ZERO
+            },
+            (last, len) if last == len - 1 => CornerRadius {
+                ne: R_CTL,
+                se: R_CTL,
+                ..CornerRadius::ZERO
+            },
+            _ => CornerRadius::ZERO,
+        };
+        let painter = child.painter();
+        if *selected {
+            painter.rect_filled(item, fill_radius, tokens.accent);
+        }
+        if index > 0 {
+            painter.vline(
+                item.left(),
+                item.top()..=item.bottom(),
+                Stroke::new(1.0, tokens.stroke),
+            );
+        }
+        painter.text(
+            item.center(),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            if *selected {
+                tokens.accent_text
+            } else {
+                tokens.text_dim
+            },
+        );
+        if response.clicked() {
+            clicked = Some(index);
+        }
+    }
+    clicked
+}
+
+/// `.flab`: the field's label line. Its box is the design's `--s6`, which is what makes a `.fld` 50
+/// tall — the label, the `--s3` gap the caller's stack spends and a 28px [`input`] — so a field built
+/// from these two helpers is the height the measurement table names.
+pub fn field_label(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
+    ui.add_sized(
+        Vec2::new(ui.available_width(), f32::from(S6)),
+        egui::Label::new(RichText::new(text).size(T_XS).color(tokens.text_dim)),
+    )
+}
+
+/// `.inp`: the 28px field box — `panel_alt`, a 1px `stroke` border, `--r-ctl`, `--s4` of padding — with
+/// the design's focus and error treatment: `error` swaps the border to `error`, and the field holding
+/// egui's focus swaps it to `accent` and adds the 2px `accent` ring 1px outside. `add` paints the
+/// field's own widget and returns its response, so the box knows whether it has the focus; that widget
+/// must paint no chrome of its own (`Frame::NONE` and `Margin::ZERO` on a `TextEdit`, so the box's
+/// `--s4` is the whole padding) and carries its own ink — the placeholder is `text_faint`, which egui's
+/// default hint colour is not.
+pub fn input(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    width: f32,
+    error: bool,
+    enabled: bool,
+    add: impl FnOnce(&mut Ui) -> Response,
+) -> Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, INPUT_H), Sense::hover());
+    let radius = CornerRadius::same(R_CTL);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, if error { tokens.error } else { tokens.stroke }),
+        StrokeKind::Inside,
+    );
+
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(Vec2::new(f32::from(S4), 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let response = child.add_enabled_ui(enabled, |ui| add(ui)).inner;
+    if response.has_focus() {
+        // Only the border and the ring: the box's own fill is already under the text.
+        let painter = ui.painter();
+        painter.rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, tokens.accent),
+            StrokeKind::Inside,
+        );
+        painter.rect_stroke(
+            rect.expand(1.0),
+            CornerRadius::same(R_CTL + 1),
+            Stroke::new(2.0, tokens.accent),
+            StrokeKind::Middle,
+        );
+    }
+    response
+}
+
+/// The design's `.chip` at a given height: the dialog's `.facts` chips are 20 ([`DLG_CHIP_H`]) and the
+/// keychain chip inside the password field is 18 ([`KEYCHIP_H`]), where [`chip`] is fixed at the row's
+/// 24. `panel_alt`, a 1px `stroke`, `--r-chip`, one `T_XS` mono line in `text_dim`.
+pub fn tag_of(ui: &mut Ui, tokens: &Tokens, text: &str, height: f32) -> Response {
+    let font = tokens.mono(T_XS);
+    let width = measured(ui, font.clone(), text) + 2.0 * f32::from(S4);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let radius = CornerRadius::same(R_CHIP);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.panel_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        font,
+        tokens.text_dim,
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
+    response
+}
+
+/// `.chk` + `.cb`: the 14px box `--s4` before its `T_MD` label, `accent` filled with an `accent_text`
+/// ✓ when it is on and `panel_alt` inside a `stroke_strong` border when it is off. A disabled box paints
+/// its reason's own "not now" ink and takes no pointer, which is the treatment the design gives a
+/// control that cannot act.
+pub fn checkbox(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    label: &str,
+    checked: &mut bool,
+    enabled: bool,
+) -> Response {
+    let font = tokens.font(T_MD);
+    let label_width = measured(ui, font.clone(), label);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(
+            CHECKBOX + f32::from(S4) + label_width,
+            CHECKBOX.max(T_MD * DLG_LINE_H),
+        ),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if response.clicked() {
+        *checked = !*checked;
+    }
+    let box_rect = Rect::from_center_size(
+        egui::pos2(rect.left() + CHECKBOX / 2.0, rect.center().y),
+        Vec2::splat(CHECKBOX),
+    );
+    let radius = CornerRadius::same(CB_RADIUS);
+    let painter = ui.painter();
+    painter.rect_filled(
+        box_rect,
+        radius,
+        if *checked {
+            tokens.accent
+        } else {
+            tokens.panel_alt
+        },
+    );
+    painter.rect_stroke(
+        box_rect,
+        radius,
+        Stroke::new(
+            1.0,
+            if *checked {
+                tokens.accent
+            } else {
+                tokens.stroke_strong
+            },
+        ),
+        StrokeKind::Inside,
+    );
+    if *checked {
+        painter.text(
+            box_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "✓",
+            tokens.mono(MARK_GLYPH),
+            tokens.accent_text,
+        );
+    }
+    painter.text(
+        egui::pos2(rect.left() + CHECKBOX + f32::from(S4), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        if enabled {
+            tokens.text
+        } else {
+            tokens.text_dim
+        },
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *checked, label)
+    });
+    response
+}
+/// `.helper` (and `.why`, which the sheet prints the same way): one `T_XS` `text_dim` line at the
+/// design's 1.45 line height. The design pulls `.helper` `--s2` up — it belongs to the field above it,
+/// not to the body's `--s5` flow gap — so the helper spends that here, and a caller stacking the body's
+/// 12px items needs no case of its own.
+pub fn helper_line(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
+    ui.add_space(-f32::from(S2));
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .size(T_XS)
+                .color(tokens.text_dim)
+                .line_height(Some(T_XS * DLG_LINE_H)),
+        )
+        .wrap(),
+    )
+}
+
+/// `.dlg-f`: the pinned footer — a `stroke` hairline along its top edge, `--s5` of vertical padding
+/// around a column of 28px rows `--s5` apart, and `--s7` on each side. The editor's two rows are
+/// [`DLG_FOOT_H`] (92); the confirmation's single row is `2 * --s5` shorter. Returns the band's rect.
+pub fn dialogue_foot(ui: &mut Ui, tokens: &Tokens, height: f32, add: impl FnOnce(&mut Ui)) -> Rect {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::ZERO, tokens.panel);
+    band_top_hairline(ui, tokens, rect);
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(Vec2::new(f32::from(S7), f32::from(S5))))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.spacing_mut().item_spacing.y = f32::from(S5);
+    add(&mut child);
+    rect
+}
+
+/// One `.btn` of the dialog's footer or its test row: [`BUTTON_H`] tall, `--r-ctl`, `--s5` of padding
+/// either side of a `T_MD` label, and one of the faces [`Emphasis`] names, from [`button_face`] on the
+/// dialog's `panel_alt`. A disabled button wears `.btn.off` whatever its emphasis, and the focused one
+/// adds the design's 2px ring 1px outside — `error` for a danger button, `accent` otherwise.
+pub fn dialogue_button(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    label: &str,
+    emphasis: Emphasis,
+    enabled: bool,
+) -> Response {
+    let face = button_face(
+        tokens,
+        tokens.panel_alt,
+        if enabled { emphasis } else { Emphasis::Off },
+        true,
+    );
+    let font = tokens.font(T_MD);
+    let width = measured(ui, font.clone(), label) + 2.0 * f32::from(S5) + 2.0;
+    let radius = CornerRadius::same(R_CTL);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width, BUTTON_H),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let painter = ui.painter();
+    if face.fill != Color32::TRANSPARENT {
+        painter.rect_filled(rect, radius, face.fill);
+    }
+    if let Some(hover) = face.hover {
+        if response.hovered() {
+            painter.rect_filled(rect, radius, hover);
+        }
+    }
+    if face.border != Color32::TRANSPARENT {
+        painter.rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, face.border),
+            StrokeKind::Inside,
+        );
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        face.ink,
+    );
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect.expand(1.0),
+            CornerRadius::same(R_CTL + 1),
+            Stroke::new(
+                2.0,
+                if emphasis == Emphasis::Danger {
+                    tokens.error
+                } else {
+                    tokens.accent
+                },
+            ),
+            StrokeKind::Middle,
+        );
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response
+}
+
+/// The design's `.dot` at a size the caller states: the test row's is [`STATUS_DOT`] where the panes'
+/// [`dot`] is 9, and its ink is the row's own state (`ok`, `error`, `warn`).
+pub fn status_dot(ui: &mut Ui, colour: Color32, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), size / 2.0, colour);
+    response
 }
 
 #[cfg(test)]
@@ -2575,5 +3165,573 @@ mod tests {
             }
             budget += 1.0;
         }
+    }
+
+    /// A headless frame the size of the app's window, so a dialog can sit where `egui::Modal` centres
+    /// it: the design's 1440×900 metric, from the origin.
+    fn window_frame() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// One press and one release at `pos`, the way `table.rs` drives one.
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// The dialog's own ui: [`DIALOG_W`] wide and stacked downward, at the x a `Modal` centres it at in
+    /// a 1440 window and at the top edge the design measures for the Tunnel step.
+    fn dialog(ui: &mut Ui) -> Ui {
+        ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(
+                    egui::pos2((1440.0 - DIALOG_W) / 2.0, 216.5),
+                    Vec2::new(DIALOG_W, 900.0),
+                ))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        )
+    }
+
+    /// A frame's painted shapes, in paint order. The headless context never applies the texture delta.
+    fn shapes(mut out: egui::FullOutput) -> Vec<egui::Shape> {
+        out.textures_delta.clear();
+        out.shapes
+            .into_iter()
+            .map(|clipped| clipped.shape)
+            .collect()
+    }
+
+    fn fills(shapes: &[egui::Shape], colour: Color32) -> bool {
+        shapes
+            .iter()
+            .any(|shape| matches!(shape, egui::Shape::Rect(rect) if rect.fill == colour))
+    }
+
+    fn strokes(shapes: &[egui::Shape], colour: Color32, width: f32) -> bool {
+        shapes.iter().any(|shape| {
+            matches!(shape, egui::Shape::Rect(rect)
+                if rect.stroke.color == colour && (rect.stroke.width - width).abs() < 0.01)
+        })
+    }
+
+    /// The ink a `painter.text` call laid down, read back off the galley it painted.
+    fn text_ink(shape: &egui::Shape) -> Option<(String, Color32)> {
+        match shape {
+            egui::Shape::Text(text) => Some((
+                text.galley.text().to_owned(),
+                text.galley.job.sections[0].format.color,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The dialog layer's arithmetic: every band and every gap is the design's mark, and the two dialog
+    /// widths are the ones a 1440 window centres at 440 and 500.
+    #[test]
+    fn the_dialog_layer_adds_up_to_the_designs_marks() {
+        assert_eq!(DIALOG_W, 560.0);
+        assert_eq!(DIALOG_NARROW_W, 440.0);
+        assert_eq!(
+            (1440.0 - DIALOG_W) / 2.0,
+            440.0,
+            "`.dlg` is x 440..1000 in a 1440 window"
+        );
+        assert_eq!(
+            (1440.0 - DIALOG_NARROW_W) / 2.0,
+            500.0,
+            "the confirmation is x 500..940"
+        );
+        assert_eq!(
+            DIALOG_W - 2.0 * S7 as f32,
+            520.0,
+            "`.dlg-b`'s content width"
+        );
+
+        assert_eq!(DLG_HEAD_H, 68.0);
+        assert_eq!(
+            DLG_HEAD_H,
+            S6 as f32 + S5 as f32 + 40.0,
+            "`--s6` + the title block + `--s5`"
+        );
+        let block = T_LG * DLG_LINE_H + S1 as f32 + T_SM * DLG_LINE_H;
+        assert!(
+            (block - 39.7).abs() <= 0.5,
+            "the title block is a `T_LG` line, `--s1` and a `T_SM` line at the sheet's 1.45"
+        );
+        assert!(
+            block <= DLG_HEAD_H - S6 as f32 - S5 as f32,
+            "and those two lines have to fit between the head's padding"
+        );
+
+        assert_eq!(DLG_TABS_H, 33.0, "a 32px item and the strip's hairline");
+        assert_eq!(DLG_TABS_H, DLG_TAB_H + 1.0);
+        assert_eq!(S6 as f32 + S3 as f32 + INPUT_H, 50.0, "the design's `.fld`");
+        assert_eq!(DLG_SEG_H, 28.0);
+        assert_eq!(
+            DLG_SEG_ITEM_H,
+            DLG_SEG_H - 2.0,
+            "inside the container's border"
+        );
+        assert_eq!(DLG_FOOT_H, 92.0, "12 + a 28px row + 12 + a 28px row + 12");
+        assert_eq!(DLG_FOOT_H, 3.0 * S5 as f32 + 2.0 * BUTTON_H);
+        assert_eq!(DLG_CHIP_H, 20.0);
+        assert_eq!(KEYCHIP_H, 18.0);
+        assert_eq!(CHECKBOX, 14.0);
+        assert_eq!(STATUS_DOT, 8.0);
+    }
+
+    /// The bands the helpers lay out are those marks, and the geometry inside them is where the sheet
+    /// puts it: the title `--s6` below the head's top edge with its subtitle `--s1` under the title's own
+    /// line, the `×` 24×24 with its right edge 20 inside the dialog, the strip's hairline 100 below the
+    /// head's top, the strip's indicator over the item's own width, the dialog's seg 26 inside its 28,
+    /// and the footer's hairline on its own top edge.
+    #[test]
+    fn the_dialog_bands_are_the_designs_marks() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut bands = [0.0_f32; 5];
+        let mut close = Rect::NOTHING;
+        let mut foot = Rect::NOTHING;
+        let mut nothing_clicked = true;
+        let mut tabs_width = 0.0_f32;
+        let mut seg_width = 0.0_f32;
+        let mut name = String::from("analytics-prod");
+        let out = ctx.run_ui(window_frame(), |ui| {
+            let mut ui = dialog(ui);
+            // The dialog's chrome is flush: the head, the step strip, the body and the footer butt
+            // against each other, which is why the strip's hairline lands 100 below the head's top.
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let mut at = ui.cursor().top();
+            close = dialogue_head(
+                &mut ui,
+                &tokens,
+                None,
+                "Edit connection",
+                "analytics-prod · PostgreSQL",
+                false,
+            )
+            .rect;
+            bands[0] = ui.cursor().top() - at;
+            at = ui.cursor().top();
+            let labels = ["General", "TLS", "Tunnel", "Advanced"];
+            nothing_clicked = dialogue_tabs(&mut ui, &tokens, &labels, 0).is_none();
+            tabs_width = measured(&ui, tokens.font(T_MD), "General");
+            bands[1] = ui.cursor().top() - at;
+            at = ui.cursor().top();
+            let _ = input(&mut ui, &tokens, 320.0, false, true, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut name)
+                        .frame(Frame::NONE)
+                        .margin(Margin::ZERO),
+                )
+            });
+            bands[2] = ui.cursor().top() - at;
+            at = ui.cursor().top();
+            nothing_clicked &= dialogue_segmented(
+                &mut ui,
+                &tokens,
+                &[("Key file", false), ("Agent", false), ("Password", true)],
+            )
+            .is_none();
+            seg_width = measured(&ui, tokens.mono(T_SM), "Password") + 2.0 * f32::from(S5);
+            bands[3] = ui.cursor().top() - at;
+            at = ui.cursor().top();
+            foot = dialogue_foot(&mut ui, &tokens, DLG_FOOT_H, |ui| {
+                ui.horizontal(|ui| {
+                    let _ = dialogue_button(ui, &tokens, "Cancel", Emphasis::Plain, true);
+                });
+                ui.horizontal(|ui| {
+                    let _ = dialogue_button(ui, &tokens, "Save", Emphasis::Primary, true);
+                });
+            });
+            bands[4] = ui.cursor().top() - at;
+        });
+        let out = shapes(out);
+
+        for (band, mark) in bands
+            .into_iter()
+            .zip([DLG_HEAD_H, DLG_TABS_H, INPUT_H, DLG_SEG_H, DLG_FOOT_H])
+        {
+            assert!(
+                (band - mark).abs() <= 0.5,
+                "a band of {band} is not the design's {mark}"
+            );
+        }
+        assert!(nothing_clicked, "a frame with no pointer is nobody's click");
+        assert_eq!(close.size(), Vec2::splat(TAB_CLOSE));
+        assert!(
+            (close.right() - 980.0).abs() <= 0.5,
+            "the × ends 20 inside the dialog's right edge, at x 980"
+        );
+        assert_eq!(foot.height(), DLG_FOOT_H);
+
+        let head_band = out
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == tokens.panel
+                        && (rect.rect.height() - DLG_HEAD_H).abs() <= 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the head paints its own band");
+        assert!(
+            (head_band.left() - 440.0).abs() <= 0.5 && (head_band.width() - DIALOG_W).abs() <= 0.5,
+            "`.dlg` is x 440..1000: {head_band:?}"
+        );
+
+        let head_top = 216.5 + f32::from(S6);
+        let ink = |want: &str| {
+            out.iter()
+                .filter_map(text_ink)
+                .find(|(text, _)| text == want)
+        };
+        let title = out
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == "Edit connection" => {
+                    Some((text.pos.y, text.galley.size().y))
+                }
+                _ => None,
+            })
+            .expect("the head paints its title");
+        assert!(
+            (title.0 - head_top).abs() <= 0.5,
+            "the title's line starts --s6 below the head's top edge"
+        );
+        let subtitle = out
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text().starts_with("analytics-prod ·") => {
+                    Some((text.pos.y, text.galley.size().y))
+                }
+                _ => None,
+            })
+            .expect("the head paints its subtitle");
+        assert!(
+            (subtitle.0 - title.0 - title.1 - f32::from(S1)).abs() <= 0.5,
+            "the subtitle follows the title's own line, --s1 under it"
+        );
+        assert!(
+            title.1 + f32::from(S1) + subtitle.1 <= DLG_HEAD_H - f32::from(S6) - f32::from(S5),
+            "the head's two lines have to fit above its bottom padding"
+        );
+        assert_eq!(
+            ink("Edit connection").map(|(_, ink)| ink),
+            Some(tokens.text)
+        );
+        assert_eq!(
+            ink("analytics-prod · PostgreSQL").map(|(_, ink)| ink),
+            Some(tokens.text_dim)
+        );
+        assert_eq!(ink("Tunnel").map(|(_, ink)| ink), Some(tokens.text_dim));
+        assert_eq!(ink("General").map(|(_, ink)| ink), Some(tokens.text));
+        assert_eq!(
+            ink("Password").map(|(_, ink)| ink),
+            Some(tokens.accent_text)
+        );
+
+        let hairlines: Vec<f32> = out
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::LineSegment { points, stroke }
+                    if points[0].y == points[1].y && stroke.color == tokens.stroke =>
+                {
+                    Some(points[0].y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            hairlines
+                .iter()
+                .any(|y| (y - (216.5 + DLG_HEAD_H + DLG_TAB_H + 0.5)).abs() <= 0.5),
+            "the strip's hairline sits 100 below the head's top edge: {hairlines:?}"
+        );
+        assert!(
+            hairlines
+                .iter()
+                .any(|y| (y - (foot.top() + 0.5)).abs() <= 0.5),
+            "the footer's hairline is on its own top edge: {hairlines:?}"
+        );
+
+        let accent_rects = |height: f32| -> Vec<f32> {
+            out.iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Rect(rect)
+                        if rect.fill == tokens.accent
+                            && (rect.rect.height() - height).abs() <= 0.5 =>
+                    {
+                        Some(rect.rect.width())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            accent_rects(INDICATOR_W)
+                .into_iter()
+                .any(|width| (width - tabs_width).abs() <= 0.5),
+            "the active tab's indicator runs over the item's own width"
+        );
+        assert!(
+            accent_rects(DLG_SEG_ITEM_H)
+                .into_iter()
+                .any(|width| (width - seg_width).abs() <= 0.5),
+            "the dialog's seg is 28 around 26px items"
+        );
+    }
+
+    /// `.inp` wears the design's error border, and the border plus the 2px ring when it holds the focus.
+    #[test]
+    fn a_dialog_input_takes_the_error_and_focus_rings() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let run = |error: bool, focus: Option<egui::Id>| {
+            let mut name = String::from("analytics-prod");
+            let mut field = None;
+            let out = ctx.run_ui(window_frame(), |ui| {
+                if let Some(focus) = focus {
+                    ui.ctx().memory_mut(|memory| memory.request_focus(focus));
+                }
+                let mut ui = dialog(ui);
+                let _ = input(&mut ui, &tokens, 320.0, error, true, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .frame(Frame::NONE)
+                            .margin(Margin::ZERO),
+                    );
+                    field = Some(response.id);
+                    response
+                });
+            });
+            (field.expect("the field ran"), shapes(out))
+        };
+
+        let (id, plain) = run(false, None);
+        assert!(
+            plain
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if rect.fill == tokens.panel_alt && (rect.rect.height() - INPUT_H).abs() <= 0.5)),
+            "`.inp` is 28 tall"
+        );
+        assert!(strokes(&plain, tokens.stroke, 1.0));
+        assert!(!strokes(&plain, tokens.error, 1.0));
+        assert!(!strokes(&plain, tokens.accent, 2.0));
+
+        let (_, error) = run(true, None);
+        assert!(
+            strokes(&error, tokens.error, 1.0),
+            "`.inp.err` is the error border"
+        );
+        assert!(!strokes(&error, tokens.accent, 2.0));
+
+        let (_, focused) = run(false, Some(id));
+        assert!(
+            strokes(&focused, tokens.accent, 1.0),
+            "`.inp.focus` is the accent border"
+        );
+        assert!(
+            focused
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if rect.stroke.color == tokens.accent
+                    && (rect.stroke.width - 2.0).abs() < 0.01
+                    && (rect.rect.height() - (INPUT_H + 2.0)).abs() < 0.01)),
+            "and the design's 2px ring, 1px outside it"
+        );
+    }
+
+    /// The step strip is only the item under the pointer: the gaps between its labels and its `--s7`
+    /// lead-in are nobody's.
+    #[test]
+    fn a_dialog_tab_reports_only_the_item_it_holds() {
+        let labels = ["General", "TLS", "Tunnel", "Advanced"];
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut items: Vec<Rect> = Vec::new();
+        let out = ctx.run_ui(window_frame(), |ui| {
+            let mut ui = dialog(ui);
+            let _ = dialogue_tabs(&mut ui, &tokens, &labels, 2);
+            let mut x = (1440.0 - DIALOG_W) / 2.0 + f32::from(S7);
+            for label in labels {
+                let width = measured(&ui, tokens.font(T_MD), label);
+                items.push(Rect::from_min_size(
+                    egui::pos2(x, 216.5),
+                    Vec2::new(width, DLG_TAB_H),
+                ));
+                x += width + f32::from(S6);
+            }
+        });
+        let _ = shapes(out);
+
+        let clicked = |pos: egui::Pos2| -> Option<usize> {
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            for _ in 0..2 {
+                events.push(press(pos, true));
+                events.push(press(pos, false));
+            }
+            let mut clicked = None;
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..window_frame()
+                },
+                |ui| {
+                    let mut ui = dialog(ui);
+                    clicked = dialogue_tabs(&mut ui, &tokens, &labels, 2);
+                },
+            );
+            let _ = shapes(out);
+            clicked
+        };
+
+        assert_eq!(
+            clicked(items[2].center()),
+            Some(2),
+            "the active item is still clickable"
+        );
+        assert_eq!(clicked(items[0].center()), Some(0));
+        assert_eq!(clicked(items[3].center()), Some(3));
+        assert_eq!(
+            clicked(egui::pos2(
+                items[0].right() + f32::from(S6) / 2.0,
+                items[0].center().y
+            )),
+            None,
+            "the gap between two labels is nobody's"
+        );
+        assert_eq!(
+            clicked(egui::pos2(
+                (1440.0 - DIALOG_W) / 2.0 + f32::from(S7) / 2.0,
+                items[0].center().y
+            )),
+            None,
+            "the strip's lead-in is nobody's"
+        );
+    }
+
+    /// The dialog's buttons and its controls paint the faces, heights and inks the tokens name: a
+    /// disabled button wears `.btn.off` whatever its emphasis, an enabled one wears its own face, the
+    /// checkbox is a 14px `accent` box with an `accent_text` ✓, the test row's dot is 8px, the keychain
+    /// chip is 18, and a field's label line is `--s6`.
+    #[test]
+    fn the_dialogs_controls_paint_the_faces_the_tokens_name() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut heights = Vec::new();
+        let mut label = Rect::NOTHING;
+        let mut checked = true;
+        let out = ctx.run_ui(window_frame(), |ui| {
+            let mut ui = dialog(ui);
+            for (label, emphasis, enabled) in [
+                ("Save", Emphasis::Primary, false),
+                ("Save", Emphasis::Primary, true),
+                ("Delete", Emphasis::Danger, true),
+                ("Test connection", Emphasis::Ghost, true),
+            ] {
+                heights.push(
+                    dialogue_button(&mut ui, &tokens, label, emphasis, enabled)
+                        .rect
+                        .height(),
+                );
+            }
+            let _ = checkbox(
+                &mut ui,
+                &tokens,
+                "Save the SSH password in the login keychain",
+                &mut checked,
+                true,
+            );
+            let _ = status_dot(&mut ui, tokens.ok, STATUS_DOT);
+            let _ = tag_of(&mut ui, &tokens, "keychain", KEYCHIP_H);
+            label = field_label(&mut ui, &tokens, "SSH host").rect;
+        });
+        let out = shapes(out);
+
+        assert!(
+            heights
+                .iter()
+                .all(|height| (height - BUTTON_H).abs() <= 0.5),
+            "every dialog button is 28 tall: {heights:?}"
+        );
+        assert_eq!(label.height(), f32::from(S6));
+        assert!(
+            fills(&out, tokens.panel_high),
+            "a disabled button wears `.btn.off`"
+        );
+        assert!(fills(&out, tokens.accent), "`.primary` and the checked box");
+        assert!(fills(&out, tokens.error), "`.danger` fills with error");
+        assert!(strokes(&out, tokens.error, 1.0), "and borders with it");
+        assert!(
+            out.iter()
+                .any(|shape| matches!(shape, egui::Shape::Circle(circle)
+                if circle.fill == tokens.ok && (circle.radius - STATUS_DOT / 2.0).abs() < 0.01)),
+            "the test row's dot is the design's 8px"
+        );
+
+        let box_rect = out
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == tokens.accent
+                        && (rect.rect.height() - CHECKBOX).abs() <= 0.5
+                        && rect.corner_radius == CornerRadius::same(CB_RADIUS) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the checkbox paints its checked 14px box");
+        assert_eq!(box_rect.width(), CHECKBOX);
+
+        let tick = out
+            .iter()
+            .filter_map(text_ink)
+            .find(|(text, _)| text == "✓");
+        assert_eq!(
+            tick,
+            Some(("✓".to_owned(), tokens.accent_text)),
+            "the checked box prints its ✓ in `accent_text`"
+        );
+
+        let chip = out.iter().find_map(|shape| match shape {
+            egui::Shape::Rect(rect)
+                if (rect.rect.height() - KEYCHIP_H).abs() <= 0.5
+                    && rect.fill == tokens.panel_alt =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+        assert!(
+            chip.is_some(),
+            "`tag_of` paints its own height, not the row's 24"
+        );
+        assert!(
+            out.iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if (rect.rect.height() - KEYCHIP_H).abs() <= 0.5
+                    && rect.stroke.color == tokens.stroke
+                    && (rect.stroke.width - 1.0).abs() < 0.01)),
+            "and strokes it with its own hairline"
+        );
     }
 }
