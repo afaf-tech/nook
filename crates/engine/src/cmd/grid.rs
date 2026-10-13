@@ -75,11 +75,16 @@ fn active_grid_tab(session: &Session) -> Result<usize> {
         .get(index)
         .ok_or_else(|| Error::internal("active tab is gone"))?;
     if tab.kind != TabKind::Data && tab.grid.table.is_none() {
-        return Err(Error::config(
-            "the active tab has no data grid; open a table with grid.open",
-        ));
+        return Err(Error::config(no_grid_reason()));
     }
     Ok(index)
+}
+
+/// Why the grid commands refuse the active tab. One definition, so a surface that cannot run one —
+/// the results register's Export sits on a query tab, which has no data grid to hand over — can say
+/// the engine's own words rather than its own.
+pub fn no_grid_reason() -> &'static str {
+    "the active tab has no data grid; open a table with grid.open"
 }
 
 fn grid_summary(session: &Session, index: usize) -> serde_json::Value {
@@ -884,6 +889,19 @@ mod tests {
             .expect("read")
             .contains("a@b.c"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The sentence a surface that cannot run a grid command quotes is the one the command answers
+    /// with: the results register's Export is painted disabled on a query tab, and the reason it
+    /// hovers is this string, read from here rather than copied.
+    #[test]
+    fn the_no_grid_refusal_is_the_sentence_export_answers_with() {
+        let mut session = Session::new();
+        let index = session.add_tab(TabKind::Query, "Query", None);
+        session.active_tab = Some(index);
+        let p = Params::from_json(json!({"format": "csv"})).expect("params");
+        let e = export(&mut session, &p).expect_err("a query tab has no data grid to export");
+        assert_eq!(e.message(), no_grid_reason());
     }
 
     #[test]

@@ -76,14 +76,16 @@ fn new_query(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 }
 
 /// Open the tab's SQL state for a run: the previous run's results and the facts describing them go,
-/// because a run replaces the register rather than appending to it.
-fn begin_run(session: &mut Session, statements: Vec<String>) {
+/// because a run replaces the register rather than appending to it. `ran_script` records the script
+/// this run *used* — the `sql` the command resolved, or, for a single statement, that statement — so
+/// the register stamps its rows with what produced them and not with whatever the editor held.
+fn begin_run(session: &mut Session, ran_script: &str, statements: Vec<String>) {
     if let Ok(tab) = session.active_tab_mut() {
         if tab.kind == TabKind::Query {
             tab.sql.results.clear();
             tab.sql.statements = statements;
+            tab.sql.ran_script = ran_script.to_owned();
             tab.sql.last_result = None;
-            tab.sql.result_label.clear();
             tab.sql.elapsed_ms = 0.0;
         }
     }
@@ -103,10 +105,9 @@ fn fold(last: &mut ResultSet, rs: &ResultSet) {
     }
 }
 
-/// The single writer of a tab's SQL state: appends the statement's run, and keeps `last_result`,
-/// `result_label` and `elapsed_ms` describing the run so far — the aggregate the status bar and the
-/// grid read, built by `fold`. A run with no result (the failure that stopped the run) changes only
-/// `results`.
+/// The single writer of a tab's SQL state: appends the statement's run, and keeps `last_result` and
+/// `elapsed_ms` describing the run so far — the aggregate the status bar reads, built by `fold`. A run
+/// with no result (the failure that stopped the run) changes only `results`.
 fn record_run(session: &mut Session, run: StatementRun, run_so_far: &mut ResultSet) {
     if let Some(result) = run.result.as_ref() {
         fold(run_so_far, result);
@@ -116,16 +117,6 @@ fn record_run(session: &mut Session, run: StatementRun, run_so_far: &mut ResultS
             if run.result.is_some() {
                 tab.sql.last_result = Some(run_so_far.clone());
                 tab.sql.elapsed_ms = run_so_far.elapsed_ms;
-                tab.sql.result_label = format!(
-                    "{} rows · {} ms{}",
-                    run_so_far.row_count(),
-                    run_so_far.elapsed_ms.round(),
-                    if run_so_far.truncated {
-                        " · truncated"
-                    } else {
-                        ""
-                    }
-                );
             }
             tab.sql.results.push(run);
         }
@@ -230,7 +221,7 @@ fn run(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         _ => None,
     };
     let statements = split(&sql);
-    begin_run(session, statements.clone());
+    begin_run(session, &sql, statements.clone());
     let mut run_so_far = ResultSet::default();
     let mut results: Vec<serde_json::Value> = Vec::new();
     for (index, statement) in statements.iter().enumerate() {
@@ -272,7 +263,7 @@ fn run_statement(session: &mut Session, p: &Params) -> Result<serde_json::Value>
         })?
         .clone();
     let conn = session.resolve_conn(p)?;
-    begin_run(session, vec![picked.clone()]);
+    begin_run(session, &picked, vec![picked.clone()]);
     let mut run_so_far = ResultSet::default();
     run_and_record(session, conn, 0, &picked, None, &mut run_so_far)?;
     Ok(json!({
@@ -355,11 +346,29 @@ fn explain(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             driver.explain(&statement)?
         }
     };
-    Ok(json!({
+    let out = json!({
         "statement": statement,
         "columns": plan.columns,
         "plan": plan.rows.iter().map(|r| r.iter().map(|v| v.display()).collect::<Vec<_>>()).collect::<Vec<_>>(),
-    }))
+    });
+    // The plan is a result like any other, recorded through the same writer every other run goes
+    // through: the tab's register then has a statement, a duration and a result set to show. Explain
+    // used to fill a field only the UI read, which is why the plan had nowhere to appear once the
+    // editor's own result table went.
+    let run = crate::StatementRun {
+        statement: if analyze {
+            format!("EXPLAIN ANALYZE {statement}")
+        } else {
+            format!("EXPLAIN {statement}")
+        },
+        elapsed_ms: plan.elapsed_ms,
+        result: Some(plan),
+        error: None,
+    };
+    let mut run_so_far = ResultSet::default();
+    begin_run(session, &statement, vec![run.statement.clone()]);
+    record_run(session, run, &mut run_so_far);
+    Ok(out)
 }
 
 fn history(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
@@ -686,6 +695,32 @@ mod tests {
     fn explain_without_sql_is_an_error() {
         let mut session = Session::new();
         assert!(explain(&mut session, &Params::none()).is_err());
+    }
+
+    /// Explain is a run like any other: it leaves the plan in the tab's results, as a statement of its
+    /// own with a duration, so the register paints it in a tab. It used to write a field only the
+    /// editor read, which left the plan invisible once that table went.
+    #[test]
+    fn explain_records_the_plan_as_the_tabs_own_run() {
+        let (_guard, mut session, tab) = live_session();
+        session.tabs[tab].sql.text = "select 1 as one;\n".to_owned();
+        let p = Params::from_json(json!({"statement": "select 1 as one;"})).expect("params");
+        let out = explain(&mut session, &p).expect("explain");
+        assert_eq!(out["statement"], "select 1 as one;");
+        let runs = &session.tabs[tab].sql.results;
+        assert_eq!(runs.len(), 1, "the plan is the tab's one run");
+        assert_eq!(
+            runs[0].statement, "EXPLAIN select 1 as one;",
+            "the tab names what was explained"
+        );
+        let plan = runs[0].result.as_ref().expect("the plan is a result set");
+        assert!(!plan.columns.is_empty(), "the plan has its own columns");
+        assert!(!plan.rows.is_empty(), "the plan has its own rows");
+        assert_eq!(runs[0].error, None);
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, "select 1 as one;",
+            "the tab records the statement the run used"
+        );
     }
 
     #[test]

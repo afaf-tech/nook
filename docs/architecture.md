@@ -87,10 +87,10 @@ implementations:
 
 ## Testing
 
-- 155 `#[test]` functions across the workspace: quoting and literals, catalog types, DDL per dialect,
-  structure diff, ER layout, statement splitting, edit planning, data generation determinism, report
-  shaping, schedules, profiles, MCP JSON-RPC, and every command against junk parameters
-  (`commands_run_with_junk_parameters_never_panic`).
+- 256 `#[test]` functions across the workspace, 83 of them in the UI crate: quoting and literals,
+  catalog types, DDL per dialect, structure diff, ER layout, statement splitting, edit planning, data
+  generation determinism, report shaping, schedules, profiles, MCP JSON-RPC, and every command against
+  junk parameters (`commands_run_with_junk_parameters_never_panic`).
 - Live checks that need a server are run with the CLI rather than in the unit suite, because they
   mutate databases:
   - PostgreSQL 17: `datacraft-cli tables|sql|describe|ddl|monitor|users`, transfer SQLite → PostgreSQL,
@@ -123,6 +123,37 @@ implementations:
 - **A result tab cannot be closed.** The register's tab row is one tab per statement of the last run —
   the run's own shape — so closing one would ask what the editor should then run. Re-running a script
   reopens every tab it holds; the upgrade path is a per-tab `closed` flag the next run respects.
+- **The register's staleness is the script the run used.** `SqlState::ran_script` is stamped in
+  `begin_run` from what the run actually ran: `run`'s `sql` parameter, so the control channel and the
+  palette record *their* script rather than the editor's; `run_statement`'s picked statement; and
+  `sql.explain`'s explained statement. The register compares its own `script` against it. The rule
+  before this compared the two splits, which was wrong in both directions — a rerun of unchanged
+  statements kept the previous text and reported a run of the on-screen script as stale, and a run
+  given another script reported itself fresh. `SqlState::statements` still carries the split for the
+  editor's own markers, but nothing compares it.
+- **Explain is a run.** `sql.explain` goes through the same `begin_run`/`record_run` every other run
+  does, so the plan lands in `SqlState::results` as one statement of its own (`EXPLAIN <stmt>`) with
+  the driver's own duration and result set: the register paints it in a tab, and the stale rule above
+  works on it. It used to fill `SqlState::last_result` and a `result_label`, which only the editor's
+  own result table read — the reason the plan had nothing to appear in once P5 deleted that table.
+  Both fields are gone.
+- **A bounded pill row hides pills instead of scrolling.** The register's `.rtabs` and the editor's
+  `.strip` are `nowrap` flex rows in the design with the band's own fact pinned to the right, and
+  nothing stopped the pills painting over that fact and past the pane: the run's total was clipped
+  mid-glyph at five statements on the 776px pane and dropped altogether at six, and three ordinary
+  statements put the strip's chips over its own facts. `theme::fit_row` plans the row first — the fact
+  keeps the width it measured, the pills that fit are painted, and the rest are counted in `+N more`.
+  The window is built around the pill the caller names, so the register opens on the run's last
+  statement. `ponytail:` the pills that do not fit are hidden rather than scrolled to; the upgrade
+  path is a horizontal `ScrollArea` inside the band, which needs a band as wide as its content —
+  `band_fill` is the pane's width and its fill stops at the pane's edge.
+- **The register's `Export` is painted disabled with the engine's own reason.** The register shows one
+  statement's result, but `grid.export` reads the *active tab's* data grid and refuses a query tab —
+  after a file picker has already asked the user for a path. So the control is off and its hover text
+  is `cmd::grid::no_grid_reason()`, the same string the refusal carries, which is the rule the disabled
+  `Stop` and the grid's `editable` gate follow. The upgrade path is a command that exports a result set
+  the caller hands over — `tools.exportQuery` re-runs the SQL and is a different feature — at which
+  point the button's action comes back.
 - **The editor's toolbar is a cut-down version of the design's.** The design's full set plus its
   connection chip does not fit the pane's 776px, measured by the test at the same sizes: `Chart`,
   `Pivot`, `Save snippet` and `Export ▾` are dropped, and the connection chip with them, because the

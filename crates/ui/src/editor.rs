@@ -12,8 +12,8 @@
 use datacraft_engine::{Level, Session};
 use egui::text::LayoutJob;
 use egui::{
-    Align2, Color32, CornerRadius, Key, Margin, Modifiers, Rect, RichText, Sense, Stroke,
-    TextFormat, Ui, Vec2,
+    Align2, CornerRadius, Key, Margin, Modifiers, Rect, RichText, Sense, Stroke, TextFormat, Ui,
+    Vec2,
 };
 
 use crate::app::UiState;
@@ -303,12 +303,13 @@ struct Parts<'a> {
     failed: Option<usize>,
 }
 
-/// True when the engine has run something the register has not seen. The register records the script
-/// its results came from; the engine records the statements it ran, so the two disagree exactly when
-/// a run landed that the register predates.
+/// True when the engine has run a script the register has not seen. The register records the script
+/// its rows came from and the engine records the one it ran, so the two disagree exactly when a run
+/// landed that the register predates — a run whose split happens to match the previous one included.
+/// Comparing the splits instead missed the rerun whose text had moved on inside a statement.
 fn run_moved_on(register: &Register, session: &Session, tab_index: usize) -> bool {
     let sql = &session.tabs[tab_index].sql;
-    sql.results.is_empty() || datacraft_engine::cmd::sql::split(&register.script) != sql.statements
+    sql.results.is_empty() || register.script != sql.ran_script
 }
 
 /// `.tb`: the design's order, cut to the width the pane has — `Run`, `Run statement`, `Stop`,
@@ -584,7 +585,9 @@ fn sql_area(
 }
 
 /// `.strip`: one 20px `.st` chip per statement — the caret's own filled and ringed, the failed one in
-/// `error` — and the row's own fact on the right.
+/// `error` — and the row's own fact on the right. The chips are bounded to what the fact leaves them
+/// (the design's row is a `nowrap` flex row and paints over it), and the caret's own statement stays
+/// in the window, so the strip never hides the statement the editor is showing.
 fn strip(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -599,16 +602,54 @@ fn strip(
         design::S4,
         egui::Align::Center,
         |ui| {
-            ui.spacing_mut().item_spacing.x = f32::from(design::S3);
-            for (index, statement) in parts.statements.iter().enumerate() {
-                let state = match (parts.caret == Some(index), parts.failed == Some(index)) {
-                    (true, _) => Chip::Active,
-                    (false, true) => Chip::Failed,
-                    _ => Chip::Resting,
-                };
-                if chip(ui, tokens, index, statement, state).clicked() {
-                    actions.command =
-                        Some(("sql.runStatement", serde_json::json!({ "index": index })));
+            let gap = f32::from(design::S3);
+            ui.spacing_mut().item_spacing.x = gap;
+            let labels: Vec<String> = parts
+                .statements
+                .iter()
+                .enumerate()
+                .map(|(index, statement)| chip_label(index, statement))
+                .collect();
+            let widths: Vec<f32> = labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| chip_width(ui, tokens, label, parts.caret == Some(index)))
+                .collect();
+            // The fact is measured before the chips are painted, so the row's own width is reserved
+            // rather than overrun.
+            let fact_w = design::text_width(ui, tokens.mono(design::T_XS), fact);
+            let fitted = design::fit_row(
+                (ui.available_width() - fact_w - gap).max(0.0),
+                gap,
+                &widths,
+                design::more_pill_width(ui, tokens, labels.len()),
+                parts.caret,
+            );
+            if !widths.is_empty() {
+                if fitted.head > 0 {
+                    design::more_pill(ui, tokens, fitted.head, design::STMT_H, tokens.panel_high)
+                        .on_hover_text("More statements than the strip can show");
+                }
+                for index in fitted.start..=fitted.end {
+                    let label = &labels[index];
+                    let state = chip_state(parts, index);
+                    if chip(
+                        ui,
+                        tokens,
+                        label,
+                        &parts.statements[index],
+                        state,
+                        widths[index],
+                    )
+                    .clicked()
+                    {
+                        actions.command =
+                            Some(("sql.runStatement", serde_json::json!({ "index": index })));
+                    }
+                }
+                if fitted.tail > 0 {
+                    design::more_pill(ui, tokens, fitted.tail, design::STMT_H, tokens.panel_high)
+                        .on_hover_text("More statements than the strip can show");
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -640,41 +681,53 @@ enum Chip {
     Resting,
 }
 
-/// One `.st` chip: 20 tall, pill-radius, with its own fill, ring and ink, and a 5px dot when it is the
-/// caret's. The label is the design's `1 · SELECT …`, clipped, with the whole statement on hover.
-fn chip(
-    ui: &mut Ui,
-    tokens: &Tokens,
-    index: usize,
-    statement: &str,
-    state: Chip,
-) -> egui::Response {
-    let label = format!(
+/// Which of the three states a statement's chip is in.
+fn chip_state(parts: &Parts<'_>, index: usize) -> Chip {
+    match (parts.caret == Some(index), parts.failed == Some(index)) {
+        (true, _) => Chip::Active,
+        (false, true) => Chip::Failed,
+        _ => Chip::Resting,
+    }
+}
+
+/// The label a `.st` chip carries: the design's `1 · SELECT …`, clipped.
+fn chip_label(index: usize, statement: &str) -> String {
+    format!(
         "{} · {}",
         index + 1,
         table::clip(statement.trim(), CHIP_CHARS)
-    );
-    let dot = state == Chip::Active;
-    let width = ui
-        .painter()
-        .layout_no_wrap(
-            label.clone(),
-            tokens.mono(design::T_XS),
-            Color32::PLACEHOLDER,
-        )
-        .size()
-        .x
+    )
+}
+
+/// What that label costs in a chip — the mono line, two `--s3` paddings, the 1px border pair and the
+/// 5px dot when the chip is the caret's. The strip measures with this and `chip` paints with it, so
+/// the budget the row plans against is the width it actually spends.
+fn chip_width(ui: &Ui, tokens: &Tokens, label: &str, dot: bool) -> f32 {
+    design::text_width(ui, tokens.mono(design::T_XS), label)
         + 2.0 * f32::from(design::S3)
         + 2.0
         + if dot {
             5.0 + f32::from(design::S3)
         } else {
             0.0
-        };
+        }
+}
+
+/// One `.st` chip: 20 tall, pill-radius, with its own fill, ring and ink, and a 5px dot when it is the
+/// caret's, at the width its label measured. The whole statement is on hover.
+fn chip(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    label: &str,
+    statement: &str,
+    state: Chip,
+    width: f32,
+) -> egui::Response {
+    let dot = state == Chip::Active;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, design::STMT_H), Sense::click());
     let hovered = response.hovered();
     let response = response.on_hover_text(statement.trim());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let (fill, border, ink) = match state {
         Chip::Active => (tokens.accent_dim, tokens.accent_line, tokens.text),
         Chip::Failed => (tokens.error_fill, tokens.error, tokens.error),
@@ -784,49 +837,17 @@ fn dispatch(
         }
     }
     match session.run(id, params) {
-        Ok(value) => match id {
-            "sql.explain" => {
-                let text = value["plan"]
-                    .as_array()
-                    .map(|rows| {
-                        rows.iter()
-                            .map(|row| {
-                                row.as_array()
-                                    .map(|cells| {
-                                        cells
-                                            .iter()
-                                            .map(|cell| cell.as_str().unwrap_or_default())
-                                            .collect::<Vec<_>>()
-                                            .join("  ")
-                                    })
-                                    .unwrap_or_default()
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .unwrap_or_default();
+        // `sql.explain` records its own plan as the tab's run, the way `sql.run` does: the engine owns
+        // what a run leaves behind, so the register shows a plan without the UI re-shaping it. Only
+        // `sql.format` has an answer the editor has to take back.
+        Ok(value) if id == "sql.format" => {
+            if let Some(formatted) = value["sql"].as_str() {
                 if let Some(tab) = session.tabs.get_mut(tab_index) {
-                    tab.sql.result_label = "explain plan".into();
-                    tab.sql.last_result = Some(datacraft_model::ResultSet {
-                        columns: vec!["plan".into()],
-                        column_types: vec!["text".into()],
-                        rows: text
-                            .lines()
-                            .map(|line| vec![datacraft_core::Value::text(line)])
-                            .collect(),
-                        ..datacraft_model::ResultSet::default()
-                    });
+                    tab.sql.text = formatted.to_string();
                 }
             }
-            "sql.format" => {
-                if let Some(formatted) = value["sql"].as_str() {
-                    if let Some(tab) = session.tabs.get_mut(tab_index) {
-                        tab.sql.text = formatted.to_string();
-                    }
-                }
-            }
-            _ => {}
-        },
+        }
+        Ok(_) => {}
         Err(e) => session.log(Level::Error, format!("{id}: {e}")),
     }
     true
@@ -1139,7 +1160,7 @@ mod tests {
     use super::*;
     use datacraft_engine::TabKind;
     use egui::epaint::ClippedShape;
-    use egui::pos2;
+    use egui::{pos2, Color32};
 
     /// Everything one frame painted, plus the layout the editor measured.
     #[derive(Default)]
@@ -1644,13 +1665,20 @@ mod tests {
         let _ = frame(&ctx, &mut world, click(line_2(&f)), 1.1);
         let f = settle(&ctx, &mut world, 1.1);
         assert_eq!(world.1.caret.map(|caret| caret.line), Some(2));
+        // The toolbar prints the caret the editor reports, and only that: the old assertion looked for
+        // an *absent* position, so it passed with the read-out gone and pinned a column the frame
+        // never painted.
+        let caret = world.1.caret.expect("the editor reported its caret");
+        let read_out: Vec<&String> = f
+            .texts
+            .iter()
+            .map(|(_, text)| text)
+            .filter(|text| text.starts_with("Ln "))
+            .collect();
         assert_eq!(
-            f.texts
-                .iter()
-                .find(|(_, text)| text == "Ln 2, Col 14")
-                .map(|(rect, _)| rect.center().y),
-            None,
-            "the toolbar's read-out is not in the editor pane"
+            read_out,
+            vec![&caret_note(caret)],
+            "the toolbar's read-out is the caret the editor sits on"
         );
         let run = click_hit(&ctx, &mut world, "Run statement", 1.2);
         let _ = frame(&ctx, &mut world, run, 1.4);
@@ -1845,6 +1873,191 @@ mod tests {
         let f = frame(&ctx, &mut world, vec![key(Key::Enter)], 1.3);
         assert_eq!(tab(&world).sql.text, format!("select 1;\n{expected}"));
         assert_eq!(f.layout.popup, None, "the accepted text does not reopen it");
+    }
+
+    /// `.strip` is the design's `nowrap` flex row with the script's own facts pinned to the right, so
+    /// three ordinary statements paint their chips over the facts' glyphs, four push the facts outside
+    /// the pane and six drop them. The chips are bounded now — the facts keep the width they measured
+    /// and the statements that do not fit are counted — which is what the pane's 776px can hold.
+    #[test]
+    fn the_strip_keeps_its_facts_and_bounds_the_chips() {
+        for count in [3usize, 6] {
+            let ctx = egui::Context::default();
+            let script: String = (1..=count)
+                .map(|index| {
+                    format!("select id, city from customers where city = 'city {index}';\n")
+                })
+                .collect();
+            let mut world = world(&format!("strip{count}"), &script);
+            let _ = frame(&ctx, &mut world, Vec::new(), 1.0);
+            let run = click_hit(&ctx, &mut world, "Run", 1.02);
+            let f = frame(&ctx, &mut world, run, 1.05);
+            let strip = f.layout.strip.expect("the strip");
+            let facts = f
+                .texts
+                .iter()
+                .find(|(_, text)| text.ends_with("UTF-8"))
+                .expect("the strip's own facts")
+                .0;
+            assert!(
+                facts.right() <= strip.right() && facts.right() <= pane().right(),
+                "{count} statements painted the facts at {} outside the pane",
+                facts.right()
+            );
+            // Every chip stays left of the facts. The chips are the only `N · …` runs in the band —
+            // the register below has its own.
+            let chips: Vec<&(Rect, String)> = f
+                .texts
+                .iter()
+                .filter(|(rect, text)| {
+                    strip.contains(rect.center())
+                        && text.contains(" · ")
+                        && !text.ends_with("UTF-8")
+                })
+                .collect();
+            for (rect, text) in &chips {
+                assert!(
+                    rect.right() <= facts.left(),
+                    "chip {text:?} at {} runs into the facts at {}",
+                    rect.right(),
+                    facts.left()
+                );
+                assert!(rect.left() >= strip.left());
+            }
+            // Nothing is dropped silently: a chip per statement, or a count for it.
+            let counted: usize = f
+                .texts
+                .iter()
+                .filter(|(rect, text)| strip.contains(rect.center()) && text.starts_with('+'))
+                .map(|(_, text)| {
+                    text.trim_start_matches('+')
+                        .split_whitespace()
+                        .next()
+                        .and_then(|count| count.parse::<usize>().ok())
+                        .unwrap_or(0)
+                })
+                .sum();
+            assert_eq!(
+                chips.len() + counted,
+                count,
+                "{count} statements: {} chips and {counted} counted",
+                chips.len()
+            );
+        }
+    }
+
+    /// The register records the script the run *used* rather than the editor's text at the moment of
+    /// the run. A rerun of what is on screen therefore has to clear the stale pill even when its split
+    /// is unchanged — the old rule compared the splits, so the register kept the previous text and
+    /// painted "the script changed since this run" against results from exactly that script.
+    #[test]
+    fn a_rerun_whose_split_is_unchanged_is_not_stale() {
+        let ctx = egui::Context::default();
+        let mut world = world("stale", "select 1 as a;\n");
+        let index = world.0.active_tab.unwrap();
+        let run = click_hit(&ctx, &mut world, "Run", 1.02);
+        let _ = frame(&ctx, &mut world, run, 1.05);
+        let first = tab(&world).sql.text.clone();
+        assert!(
+            !world.1.registers[&index].stale(&first),
+            "a fresh run is not stale"
+        );
+        // A comment behind the statement: the splitter drops it, so both scripts split into the same
+        // statement while their texts differ.
+        let second = "select 1 as a;\n-- a note the splitter drops\n".to_owned();
+        assert_eq!(
+            datacraft_engine::cmd::sql::split(&first),
+            datacraft_engine::cmd::sql::split(&second),
+            "the two scripts split the same way"
+        );
+        world.0.tabs[index].sql.text = second.clone();
+        let _ = frame(&ctx, &mut world, Vec::new(), 1.08);
+        assert!(
+            world.1.registers[&index].stale(&second),
+            "the editor has moved on"
+        );
+        let run = click_hit(&ctx, &mut world, "Run", 1.1);
+        let _ = frame(&ctx, &mut world, run, 1.15);
+        assert_eq!(
+            world.1.registers[&index].script,
+            tab(&world).sql.ran_script,
+            "the register is stamped with the script the run used"
+        );
+        assert!(
+            !world.1.registers[&index].stale(&second),
+            "the rerun cleared the pill: its rows are from this script"
+        );
+    }
+
+    /// A run given a script of its own — the control channel's `engine.run`, the palette's — is
+    /// stamped with *that* script and not the editor's: the register used to record the editor's text
+    /// and call itself fresh for a run it did not describe.
+    #[test]
+    fn a_run_with_a_script_of_its_own_is_stamped_with_it() {
+        let ctx = egui::Context::default();
+        let mut world = world("channel", "select 1 as a;\n");
+        let index = world.0.active_tab.unwrap();
+        let _ = frame(&ctx, &mut world, Vec::new(), 1.0);
+        world
+            .0
+            .run(
+                "sql.run",
+                serde_json::json!({ "sql": "select 2 as b;", "limit": 10 }),
+            )
+            .expect("the other script runs");
+        let _ = frame(&ctx, &mut world, Vec::new(), 1.1);
+        assert_eq!(
+            world.1.registers[&index].script, "select 2 as b;",
+            "the register stamps what the engine ran"
+        );
+        assert!(
+            world.1.registers[&index].stale(&tab(&world).sql.text),
+            "the editor never held that script"
+        );
+    }
+
+    /// The register's `Export` cannot finish on a query tab: it routes through `grid.export`, which
+    /// reads the active tab's *data* grid and refuses this one after the file picker has already asked
+    /// for a path. So it is painted disabled and carries the engine's own sentence — the rule `Stop`
+    /// and the grid's `editable` gate follow.
+    #[test]
+    fn the_registers_export_is_disabled_with_the_engines_own_refusal() {
+        let ctx = egui::Context::default();
+        let mut world = world("export", "select 1 as a;\n");
+        let _ = frame(&ctx, &mut world, Vec::new(), 1.0);
+        let run = click_hit(&ctx, &mut world, "Run", 1.02);
+        let f = frame(&ctx, &mut world, run, 1.05);
+        let export = f.label("Export");
+        // Hover it long enough for the tooltip. egui hides a tooltip while a click is more recent
+        // than the last pointer movement, and `Run` was clicked a moment ago — so the pointer has to
+        // arrive at least the grace time after that click.
+        let mut time = 1.3;
+        let _ = frame(&ctx, &mut world, hover(export.center()), time);
+        let mut seen = false;
+        let mut painted = Vec::new();
+        for _ in 0..4 {
+            time += 0.4;
+            let f = frame(&ctx, &mut world, Vec::new(), time);
+            seen |= f.shows(datacraft_engine::cmd::grid::no_grid_reason());
+            // A button that is offered is filled with its sheet — `panel_alt` at rest, the pointer's
+            // fill under the hand; the disabled face paints nothing at all. (Every control in a band
+            // also gets one transparent rect from the layout machinery, which paints nothing.)
+            assert!(
+                !f.fills.iter().any(|(rect, fill)| rect.width() < 300.0
+                    && rect.contains(export.center())
+                    && *fill != Color32::TRANSPARENT),
+                "the disabled Export was filled like an offered control: {:#?}",
+                f.fills
+                    .iter()
+                    .filter(|(rect, _)| rect.contains(export.center()))
+                    .collect::<Vec<_>>()
+            );
+            painted = f.strings;
+        }
+        assert!(
+            seen,
+            "the engine's own refusal is the Export control's hover text: {painted:#?}"
+        );
     }
 
     #[test]

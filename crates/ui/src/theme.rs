@@ -425,6 +425,144 @@ pub fn band_top_hairline(ui: &Ui, tokens: &Tokens, rect: egui::Rect) {
     );
 }
 
+/// One line of `text` in `font`, so a band can reserve a row's own fact before it paints the row's
+/// pills around it.
+pub fn text_width(ui: &Ui, font: FontId, text: &str) -> f32 {
+    measured(ui, font, text)
+}
+
+/// What a bounded row prints for the pills it left out.
+pub fn more_note(count: usize) -> String {
+    format!("+{count} more")
+}
+
+/// The width of that pill: one mono line in the chip's own padding, so a row can reserve it before it
+/// decides how many pills fit.
+pub fn more_pill_width(ui: &Ui, tokens: &Tokens, count: usize) -> f32 {
+    measured(ui, tokens.mono(T_XS), &more_note(count)) + 2.0 * f32::from(S3) + 2.0
+}
+
+/// The `+N more` pill, at the height of the row that prints it.
+pub fn more_pill(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    count: usize,
+    height: f32,
+    fill: Color32,
+) -> Response {
+    let label = more_note(count);
+    let width = more_pill_width(ui, tokens, count);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let radius = CornerRadius::same(R_CHIP);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, fill);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        egui::pos2(rect.left() + f32::from(S3), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label.clone(),
+        tokens.mono(T_XS),
+        tokens.text_dim,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), &label)
+    });
+    response
+}
+
+/// Which pills of a row fit its band, and how many are counted in a `+N more` pill on each side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fitted {
+    /// The first pill painted.
+    pub start: usize,
+    /// The last pill painted, inclusive.
+    pub end: usize,
+    /// The pills left out before `start`, which the head note counts.
+    pub head: usize,
+    /// The pills left out after `end`, which the tail note counts.
+    pub tail: usize,
+}
+
+/// The window of a pill row that fits `budget`, `gap` between neighbours and one `note_w` pill for
+/// each side the row truncates — keeping `active` inside the window when the caller names one.
+///
+/// Both rows this bounds are `nowrap` flex rows in the design with the band's own fact pinned to the
+/// right, and nothing in them stops the pills painting over the fact and past the pane: the results
+/// register's run total was clipped mid-glyph at five statements on the 776px pane and dropped
+/// altogether at six. So a row is planned before it is painted — the fact keeps the width it measured
+/// and the pills that do not fit are counted rather than drawn.
+///
+/// The pill the caller names is what the window is built around when the left-hand run does not reach
+/// it, which is the case that matters: the register opens on the run's last statement.
+///
+/// `ponytail:` a row that does not fit hides pills and counts them; the design's own answer would be
+/// to let the row scroll. The upgrade path is a horizontal `ScrollArea` inside the band, which needs a
+/// band as wide as its content — `band_fill` is the pane's width and its fill stops at the pane's edge.
+pub fn fit_row(
+    budget: f32,
+    gap: f32,
+    widths: &[f32],
+    note_w: f32,
+    active: Option<usize>,
+) -> Fitted {
+    let count = widths.len();
+    if count == 0 {
+        return Fitted {
+            start: 0,
+            end: 0,
+            head: 0,
+            tail: 0,
+        };
+    }
+    let span = |first: usize, last: usize| -> f32 {
+        widths[first..=last].iter().sum::<f32>() + gap * (last - first) as f32
+    };
+    if span(0, count - 1) <= budget {
+        return Fitted {
+            start: 0,
+            end: count - 1,
+            head: 0,
+            tail: 0,
+        };
+    }
+    // What fits from the left, with one note reserved for the rest.
+    let mut end = 0;
+    while end + 1 < count && span(0, end + 1) + gap + note_w <= budget {
+        end += 1;
+    }
+    if active.map_or(true, |active| active <= end) {
+        return Fitted {
+            start: 0,
+            end,
+            head: 0,
+            tail: count - 1 - end,
+        };
+    }
+    // The active pill is past that prefix, so the row is windowed around it instead: the note it
+    // leaves at the head does not stand between the user and the statement on screen.
+    let active = active.unwrap_or(0).min(count - 1);
+    let tail = if active + 1 < count {
+        gap + note_w
+    } else {
+        0.0
+    };
+    let mut start = active;
+    while start > 0 && note_w + gap + span(start - 1, active) + tail <= budget {
+        start -= 1;
+    }
+    Fitted {
+        start,
+        end: active,
+        head: start,
+        tail: count - 1 - active,
+    }
+}
+
 /// Toolbar-height band: the shape every view header uses.
 pub fn band(ui: &mut Ui, tokens: &Tokens, add: impl FnOnce(&mut Ui)) -> egui::Rect {
     band_h(ui, tokens, TOOLBAR_H, add)

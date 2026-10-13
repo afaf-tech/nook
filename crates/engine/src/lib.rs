@@ -425,10 +425,14 @@ pub struct StatementRun {
 pub struct SqlState {
     pub text: String,
     pub last_result: Option<ResultSet>,
-    pub result_label: String,
     pub elapsed_ms: f64,
     /// Statements of the last run, so `sql.explainStatement` and history can refer to them.
     pub statements: Vec<String>,
+    /// The script the last run actually used: the `sql` the command was given, or the editor's own
+    /// text when it was not — so a run from the control channel or the palette is stamped with what it
+    /// ran rather than with whatever the editor happened to hold. The results register records it as
+    /// the source of the rows it shows and calls itself stale when the editor has moved on since.
+    pub ran_script: String,
     /// One entry per statement of the last run, in run order. The next run replaces them.
     pub results: Vec<StatementRun>,
     pub history_cursor: Option<usize>,

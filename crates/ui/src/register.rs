@@ -9,7 +9,7 @@
 
 use datacraft_engine::{Session, SqlState, StatementRun};
 use datacraft_model::ResultSet;
-use egui::{Align2, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, CornerRadius, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
 use crate::app::UiState;
 use crate::icons::Glyph;
@@ -94,8 +94,11 @@ pub struct Register {
     /// The statement whose result is on screen.
     pub active: usize,
     pub view: View,
-    /// The editor's text at the run that filled this register. [`Register::stale`] compares it with
-    /// the live text, so the register can say its results no longer match the editor.
+    /// The script the run behind these rows actually used — [`SqlState::ran_script`], which is the
+    /// editor's text for a run started from the editor and the `sql` a run was given for one from the
+    /// control channel, the palette or `sql.runSelection`. [`Register::stale`] compares it with the
+    /// live text, so the register can say its results no longer match the editor, and the editor
+    /// rebuilds the register when the engine has run something this stamp does not describe.
     pub script: String,
 }
 
@@ -103,7 +106,7 @@ impl Register {
     /// The register for a tab's SQL state, given the previous frame's register.
     ///
     /// Call this when the run has changed — after `sql.run`, or when the tab has no register yet.
-    /// `script` records the text those results came from, so calling it every frame would erase what
+    /// `script` records the script those results came from, so calling it every frame would erase what
     /// [`Register::stale`] is for.
     ///
     /// The active tab defaults to the statement that failed, because that is the one the user has to
@@ -121,11 +124,14 @@ impl Register {
         Register {
             active,
             view: previous.map(|previous| previous.view).unwrap_or_default(),
-            script: state.text.clone(),
+            script: state.ran_script.clone(),
         }
     }
 
-    /// True when the editor's text has moved on since the run that filled this register.
+    /// True when the editor's text has moved on since the run that filled this register. Both
+    /// directions matter: a rerun of what is on screen has to clear it (the engine re-stamps the
+    /// script it ran), and a run given a different script — the control channel's, the palette's —
+    /// has to raise it even though it recorded no change to the editor.
     pub fn stale(&self, script: &str) -> bool {
         self.script != script
     }
@@ -217,9 +223,6 @@ pub fn show(
     if let Some(text) = actions.copy {
         ui.ctx().copy_text(text);
     }
-    if actions.export {
-        state.open_export_grid("csv");
-    }
     if actions.rerun {
         let text = session.tabs[tab_index].sql.text.clone();
         let mut params = serde_json::json!({ "sql": text });
@@ -238,8 +241,6 @@ pub fn show(
 struct Actions {
     /// Put this on the clipboard.
     copy: Option<String>,
-    /// Open the export dialog for the active result.
-    export: bool,
     /// Run the tab's script again.
     rerun: bool,
 }
@@ -336,6 +337,12 @@ fn paint(
 
 /// `.rtabs`: one tab per statement, the run's total pinned to the right, and the `stroke` hairline
 /// the register below it starts from.
+///
+/// The design lays this row out as a `nowrap` flex row with a spacer before `.tot`, so more statements
+/// than the pane holds push the total out of it — measured on the 776px pane the total was clipped
+/// mid-glyph at five statements and not painted at all at six. The row is therefore planned: the total
+/// keeps the width it measured, the tabs that do not fit are counted in one `+N more` tab, and the
+/// statement the register is showing stays in the window.
 fn tabs(ui: &mut Ui, tokens: &Tokens, sql: &SqlState, register: &mut Register) -> Rect {
     let rect = design::band_fill(
         ui,
@@ -344,12 +351,44 @@ fn tabs(ui: &mut Ui, tokens: &Tokens, sql: &SqlState, register: &mut Register) -
         design::S4,
         egui::Align::Center,
         |ui| {
-            for (index, run) in sql.results.iter().enumerate() {
-                tab(ui, tokens, index, run, register);
+            let gap = ui.spacing().item_spacing.x;
+            let widths: Vec<f32> = sql
+                .results
+                .iter()
+                .enumerate()
+                .map(|(index, run)| tab_width(ui, tokens, index, run))
+                .collect();
+            let total = Register::total_note(sql);
+            let total_w = design::text_width(ui, tokens.mono(design::T_XS), &total);
+            let fitted = design::fit_row(
+                (ui.available_width() - total_w - gap).max(0.0),
+                gap,
+                &widths,
+                design::more_pill_width(ui, tokens, widths.len()),
+                Some(register.active),
+            );
+            if !widths.is_empty() {
+                if fitted.head > 0 {
+                    design::more_pill(ui, tokens, fitted.head, design::TAB_H, tokens.panel_high)
+                        .on_hover_text("More statements than the tab row can show");
+                }
+                for ((index, width), run) in widths
+                    .iter()
+                    .enumerate()
+                    .zip(&sql.results)
+                    .skip(fitted.start)
+                    .take(fitted.end + 1 - fitted.start)
+                {
+                    tab(ui, tokens, index, run, register, *width);
+                }
+                if fitted.tail > 0 {
+                    design::more_pill(ui, tokens, fitted.tail, design::TAB_H, tokens.panel_high)
+                        .on_hover_text("More statements than the tab row can show");
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    RichText::new(Register::total_note(sql))
+                    RichText::new(total)
                         .font(tokens.mono(design::T_XS))
                         .color(tokens.text_dim),
                 );
@@ -360,22 +399,45 @@ fn tabs(ui: &mut Ui, tokens: &Tokens, sql: &SqlState, register: &mut Register) -
     rect
 }
 
-/// One `.rtab`: the statement's ordinal, its own first word, and its own rows and duration. The
-/// active tab is filled with `panel` and carries the design's 2px `accent` bar along its **top**
-/// edge — unlike the window tab strip, whose indicator is at the bottom.
-fn tab(ui: &mut Ui, tokens: &Tokens, index: usize, run: &StatementRun, register: &mut Register) {
+/// What one `.rtab` costs: the design's `padding:0 8px 0 12px`, its two 8px gaps, and the three runs
+/// of text it prints. The row measures with this and `tab` paints with it, so the fit it plans is the
+/// width it spends.
+fn tab_width(ui: &Ui, tokens: &Tokens, index: usize, run: &StatementRun) -> f32 {
+    let mono = tokens.mono(design::T_XS);
+    f32::from(design::S5)
+        + design::text_width(ui, mono.clone(), &ordinal(index))
+        + f32::from(design::S4)
+        + design::text_width(
+            ui,
+            tokens.font(design::T_SM),
+            &statement_label(&run.statement),
+        )
+        + f32::from(design::S4)
+        + design::text_width(ui, mono, &tab_facts(run))
+        + f32::from(design::S4)
+}
+
+/// A tab's ordinal, as the design prints it: one-based.
+fn ordinal(index: usize) -> String {
+    (index + 1).to_string()
+}
+
+/// One `.rtab`: the statement's ordinal, its own first word, and its own rows and duration, at the
+/// width the row measured for it. The active tab is filled with `panel` and carries the design's 2px
+/// `accent` bar along its **top** edge — unlike the window tab strip, whose indicator is at the bottom.
+fn tab(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    index: usize,
+    run: &StatementRun,
+    register: &mut Register,
+    width: f32,
+) {
     let active = register.active == index;
-    let ordinal = (index + 1).to_string();
+    let ordinal = ordinal(index);
     let label = statement_label(&run.statement);
     let facts = tab_facts(run);
     let mono = tokens.mono(design::T_XS);
-    let width = f32::from(design::S5)
-        + measured(ui, mono.clone(), &ordinal)
-        + f32::from(design::S4)
-        + measured(ui, tokens.font(design::T_SM), &label)
-        + f32::from(design::S4)
-        + measured(ui, mono.clone(), &facts)
-        + f32::from(design::S4);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, design::TAB_H), Sense::click());
     {
         let painter = ui.painter();
@@ -426,7 +488,7 @@ fn tab(ui: &mut Ui, tokens: &Tokens, index: usize, run: &StatementRun, register:
                 font.clone(),
                 colour,
             );
-            x += measured(ui, font, text) + f32::from(design::S4);
+            x += design::text_width(ui, font, text) + f32::from(design::S4);
         }
     }
     if response.clicked() {
@@ -466,21 +528,21 @@ fn status_bar(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = f32::from(design::S5);
-                if design::toolbar_button(
+                // `Export` routes through `grid.export`, which reads the *active tab's* data grid, and
+                // a query tab has none — the engine refuses it after the file picker has already
+                // asked the user for a path. So the button is painted disabled with the engine's own
+                // answer, rather than offering a trip through a dialog that cannot finish.
+                design::toolbar_button(
                     ui,
                     tokens,
                     "Export",
                     Some(Mark::Glyph(Glyph::Export)),
                     tokens.panel_alt,
                     Emphasis::Plain,
-                    true,
+                    false,
                     |_| {},
                 )
-                .on_hover_text("Export this result")
-                .clicked()
-                {
-                    actions.export = true;
-                }
+                .on_hover_text(datacraft_engine::cmd::grid::no_grid_reason());
                 let copyable = run.result.is_some();
                 if design::toolbar_button(
                     ui,
@@ -1021,21 +1083,13 @@ fn millis(elapsed_ms: f64) -> i64 {
     elapsed_ms.round() as i64
 }
 
-/// The width a string needs, for the callers that reserve a slot before painting into it.
-fn measured(ui: &Ui, font: FontId, text: &str) -> f32 {
-    ui.painter()
-        .layout_no_wrap(text.to_owned(), font, egui::Color32::PLACEHOLDER)
-        .size()
-        .x
-}
-
 /// The width `.seg` takes for `labels`: each item is the design's `0 var(--s5)` around its label,
 /// and `pane_segmented` shares the container's inner width — its border, its inset and its gaps —
 /// equally between them.
 fn segment_width(ui: &Ui, tokens: &Tokens, labels: &[(&str, bool)]) -> f32 {
     let widest = labels
         .iter()
-        .map(|(label, _)| measured(ui, tokens.font(design::T_XS), label))
+        .map(|(label, _)| design::text_width(ui, tokens.font(design::T_XS), label))
         .fold(0.0_f32, f32::max);
     let count = labels.len() as f32;
     let inset = 2.0;
@@ -1103,17 +1157,21 @@ mod tests {
     fn state(runs: Vec<StatementRun>) -> SqlState {
         SqlState {
             text: "select 1;".to_owned(),
+            ran_script: "select 1;".to_owned(),
             last_result: runs.last().and_then(|run| run.result.clone()),
             results: runs,
             ..Default::default()
         }
     }
 
-    /// Every string a frame painted, so a test can assert copy the product itself renders.
-    fn painted(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
-        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+    /// Every string a frame painted, with the rect it was painted into: the copy assertions read the
+    /// strings and the bounded rows are measured against the rects.
+    fn placed(shapes: &[egui::epaint::ClippedShape]) -> Vec<(Rect, String)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(Rect, String)>) {
             match shape {
-                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Text(text) => {
+                    out.push((text.visual_bounding_rect(), text.galley.text().to_owned()))
+                }
                 egui::Shape::Vec(shapes) => {
                     for shape in shapes {
                         walk(shape, out);
@@ -1129,8 +1187,17 @@ mod tests {
         out
     }
 
-    fn shows(strings: &[String], needle: &str) -> bool {
-        strings.iter().any(|text| text.contains(needle))
+    fn shows(painted: &[(Rect, String)], needle: &str) -> bool {
+        painted.iter().any(|(_, text)| text.contains(needle))
+    }
+
+    /// The painted rect of one exact string, or a panic naming what the frame did paint.
+    fn rect_of(painted: &[(Rect, String)], text: &str) -> Rect {
+        painted
+            .iter()
+            .find(|(_, painted)| painted == text)
+            .map(|(rect, _)| *rect)
+            .unwrap_or_else(|| panic!("no painted {text:?}: {painted:#?}"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1143,7 +1210,7 @@ mod tests {
         density: datacraft_engine::Density,
         table: &mut TableState,
         actions: &mut Actions,
-    ) -> (Layout, Vec<String>) {
+    ) -> (Layout, Vec<(Rect, String)>) {
         let tokens = Tokens::of("dark");
         tokens.apply(ctx);
         let input = egui::RawInput {
@@ -1172,7 +1239,7 @@ mod tests {
         });
         // The frame paints into a texture delta the headless context never applies.
         out.textures_delta.clear();
-        let copy = painted(&out.shapes);
+        let copy = placed(&out.shapes);
         (layout, copy)
     }
 
@@ -1435,9 +1502,11 @@ mod tests {
     #[test]
     fn the_tab_strip_carries_one_tab_per_statement() {
         let ctx = egui::Context::default();
+        // Two statements, because the row is bounded now: a `.rtab` with the changed-statement facts
+        // is 229px, and three of those plus the run's total no longer fit the design's 776px pane.
+        // The bound itself is `the_tab_row_keeps_the_runs_total_inside_the_pane`.
         let sql = state(vec![
             ok("select id from t where plan = 'enterprise'", 6, 12.0),
-            ok("select id from t where plan = 'pro'", 3, 4.0),
             changed("update t set plan = 'pro' where id = 6", 1, 6.0),
         ]);
         let mut register = Register::from(&sql, None);
@@ -1454,20 +1523,16 @@ mod tests {
             &mut actions,
         );
         assert!(layout.tabs.is_some());
-        for (ordinal, facts) in [
-            ("1", "6 rows · 12 ms"),
-            ("2", "3 rows · 4 ms"),
-            ("3", "1 row affected · 6 ms"),
-        ] {
+        for (ordinal, facts) in [("1", "6 rows · 12 ms"), ("2", "1 row affected · 6 ms")] {
             assert!(shows(&copy, ordinal), "tab {ordinal}'s ordinal is painted");
             assert!(
                 shows(&copy, facts),
-                "tab {ordinal} does not carry its own facts ({facts})"
+                "tab {ordinal} does not carry its own facts ({facts}): {copy:#?}"
             );
         }
         assert!(shows(&copy, "SELECT"));
         assert!(shows(&copy, "UPDATE"));
-        assert!(shows(&copy, "3 statements · 22 ms total"));
+        assert!(shows(&copy, "2 statements · 18 ms total"));
     }
 
     /// The flush stack: the register's bands touch, the grid takes what is left, and the footer sits
@@ -1558,6 +1623,94 @@ mod tests {
         assert!(shows(&copy, VOID_NOTE));
         assert!(shows(&copy, "Retry"));
         assert!(shows(&copy, "Copy error"));
+    }
+
+    /// The design's `.rtabs` is a `nowrap` flex row with a spacer and the run's total after it, so
+    /// more statements than the pane holds paint the total out of the pane: measured on the 776px
+    /// pane the total was clipped mid-glyph at five statements and dropped altogether at six. The row
+    /// is bounded now — the total keeps its width, the tabs that do not fit are counted, and the
+    /// statement the register is showing stays in the window.
+    #[test]
+    fn the_tab_row_keeps_the_runs_total_inside_the_pane() {
+        let ctx = egui::Context::default();
+        for count in [5, 6] {
+            let sql = state(
+                (1..=count)
+                    .map(|index| {
+                        ok(
+                            &format!("select id from main.customers where plan = 'plan {index}'"),
+                            6,
+                            index as f64,
+                        )
+                    })
+                    .collect(),
+            );
+            let mut register = Register::from(&sql, None);
+            assert_eq!(
+                register.active,
+                count - 1,
+                "the run opens on its last statement"
+            );
+            let mut table = TableState::default();
+            let mut actions = Actions::default();
+            let (layout, copy) = run_frame(
+                &ctx,
+                pane(),
+                Vec::new(),
+                &mut register,
+                &sql,
+                datacraft_engine::Density::Compact,
+                &mut table,
+                &mut actions,
+            );
+            let tabs = layout.tabs.expect("the tab row");
+            let total = rect_of(&copy, &Register::total_note(&sql));
+            assert!(
+                total.right() <= pane().x,
+                "{count} statements painted the run's total {} outside the {}px pane",
+                total.right(),
+                pane().x
+            );
+            assert!(total.left() >= tabs.left());
+            // Every tab stays left of the total, and the ones left out are counted rather than
+            // painted over it.
+            for (rect, text) in &copy {
+                if text.starts_with('+') || !text.contains("rows ·") {
+                    continue;
+                }
+                assert!(
+                    rect.right() <= total.left(),
+                    "tab {text:?} at {} runs into the total at {}",
+                    rect.right(),
+                    total.left()
+                );
+            }
+            // The active statement's own tab is the one in the window: a run's last statement is what
+            // the register opens on, and the overflow must not hide it.
+            assert!(
+                shows(&copy, &tab_facts(&sql.results[count - 1])),
+                "the active statement's tab is not painted: {copy:#?}"
+            );
+            // Every statement is either painted or counted — nothing is dropped silently. A tab's
+            // label is one `SELECT` apiece, and the overflow pills' counts have to add up.
+            let painted = copy.iter().filter(|(_, text)| text == "SELECT").count();
+            let counted: usize = copy
+                .iter()
+                .filter(|(_, text)| text.starts_with('+'))
+                .map(|(_, text)| {
+                    text.trim_start_matches('+')
+                        .split_whitespace()
+                        .next()
+                        .and_then(|count| count.parse::<usize>().ok())
+                        .unwrap_or(0)
+                })
+                .sum();
+            assert_eq!(
+                painted + counted,
+                count,
+                "{count} statements: {painted} painted and {counted} counted"
+            );
+        }
     }
 
     #[test]
