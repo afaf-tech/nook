@@ -202,17 +202,23 @@ pub fn keychain_available() -> bool {
 
 /// Store a password in the login keychain.
 ///
-/// **Ceiling: the secret is the child's `-w` argument.** A bare `-w` reads the password from the
-/// terminal when the process has one, and this app is launched from a terminal often enough that the
-/// pipe form hangs it: `security` opens `/dev/tty` for the confirmation read, never takes the piped
-/// bytes, and the store blocks forever in `wait_with_output` (measured with the same binary and the
-/// same call, differing only in whether the app had a controlling terminal). Keeping the secret out
-/// of `ps` therefore needs the child to have no controlling terminal, i.e. `setsid` between fork and
-/// exec — reachable only through `unsafe` (a raw `extern "C"` next to a `pre_exec` call; the
-/// workspace has no `unsafe` at all today) or a detach crate such as `nix`, which this phase's
-/// non-goals forbid. So the exposure is recorded here instead: for as long as the child lives, the
-/// same user can read the secret from the process table. Revisit when adding `unsafe` to the
-/// workspace is a decision someone is willing to make on its own merits.
+/// **Ceiling: the secret is the child's `-w` argument.** A bare `-w` asks the terminal for the
+/// password, and this app is launched from a terminal often enough that the pipe form hangs it:
+/// `security` opens `/dev/tty` for the confirmation reads, never takes the piped bytes, and the store
+/// blocks forever in `wait_with_output` (measured with the same binary and the same call, differing
+/// only in whether the app had a controlling terminal).
+///
+/// The door out is real and measured, not assumed: with no controlling terminal the same bare `-w`
+/// takes **both lines from the pipe** and the store succeeds (`printf 'h1\nh1\n' | security
+/// add-generic-password -U -s … -a … -w` → exit 0, and `find-generic-password -w` reads the value
+/// back), and a child detached with `setsid` can still reach the login keychain (same probe from
+/// `os.setsid()`'s new session → stored, and read back). What is missing is only the detach itself,
+/// i.e. `setsid` between fork and exec — reachable through `unsafe` (a raw `extern "C"` next to a
+/// `pre_exec` call; the workspace has no `unsafe` at all today) or a detach crate such as `nix`,
+/// which this phase's non-goals forbid. So the exposure is recorded here instead: for as long as the
+/// child lives, the same user can read the secret from the process table. Revisit when adding
+/// `unsafe` to the workspace is a decision someone is willing to make on its own merits — the
+/// `security` side of that change is already proven to work.
 pub fn keychain_store(id: &str, secret: &str) -> Result<()> {
     if !keychain_available() {
         return Err(Error::unsupported(
