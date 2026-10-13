@@ -518,8 +518,8 @@ impl DatacraftApp {
                         .get("theme")
                         .and_then(|t| t.as_str())
                         .unwrap_or_default();
-                    // Delegate to the command the Settings button uses, so the control channel cannot
-                    // accept a value the product refuses (and vice versa).
+                    // Delegate to the command the preferences dialog uses, so the control channel
+                    // cannot accept a value the product refuses (and vice versa).
                     match self.session.run(
                         "app.setSetting",
                         serde_json::json!({"key": "theme", "value": theme}),
@@ -632,6 +632,35 @@ impl DatacraftApp {
                     }
                 });
 
+                // What the right cluster will need, measured before it is painted: the design's
+                // `.palette` is `flex: 1 1 auto; min-width: 120px; max-width: 300px`, and this is
+                // the same bargain — the field takes what the keycap and the cluster leave.
+                let theme = self.session.settings.theme.clone();
+                let theme_label = if theme == "dark" { "Light" } else { "Dark" };
+                let density = self.session.settings.density;
+                let density_options = [
+                    ("Compact", density == Density::Compact),
+                    ("Comfortable", density == Density::Comfortable),
+                ];
+                let agent = match &self.state.control {
+                    Some(control) => format!("control channel :{}", control.port),
+                    None => "agent idle".to_string(),
+                };
+                let pending: usize = self
+                    .session
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.grid.pending.len())
+                    .sum();
+                let pending_text = format!("{pending} pending");
+                let reserve = t::icon_button_width(ui, tokens, theme_label, true)
+                    + t::segmented_width(ui, tokens, &["Compact", "Comfortable"])
+                    + t::chip_width(ui, tokens, &agent)
+                    + t::chip_width(ui, tokens, &pending_text)
+                    + t::keycap_width(ui, tokens, "Cmd K")
+                    + 5.0 * f32::from(t::S4);
+                let field_width = (ui.available_width() - reserve).clamp(120.0, 300.0);
+
                 // The palette is a real field: clicking it opens the overlay, which then owns the
                 // focus, so the bar reads like a search box and behaves like one.
                 let field = ui.add(
@@ -643,7 +672,7 @@ impl DatacraftApp {
                         )
                         .font(tokens.font(t::T_SM))
                         .text_color(tokens.text)
-                        .desired_width(230.0)
+                        .desired_width(field_width)
                         // The design's field is 26 tall: a 12px galley, 1px of frame on each side and
                         // 6 above and below to make up the rest, with the magnifier inside.
                         .margin(egui::Margin {
@@ -673,10 +702,8 @@ impl DatacraftApp {
                 t::keycap(ui, tokens, "Cmd K");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let theme = self.session.settings.theme.clone();
                     let next = if theme == "dark" { "light" } else { "dark" };
-                    let label = if theme == "dark" { "Light" } else { "Dark" };
-                    if t::icon_button(ui, tokens, label, Some(Glyph::Sun), true)
+                    if t::icon_button(ui, tokens, theme_label, Some(Glyph::Sun), true)
                         .on_hover_text(format!("Switch to the {next} theme"))
                         .clicked()
                     {
@@ -686,12 +713,7 @@ impl DatacraftApp {
                         );
                     }
                     // The design's density switch, between the agent chip and the theme toggle.
-                    let density = self.session.settings.density;
-                    let options = [
-                        ("Compact", density == Density::Compact),
-                        ("Comfortable", density == Density::Comfortable),
-                    ];
-                    if let Some(index) = t::segmented(ui, tokens, &options) {
+                    if let Some(index) = t::segmented(ui, tokens, &density_options) {
                         let _ = self.session.run(
                             "app.setSetting",
                             serde_json::json!({
@@ -700,44 +722,37 @@ impl DatacraftApp {
                             }),
                         );
                     }
-                    // The control channel is the agent surface, so it reports here rather than twice.
-                    let mut line = "agent idle".to_string();
-                    let mut ink = tokens.text_dim;
-                    let mut dot = tokens.text_faint;
-                    let mut stroke = tokens.stroke;
-                    if let Some(control) = &self.state.control {
-                        line = format!("control channel :{}", control.port);
-                        ink = tokens.text;
-                        dot = tokens.info;
-                        stroke = tokens.accent_line;
-                    }
-                    let response = t::state_chip(ui, tokens, &line, None, ink, dot);
-                    ui.painter().rect_stroke(
-                        response.rect,
-                        CornerRadius::same(t::R_CHIP),
-                        Stroke::new(1.0, stroke),
-                        egui::StrokeKind::Inside,
-                    );
-                    response.on_hover_text("Headless callers talk to the app over this channel");
+                    // The control channel is the agent surface, so it reports here rather than twice:
+                    // the design's `.agent` is a border only, and it turns `accent_line` while running.
+                    let (ink, dot, border) = match &self.state.control {
+                        Some(_) => (tokens.text, tokens.info, tokens.accent_line),
+                        None => (tokens.text_dim, tokens.text_faint, tokens.stroke),
+                    };
+                    t::state_chip(ui, tokens, &agent, None, Some(border), ink, dot)
+                        .on_hover_text("Headless callers talk to the app over this channel");
 
-                    let pending: usize = self
-                        .session
-                        .tabs
-                        .iter()
-                        .map(|tab| tab.grid.pending.len())
-                        .sum();
-                    let text = format!("{pending} pending");
+                    // `.chip` when there is something to apply (filled, no border), `.chip.zero`
+                    // otherwise (surface-2 inside a border).
                     if pending > 0 {
                         t::state_chip(
                             ui,
                             tokens,
-                            &text,
+                            &pending_text,
                             Some(tokens.dirty),
+                            None,
                             tokens.dirty_text,
                             tokens.warn,
                         );
                     } else {
-                        t::state_chip(ui, tokens, &text, None, tokens.text_dim, tokens.text_faint);
+                        t::state_chip(
+                            ui,
+                            tokens,
+                            &pending_text,
+                            Some(tokens.panel_alt),
+                            Some(tokens.stroke),
+                            tokens.text_dim,
+                            tokens.text_faint,
+                        );
                     }
                 });
             });
@@ -767,15 +782,7 @@ impl DatacraftApp {
             .x;
         let engine_width = engine
             .as_ref()
-            .map(|label| {
-                ui.painter()
-                    .layout_no_wrap(label.clone(), tokens.mono(t::T_XS), Color32::PLACEHOLDER)
-                    .size()
-                    .x
-                    + 2.0 * f32::from(t::S3)
-                    + 2.0
-                    + f32::from(t::S3)
-            })
+            .map(|label| t::tag_width(ui, tokens, label) + f32::from(t::S3))
             .unwrap_or(0.0);
         let width = 1.0
             + f32::from(t::S4)
@@ -792,15 +799,15 @@ impl DatacraftApp {
         let radius = CornerRadius::same(t::R_CTL);
         let painter = ui.painter();
         painter.rect_filled(rect, radius, tokens.panel_alt);
+        if response.hovered() {
+            painter.rect_filled(rect, radius, tokens.hover);
+        }
         painter.rect_stroke(
             rect,
             radius,
             Stroke::new(1.0, tokens.stroke),
             egui::StrokeKind::Inside,
         );
-        if response.hovered() {
-            painter.rect_filled(rect, radius, tokens.hover);
-        }
         let mut x = rect.left() + f32::from(t::S4) + 1.0;
         icons::glyph(
             ui,
@@ -826,21 +833,7 @@ impl DatacraftApp {
                 egui::pos2(x, rect.center().y - t::TAG_H / 2.0),
                 Vec2::new(engine_width - f32::from(t::S3), t::TAG_H),
             );
-            let tag_radius = CornerRadius::same(t::R_CTL);
-            painter.rect_filled(tag, tag_radius, tokens.hover);
-            painter.rect_stroke(
-                tag,
-                tag_radius,
-                Stroke::new(1.0, tokens.stroke),
-                egui::StrokeKind::Inside,
-            );
-            painter.text(
-                tag.center(),
-                Align2::CENTER_CENTER,
-                &engine,
-                tokens.mono(t::T_XS),
-                tokens.text_dim,
-            );
+            t::paint_tag(ui, tokens, tag, &engine);
             x += engine_width - f32::from(t::S3);
         }
         icons::glyph(
@@ -854,14 +847,8 @@ impl DatacraftApp {
         );
 
         // Which connection the app talks to is the app's own verb, so the list is the real one.
-        let open: Vec<(usize, String)> = self
-            .session
-            .conns
-            .iter()
-            .enumerate()
-            .map(|(index, conn)| (index, conn.cfg.name.clone()))
-            .collect();
-        let mut select: Option<usize> = None;
+        let open = Self::workspace_rows(&self.session);
+        let mut select: Option<String> = None;
         egui::Popup::menu(&response).show(|ui| {
             ui.set_min_width(200.0);
             if open.is_empty() {
@@ -871,26 +858,46 @@ impl DatacraftApp {
                         .color(tokens.text_dim),
                 );
             }
-            for (index, name) in open {
-                let active = self.session.active_conn == Some(index);
-                let label = if active { format!("· {name}") } else { name };
+            for (id, name, active) in &open {
+                let label = if *active {
+                    format!("· {name}")
+                } else {
+                    name.clone()
+                };
                 if ui
                     .button(RichText::new(label).size(t::T_SM).color(tokens.text))
                     .clicked()
                 {
-                    select = Some(index);
+                    select = Some(id.clone());
                     ui.close();
                 }
             }
         });
-        if let Some(index) = select {
+        if let Some(id) = select {
             if let Err(e) = self
                 .session
-                .run("conn.select", serde_json::json!({"conn": index}))
+                .run("conn.select", serde_json::json!({ "conn": id }))
             {
                 self.session.log(Level::Warn, e.to_string());
             }
         }
+    }
+
+    /// One row of the workspace popup: the connection's **id** — the thing `conn.select` resolves —
+    /// its name and whether it is the one the app is talking to.
+    fn workspace_rows(session: &Session) -> Vec<(String, String, bool)> {
+        session
+            .conns
+            .iter()
+            .enumerate()
+            .map(|(index, conn)| {
+                (
+                    conn.cfg.id.clone(),
+                    conn.cfg.name.clone(),
+                    session.active_conn == Some(index),
+                )
+            })
+            .collect()
     }
 
     /// Activity rail: the five workspaces the design shows, each wired to a destination the app
@@ -1743,6 +1750,29 @@ fn save_png(path: &str, image: &egui::ColorImage) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_workspace_popup_offers_ids_not_positions() {
+        let mut session = Session::new();
+        for name in ["first", "second"] {
+            session
+                .conns
+                .push(Conn::new(datacraft_core::ConnectionConfig::new(
+                    name,
+                    datacraft_core::DriverKind::Sqlite,
+                )));
+        }
+        session.active_conn = Some(1);
+
+        let rows = DatacraftApp::workspace_rows(&session);
+        assert_eq!(rows.len(), 2);
+        // `conn.select` resolves an id or a name and never a position, so the popup must hand over
+        // the id: passing the index made every pick fail with `no connection named '0'`.
+        assert_eq!(rows[0].0, session.conns[0].cfg.id);
+        assert_eq!(rows[1].0, session.conns[1].cfg.id);
+        assert_eq!(rows[0].1, "first");
+        assert!(!rows[0].2 && rows[1].2);
+    }
 
     #[test]
     fn preferences_opens_the_dialog_and_everything_else_the_runner() {

@@ -448,13 +448,7 @@ pub fn segmented(ui: &mut Ui, tokens: &Tokens, options: &[(&str, bool)]) -> Opti
     let font = tokens.font(T_XS);
     let widths: Vec<f32> = options
         .iter()
-        .map(|(label, _)| {
-            ui.painter()
-                .layout_no_wrap((*label).to_owned(), font.clone(), Color32::PLACEHOLDER)
-                .size()
-                .x
-                + 2.0 * f32::from(S4)
-        })
+        .map(|(label, _)| segment_item_width(ui, tokens, label))
         .collect();
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(widths.iter().sum::<f32>() + 2.0, SEG_H),
@@ -607,14 +601,10 @@ pub fn meter(ui: &mut Ui, tokens: &Tokens, fraction: f32, width: f32, colour: Co
 /// Key cap, e.g. `Enter`, `Esc`.
 pub fn keycap(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
     let font = tokens.mono(T_XS);
-    let width = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
-        .size()
-        .x
-        + 2.0 * f32::from(S3)
-        + 2.0;
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, KEYCAP_H), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(keycap_width(ui, tokens, text), KEYCAP_H),
+        Sense::hover(),
+    );
     let radius = CornerRadius::same(R_CTL);
     let painter = ui.painter();
     painter.rect_filled(rect, radius, tokens.panel_alt);
@@ -642,8 +632,6 @@ pub fn keycap(ui: &mut Ui, tokens: &Tokens, text: &str) -> Response {
     response
 }
 
-/// The design's `.iconbtn` and `.ws`: a 26px bordered control on `surface-2` with an optional 12px
-/// glyph, an 8px padding and a 6px gap.
 /// The row height a density preference asks for: the design's `--h-row` or `--h-row-comfort`.
 pub fn row_h(density: datacraft_engine::Density) -> f32 {
     match density {
@@ -652,6 +640,89 @@ pub fn row_h(density: datacraft_engine::Density) -> f32 {
     }
 }
 
+/// Width of an `.iconbtn` for `label` and an optional glyph, so a caller can reserve the space
+/// before it paints — that is how the top bar's palette field knows how wide it may flex.
+pub fn icon_button_width(ui: &Ui, tokens: &Tokens, label: &str, glyph: bool) -> f32 {
+    let label_width = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), tokens.font(T_XS), Color32::PLACEHOLDER)
+        .size()
+        .x;
+    label_width + if glyph { GLYPH_SM + f32::from(S3) } else { 0.0 } + 2.0 * f32::from(S4) + 2.0
+}
+
+/// Width of a `.keycap` for `text`.
+pub fn keycap_width(ui: &Ui, tokens: &Tokens, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), tokens.mono(T_XS), Color32::PLACEHOLDER)
+        .size()
+        .x
+        + 2.0 * f32::from(S3)
+        + 2.0
+}
+
+/// Width of a `.chip` or `.agent` for `text`: the 6px dot, the 6px gap and 8px of padding each side.
+pub fn chip_width(ui: &Ui, tokens: &Tokens, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), tokens.font(T_XS), Color32::PLACEHOLDER)
+        .size()
+        .x
+        + 6.0
+        + f32::from(S3)
+        + 2.0 * f32::from(S4)
+        + 2.0
+}
+
+/// Width of an item inside a `.seg`: its label plus 8px of padding.
+fn segment_item_width(ui: &Ui, tokens: &Tokens, label: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), tokens.font(T_XS), Color32::PLACEHOLDER)
+        .size()
+        .x
+        + 2.0 * f32::from(S4)
+}
+
+/// Width of the whole `.seg` for `labels`, borders included.
+pub fn segmented_width(ui: &Ui, tokens: &Tokens, labels: &[&str]) -> f32 {
+    labels
+        .iter()
+        .map(|label| segment_item_width(ui, tokens, label))
+        .sum::<f32>()
+        + 2.0
+}
+
+/// Width of an `.engine` tag: uppercase mono with 6px of padding each side and a 1px border.
+pub fn tag_width(ui: &Ui, tokens: &Tokens, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), tokens.mono(T_XS), Color32::PLACEHOLDER)
+        .size()
+        .x
+        + 2.0 * f32::from(S3)
+        + 2.0
+}
+
+/// Paint an `.engine` tag inside `rect`: an uppercase mono pill on `surface-3`. The caller owns the
+/// box, because the tag is a control's child and not a widget of its own.
+pub fn paint_tag(ui: &Ui, tokens: &Tokens, rect: egui::Rect, text: &str) {
+    let radius = CornerRadius::same(R_CTL);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, tokens.hover);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, tokens.stroke),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text.to_uppercase(),
+        tokens.mono(T_XS),
+        tokens.text_dim,
+    );
+}
+
+/// The design's `.iconbtn` and `.ws`: a 26px bordered control on `surface-2`, its ink `text_dim`.
 pub fn icon_button(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -660,17 +731,7 @@ pub fn icon_button(
     enabled: bool,
 ) -> Response {
     let font = tokens.font(T_XS);
-    let label_width = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER)
-        .size()
-        .x;
-    let glyph_width = if glyph.is_some() {
-        GLYPH_SM + f32::from(S3)
-    } else {
-        0.0
-    };
-    let width = label_width + glyph_width + 2.0 * f32::from(S4) + 2.0;
+    let width = icon_button_width(ui, tokens, label, glyph.is_some());
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(width, ICON_BUTTON_H),
         if enabled {
@@ -687,15 +748,17 @@ pub fn icon_button(
     };
     let painter = ui.painter();
     painter.rect_filled(rect, radius, tokens.panel_alt);
+    // The hover fill goes under the stroke: egui paints in call order, so a fill after the border
+    // would swallow it, and the design keeps the 1px border in every state.
+    if response.hovered() && enabled {
+        painter.rect_filled(rect, radius, tokens.hover);
+    }
     painter.rect_stroke(
         rect,
         radius,
         Stroke::new(1.0, tokens.stroke),
         StrokeKind::Inside,
     );
-    if response.hovered() && enabled {
-        painter.rect_filled(rect, radius, tokens.hover);
-    }
     let mut x = rect.left() + f32::from(S4) + 1.0;
     if let Some(glyph) = glyph {
         crate::icons::glyph(
@@ -720,63 +783,32 @@ pub fn icon_button(
     response
 }
 
-/// The design's `.engine`: an uppercase mono tag on `surface-3` with the control radius.
-pub fn mono_tag(ui: &mut Ui, tokens: &Tokens, text: &str) -> egui::Rect {
-    let font = tokens.mono(T_XS);
-    let width = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
-        .size()
-        .x
-        + 2.0 * f32::from(S3)
-        + 2.0;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, TAG_H), Sense::hover());
-    let radius = CornerRadius::same(R_CTL);
-    let painter = ui.painter();
-    painter.rect_filled(rect, radius, tokens.hover);
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(1.0, tokens.stroke),
-        StrokeKind::Inside,
-    );
-    painter.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        text.to_uppercase(),
-        font,
-        tokens.text_dim,
-    );
-    rect
-}
-
 /// The design's `.chip` and `.agent`: a 24px pill with a leading 6px dot, filled or outlined.
 pub fn state_chip(
     ui: &mut Ui,
     tokens: &Tokens,
     text: &str,
     fill: Option<Color32>,
+    border: Option<Color32>,
     ink: Color32,
     dot: Color32,
 ) -> Response {
     let font = tokens.font(T_XS);
-    let text_width = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
-        .size()
-        .x;
-    let width = text_width + 6.0 + f32::from(S3) + 2.0 * f32::from(S4) + 2.0;
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, CHIP_H), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(chip_width(ui, tokens, text), CHIP_H),
+        Sense::hover(),
+    );
     let radius = CornerRadius::same(R_CHIP);
     let painter = ui.painter();
-    let fill = fill.unwrap_or(tokens.panel_alt);
-    painter.rect_filled(rect, radius, fill);
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(1.0, tokens.stroke),
-        StrokeKind::Inside,
-    );
+    // The design has three of these and they differ exactly in these two arguments: `.chip` (a dirty
+    // count) is a filled pill with no border, `.chip.zero` is surface-2 inside a border, and `.agent`
+    // is only a border — the bar's own fill shows through.
+    if let Some(fill) = fill {
+        painter.rect_filled(rect, radius, fill);
+    }
+    if let Some(border) = border {
+        painter.rect_stroke(rect, radius, Stroke::new(1.0, border), StrokeKind::Inside);
+    }
     painter.circle_filled(
         egui::pos2(rect.left() + f32::from(S4) + 1.0 + 3.0, rect.center().y),
         3.0,
