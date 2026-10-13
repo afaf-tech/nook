@@ -41,6 +41,16 @@ fn connection_dialect(session: &Session, index: usize) -> Dialect {
         .unwrap_or(Dialect::Sqlite)
 }
 
+/// Whether a connection is open. A closed one has no dialect to read, and its cached catalog belongs
+/// to a connection that is gone — `close_conn` clears the driver and leaves both the catalog and
+/// `active_conn` behind — so it counts as nothing open rather than as the connection the caller meant.
+fn is_open(session: &Session, index: usize) -> bool {
+    matches!(
+        session.conns.get(index).map(|conn| conn.driver.is_some()),
+        Some(true)
+    )
+}
+
 fn provider_from_params(session: &Session, p: &Params) -> Result<nook_ai::Provider> {
     match p.str_opt("provider") {
         Some(name) => nook_ai::Provider::parse(&name)
@@ -70,16 +80,17 @@ pub(crate) fn generate_with(
     let conn = match p.conn_id() {
         Some(id) => {
             let index = session.conn_index(&id)?;
-            match session.conns.get(index).map(|conn| conn.driver.is_some()) {
-                Some(true) => Some(index),
-                _ => {
-                    return Err(Error::config(format!(
-                        "connection '{id}' is not open; open it first"
-                    )))
-                }
+            if !is_open(session, index) {
+                return Err(Error::config(format!(
+                    "connection '{id}' is not open; open it first"
+                )));
             }
+            Some(index)
         }
-        None => session.resolve_conn(p).ok(),
+        None => session
+            .resolve_conn(p)
+            .ok()
+            .filter(|index| is_open(session, *index)),
     };
     let dialect = match conn {
         Some(index) => connection_dialect(session, index),
@@ -430,6 +441,34 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.level == Level::Warn && m.text.contains("ghost")));
+    }
+
+    #[test]
+    fn a_connection_that_was_closed_counts_as_no_connection_at_all() {
+        let (_guard, mut session) = session_with_tables();
+        session
+            .run("conn.close", json!({"conn": "local"}))
+            .expect("close");
+        let client = Scripted::new("SELECT 1;");
+        // `conn.close` leaves `active_conn` and the cached catalog in place, so without the guard this
+        // would describe `users` and `orders` — read from a connection that is gone — while telling
+        // the model to answer in SQLite.
+        let out = generate_with(
+            &mut session,
+            &params(json!({"prompt": "count rows in @users"})),
+            &client,
+        )
+        .expect("generate");
+        assert_eq!(out["dialect"], "sqlite");
+        assert!(
+            !client.system().contains("TABLE users"),
+            "a closed connection still described its tables: {}",
+            client.system()
+        );
+        assert!(session
+            .messages
+            .iter()
+            .any(|m| m.level == Level::Warn && m.text.contains("no connection is open")));
     }
 
     #[test]

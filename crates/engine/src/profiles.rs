@@ -386,6 +386,29 @@ mod tests {
     }
 
     #[test]
+    fn the_environment_key_is_only_read_for_a_provider_that_expects_one() {
+        // Two sources with different answers: the environment names no provider, the keychain entry
+        // belongs to one. Exporting a key for OpenAI must not put it on the wire to a local Ollama.
+        let (_guard, _log) =
+            crate::test_support::fake_security("ai.ollama", "sk-stored-for-ollama");
+        std::env::set_var("NOOK_AI_KEY", "sk-from-the-environment");
+        let openai = ai_key(nook_ai::Provider::OpenAi).expect("lookup");
+        let ollama = ai_key(nook_ai::Provider::Ollama).expect("lookup");
+        std::env::remove_var("NOOK_AI_KEY");
+
+        assert_eq!(openai.as_deref(), Some("sk-from-the-environment"));
+        if keychain_available() {
+            assert_eq!(
+                ollama.as_deref(),
+                Some("sk-stored-for-ollama"),
+                "the provider that expects no key reads its own entry, never the environment's"
+            );
+        } else {
+            assert_eq!(ollama, None);
+        }
+    }
+
+    #[test]
     fn a_dial_finds_the_password_the_keychain_holds() {
         // The state `conn.new` leaves behind: the profile has no password, the login keychain holds it.
         let (_guard, log) = crate::test_support::fake_security("local", "hunter2");
