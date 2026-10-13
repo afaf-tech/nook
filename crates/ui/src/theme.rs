@@ -476,16 +476,65 @@ pub fn more_pill(
 }
 
 /// Which pills of a row fit its band, and how many are counted in a `+N more` pill on each side.
+///
+/// A window can be empty — `start == end + 1` — when the band is narrower than even one elided pill.
+/// That is a row that paints nothing rather than a row that paints past the pane: both callers paint
+/// `start..=end`, which is empty that way round, so they need no case of their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fitted {
     /// The first pill painted.
     pub start: usize,
     /// The last pill painted, inclusive.
     pub end: usize,
-    /// The pills left out before `start`, which the head note counts.
+    /// The pills left out before `start`, which the head note counts — 0 when the row could not afford
+    /// the note, so a caller that paints one only when the count is non-zero paints nothing it did not
+    /// plan.
     pub head: usize,
-    /// The pills left out after `end`, which the tail note counts.
+    /// The pills left out after `end`, which the tail note counts. 0 like [`Fitted::head`].
     pub tail: usize,
+}
+
+impl Fitted {
+    /// The empty window: the band is too narrow for the pills, so the row paints none of them.
+    fn none() -> Fitted {
+        Fitted {
+            start: 1,
+            end: 0,
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    /// Does this window paint a pill? False for [`Fitted::none`], which is what a budget narrower than
+    /// one elided pill comes to.
+    fn paints(&self) -> bool {
+        self.start <= self.end
+    }
+
+    /// What painting this window costs: its pills, one `gap` between each pair, and one `note_w` pill
+    /// for each side it counted.
+    fn width(&self, gap: f32, note_w: f32, widths: &[f32]) -> f32 {
+        if widths.is_empty() || self.start > self.end {
+            return 0.0;
+        }
+        let pills = widths[self.start..=self.end].iter().sum::<f32>()
+            + gap * (self.end - self.start) as f32;
+        let head = if self.head > 0 { gap + note_w } else { 0.0 };
+        let tail = if self.tail > 0 { gap + note_w } else { 0.0 };
+        pills + head + tail
+    }
+}
+
+/// A bounded pill row that ends with the band's own fact: the window of pills to paint and whether
+/// the fact fits beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    /// The pills this row paints.
+    pub fitted: Fitted,
+    /// Paint the band's fact after the pills? False when the fact's own width does not fit the band,
+    /// and when reserving it would leave the pills less than the window needs — the case the app's own
+    /// minimum window reaches.
+    pub fact: bool,
 }
 
 /// The window of a pill row that fits `budget`, `gap` between neighbours and one `note_w` pill for
@@ -500,9 +549,15 @@ pub struct Fitted {
 /// The pill the caller names is what the window is built around when the left-hand run does not reach
 /// it, which is the case that matters: the register opens on the run's last statement.
 ///
-/// `ponytail:` a row that does not fit hides pills and counts them; the design's own answer would be
-/// to let the row scroll. The upgrade path is a horizontal `ScrollArea` inside the band, which needs a
-/// band as wide as its content — `band_fill` is the pane's width and its fill stops at the pane's edge.
+/// A `+N more` pill is a pill like any other, so it is dropped when it cannot fit beside the pills
+/// that do, and `head`/`tail` come back 0 — both rows this bounds state the count otherwise (the
+/// editor's toolbar counts the statements, the register's `.rbar` note names the ordinal `of` it), so
+/// the row spends what it has on the pills rather than on the tally of the ones it cannot paint.
+///
+/// `ponytail:` a row that does not fit hides pills instead of scrolling; the design's own answer
+/// would be to let the row scroll. The upgrade path is a horizontal `ScrollArea` inside the band,
+/// which needs a band as wide as its content — `band_fill` is the pane's width and its fill stops at
+/// the pane's edge.
 pub fn fit_row(
     budget: f32,
     gap: f32,
@@ -510,6 +565,28 @@ pub fn fit_row(
     note_w: f32,
     active: Option<usize>,
 ) -> Fitted {
+    let fitted = window(budget, gap, widths, note_w, active);
+    if fitted.width(gap, note_w, widths) <= budget {
+        return fitted;
+    }
+    // The notes do not fit even though the pills do: paint the pills and count nothing.
+    let bare = Fitted {
+        head: 0,
+        tail: 0,
+        ..window(budget, gap, widths, 0.0, active)
+    };
+    if bare.width(gap, 0.0, widths) <= budget {
+        return bare;
+    }
+    // Not even one pill fits: paint none rather than paint it over the pane's edge. An elision stops
+    // at its ellipsis, so this is a band a glyph or two wide, and what the row would have said there is
+    // said elsewhere — the toolbar counts the statements and the `.rbar` names the active one.
+    Fitted::none()
+}
+
+/// [`fit_row`]'s window, with the notes it would reserve for the pills it leaves out. Its caller checks
+/// that the window it returns really fits before painting the counts it planned.
+fn window(budget: f32, gap: f32, widths: &[f32], note_w: f32, active: Option<usize>) -> Fitted {
     let count = widths.len();
     if count == 0 {
         return Fitted {
@@ -560,6 +637,46 @@ pub fn fit_row(
         end: active,
         head: start,
         tail: count - 1 - active,
+    }
+}
+
+/// Plan a row of pills that ends with the band's own fact: the fact keeps the width it measured, the
+/// pills are windowed into what is left of `budget`, and when that reservation leaves the pills less
+/// than the window they need the fact is dropped rather than painted over them.
+///
+/// This is the design's `nowrap` row with its fact pinned right, and the shell does not only ever make
+/// it the design's 776px: the window's own minimum leaves the central pane 236px. So the row gives
+/// things up in the order that costs the user least — the fact first, because it is the row's summary
+/// and the pills' own facts already say what each statement cost; then, inside [`fit_row`], the
+/// counts; and the volume a pill prints is bounded by its caller, which elides a tab's or a chip's
+/// text to `budget` so no pill is ever planned wider than the band it is painted in.
+///
+/// `ponytail:` a pill that cannot be elided into the band it is given is dropped whole, so a band
+/// narrower than one of them — about 60px of ordinal, ellipsis and paddings, against the 236 the app's
+/// minimum window leaves the pane — paints none of them, and the fact is never painted in their place.
+/// The upgrade path is the scrolling band [`fit_row`] names.
+pub fn fit_row_with_fact(
+    budget: f32,
+    gap: f32,
+    widths: &[f32],
+    note_w: f32,
+    fact_w: f32,
+    active: Option<usize>,
+) -> Row {
+    // The fact is pinned to the band's right edge, so it keeps its width only when what is left of the
+    // band still holds a pill: a row whose pills have all been dropped to keep its total would be the
+    // wrong way round, and a band that cannot hold the fact and a pill is the case the app's own
+    // minimum window reaches.
+    let with_fact = budget - fact_w - gap;
+    if with_fact >= 0.0 {
+        let fitted = fit_row(with_fact, gap, widths, note_w, active);
+        if fitted.paints() && fitted.width(gap, note_w, widths) <= with_fact {
+            return Row { fitted, fact: true };
+        }
+    }
+    Row {
+        fitted: fit_row(budget, gap, widths, note_w, active),
+        fact: false,
     }
 }
 
@@ -2422,6 +2539,41 @@ mod tests {
                 "{theme}: the scrim leaves {:.0}% of the panel's luminance, which is not dimming",
                 luminance(dimmed) / luminance(tokens.panel) * 100.0
             );
+        }
+    }
+
+    /// A planned row never spends more than the band it was planned for, at any budget. The rows this
+    /// bounds are painted in a pane the shell can leave a few glyphs wide, and a row that overran it
+    /// paints under the next pane's widgets — which is the defect the rows were planned to close, at the
+    /// design's width and nowhere else.
+    #[test]
+    fn a_planned_row_never_spends_more_than_its_band() {
+        let gap = f32::from(S3);
+        let note_w = 40.0;
+        let widths = [168.0_f32; 6];
+        let fact_w = 172.0;
+        assert!(
+            !fit_row(0.0, gap, &widths, note_w, Some(5)).paints(),
+            "a band no pill can enter paints nothing"
+        );
+        let mut budget = 0.0_f32;
+        while budget <= 800.0 {
+            let fitted = fit_row(budget, gap, &widths, note_w, Some(5));
+            if fitted.paints() {
+                let spent = fitted.width(gap, note_w, &widths);
+                assert!(spent <= budget, "a row planned for {budget} spends {spent}");
+            }
+            let row = fit_row_with_fact(budget, gap, &widths, note_w, fact_w, Some(5));
+            if row.fitted.paints() {
+                let spent = row.fitted.width(gap, note_w, &widths)
+                    + if row.fact { gap + fact_w } else { 0.0 };
+                assert!(
+                    spent <= budget,
+                    "a row with fact={} planned for {budget} spends {spent}",
+                    row.fact
+                );
+            }
+            budget += 1.0;
         }
     }
 }

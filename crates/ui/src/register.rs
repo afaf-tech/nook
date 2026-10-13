@@ -94,11 +94,12 @@ pub struct Register {
     /// The statement whose result is on screen.
     pub active: usize,
     pub view: View,
-    /// The script the run behind these rows actually used — [`SqlState::ran_script`], which is the
-    /// editor's text for a run started from the editor and the `sql` a run was given for one from the
-    /// control channel, the palette or `sql.runSelection`. [`Register::stale`] compares it with the
-    /// live text, so the register can say its results no longer match the editor, and the editor
-    /// rebuilds the register when the engine has run something this stamp does not describe.
+    /// The text the run behind these rows was issued against — [`SqlState::ran_script`], which is the
+    /// editor's own text for a run started from the editor (a single statement or an explain
+    /// included) and the `sql` a run was given for one from the control channel, the palette or
+    /// `sql.runSelection`. [`Register::stale`] compares it with the live text, so the register can say
+    /// its results no longer match the editor, and the editor rebuilds the register when the engine
+    /// has run something this stamp does not describe.
     pub script: String,
 }
 
@@ -342,7 +343,9 @@ fn paint(
 /// than the pane holds push the total out of it — measured on the 776px pane the total was clipped
 /// mid-glyph at five statements and not painted at all at six. The row is therefore planned: the total
 /// keeps the width it measured, the tabs that do not fit are counted in one `+N more` tab, and the
-/// statement the register is showing stays in the window.
+/// statement the register is showing stays in the window. On the 236px pane the app's own minimum
+/// window leaves, the total cannot be reserved at all, so it is dropped rather than painted under the
+/// tabs — `theme::fit_row_with_fact` decides that, and the plan's ceiling is in `docs/architecture.md`.
 fn tabs(ui: &mut Ui, tokens: &Tokens, sql: &SqlState, register: &mut Register) -> Rect {
     let rect = design::band_fill(
         ui,
@@ -352,68 +355,123 @@ fn tabs(ui: &mut Ui, tokens: &Tokens, sql: &SqlState, register: &mut Register) -
         egui::Align::Center,
         |ui| {
             let gap = ui.spacing().item_spacing.x;
-            let widths: Vec<f32> = sql
+            let band = ui.available_width();
+            let texts: Vec<TabText> = sql
                 .results
                 .iter()
                 .enumerate()
-                .map(|(index, run)| tab_width(ui, tokens, index, run))
+                .map(|(index, run)| tab_text(ui, tokens, index, run, band))
+                .collect();
+            let widths: Vec<f32> = texts
+                .iter()
+                .map(|text| tab_width(ui, tokens, text))
                 .collect();
             let total = Register::total_note(sql);
             let total_w = design::text_width(ui, tokens.mono(design::T_XS), &total);
-            let fitted = design::fit_row(
-                (ui.available_width() - total_w - gap).max(0.0),
+            // The total keeps its width when the tabs can live beside it and gives way when they
+            // cannot: on the 236px pane the app's own minimum window leaves, reserving it used to
+            // leave the tabs less than they need and the total was painted under the active tab.
+            let row = design::fit_row_with_fact(
+                band,
                 gap,
                 &widths,
                 design::more_pill_width(ui, tokens, widths.len()),
+                total_w,
                 Some(register.active),
             );
+            let fitted = row.fitted;
             if !widths.is_empty() {
                 if fitted.head > 0 {
                     design::more_pill(ui, tokens, fitted.head, design::TAB_H, tokens.panel_high)
                         .on_hover_text("More statements than the tab row can show");
                 }
-                for ((index, width), run) in widths
+                for (index, width) in widths
                     .iter()
                     .enumerate()
-                    .zip(&sql.results)
                     .skip(fitted.start)
                     .take(fitted.end + 1 - fitted.start)
                 {
-                    tab(ui, tokens, index, run, register, *width);
+                    tab(
+                        ui,
+                        tokens,
+                        index,
+                        sql.results[index].error.is_some(),
+                        register,
+                        *width,
+                        &texts[index],
+                    );
                 }
                 if fitted.tail > 0 {
                     design::more_pill(ui, tokens, fitted.tail, design::TAB_H, tokens.panel_high)
                         .on_hover_text("More statements than the tab row can show");
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(total)
-                        .font(tokens.mono(design::T_XS))
-                        .color(tokens.text_dim),
-                );
-            });
+            if row.fact {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(total)
+                            .font(tokens.mono(design::T_XS))
+                            .color(tokens.text_dim),
+                    );
+                });
+            }
         },
     );
     design::band_hairline(ui, tokens, rect);
     rect
 }
 
+/// One `.rtab`'s three runs, already elided to the band the row is painted in: what the row measures
+/// and what the tab paints, so the width a tab is planned at is the width it spends.
+///
+/// A tab is never wider than its band, because its own facts can be: `50,000` is the engine's widest
+/// row count and a tab carrying it is wider than the 236px pane the app's own minimum window leaves.
+/// The facts are what gives way — the statement's own word names the tab, and the `.rbar` states the
+/// active statement's facts in full — and the label is elided only once they have nothing left.
+struct TabText {
+    ordinal: String,
+    label: String,
+    facts: String,
+}
+
+/// The three runs of one tab, elided to `band` (see [`TabText`]).
+fn tab_text(ui: &Ui, tokens: &Tokens, index: usize, run: &StatementRun, band: f32) -> TabText {
+    let s4 = f32::from(design::S4);
+    let ordinal = ordinal(index);
+    let fixed =
+        f32::from(design::S5) + design::text_width(ui, tokens.mono(design::T_XS), &ordinal) + s4;
+    // One `S4` is held back for the label's own elision and the remaining two for the facts'.
+    let label = table::ellipsize(
+        ui,
+        &statement_label(&run.statement),
+        tokens.font(design::T_SM),
+        (band - fixed - 3.0 * s4).max(0.0),
+    );
+    let facts = table::ellipsize(
+        ui,
+        &tab_facts(run),
+        tokens.mono(design::T_XS),
+        (band - fixed - design::text_width(ui, tokens.font(design::T_SM), &label) - 2.0 * s4)
+            .max(0.0),
+    );
+    TabText {
+        ordinal,
+        label,
+        facts,
+    }
+}
+
 /// What one `.rtab` costs: the design's `padding:0 8px 0 12px`, its two 8px gaps, and the three runs
 /// of text it prints. The row measures with this and `tab` paints with it, so the fit it plans is the
 /// width it spends.
-fn tab_width(ui: &Ui, tokens: &Tokens, index: usize, run: &StatementRun) -> f32 {
+fn tab_width(ui: &Ui, tokens: &Tokens, text: &TabText) -> f32 {
     let mono = tokens.mono(design::T_XS);
     f32::from(design::S5)
-        + design::text_width(ui, mono.clone(), &ordinal(index))
+        + design::text_width(ui, mono.clone(), &text.ordinal)
         + f32::from(design::S4)
-        + design::text_width(
-            ui,
-            tokens.font(design::T_SM),
-            &statement_label(&run.statement),
-        )
+        + design::text_width(ui, tokens.font(design::T_SM), &text.label)
         + f32::from(design::S4)
-        + design::text_width(ui, mono, &tab_facts(run))
+        + design::text_width(ui, mono, &text.facts)
         + f32::from(design::S4)
 }
 
@@ -429,14 +487,12 @@ fn tab(
     ui: &mut Ui,
     tokens: &Tokens,
     index: usize,
-    run: &StatementRun,
+    failed: bool,
     register: &mut Register,
     width: f32,
+    text: &TabText,
 ) {
     let active = register.active == index;
-    let ordinal = ordinal(index);
-    let label = statement_label(&run.statement);
-    let facts = tab_facts(run);
     let mono = tokens.mono(design::T_XS);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, design::TAB_H), Sense::click());
     {
@@ -459,7 +515,6 @@ fn tab(
             rect.top()..=rect.bottom(),
             Stroke::new(1.0, tokens.stroke),
         );
-        let failed = run.error.is_some();
         let ink = if failed {
             tokens.error
         } else if active {
@@ -468,9 +523,9 @@ fn tab(
             tokens.text_dim
         };
         let mut x = rect.left() + f32::from(design::S5);
-        for (text, font, colour) in [
+        for (line, font, colour) in [
             (
-                ordinal.as_str(),
+                text.ordinal.as_str(),
                 mono.clone(),
                 if failed {
                     tokens.error
@@ -478,17 +533,17 @@ fn tab(
                     tokens.text_dim
                 },
             ),
-            (label.as_str(), tokens.font(design::T_SM), ink),
-            (facts.as_str(), mono.clone(), ink),
+            (text.label.as_str(), tokens.font(design::T_SM), ink),
+            (text.facts.as_str(), mono.clone(), ink),
         ] {
             painter.text(
                 egui::pos2(x, rect.center().y),
                 Align2::LEFT_CENTER,
-                text,
+                line,
                 font.clone(),
                 colour,
             );
-            x += design::text_width(ui, font, text) + f32::from(design::S4);
+            x += design::text_width(ui, font, line) + f32::from(design::S4);
         }
     }
     if response.clicked() {
@@ -1709,6 +1764,165 @@ mod tests {
                 painted + counted,
                 count,
                 "{count} statements: {painted} painted and {counted} counted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tab_row_holds_at_the_narrowest_pane_the_app_permits() {
+        let ctx = egui::Context::default();
+        for width in [236.0_f32, 400.0, 776.0] {
+            for count in [1usize, 3, 6] {
+                let sql = state(
+                    (1..=count)
+                        .map(|index| {
+                            ok(
+                                &format!(
+                                    "select id from main.customers where plan = 'plan {index}'"
+                                ),
+                                6,
+                                index as f64,
+                            )
+                        })
+                        .collect(),
+                );
+                let mut register = Register::from(&sql, None);
+                let mut table = TableState::default();
+                let mut actions = Actions::default();
+                let (layout, copy) = run_frame(
+                    &ctx,
+                    egui::vec2(width, 900.0),
+                    Vec::new(),
+                    &mut register,
+                    &sql,
+                    datacraft_engine::Density::Compact,
+                    &mut table,
+                    &mut actions,
+                );
+                let tabs = layout.tabs.expect("the tab row");
+                assert!(
+                    (tabs.right() - width).abs() < 0.5,
+                    "the band is the pane's width, not {}",
+                    tabs.right()
+                );
+                // Nothing the row paints leaves it, and nothing it paints lands under the run's
+                // total: the design pins the total to the right of the same `nowrap` row, so it used
+                // to be painted outside the pane and under the active tab once the tabs filled the
+                // band.
+                let total = Register::total_note(&sql);
+                let total_rect = copy
+                    .iter()
+                    .find(|(rect, text)| {
+                        *text == total && (tabs.top()..tabs.bottom()).contains(&rect.center().y)
+                    })
+                    .map(|(rect, _)| *rect);
+                for (rect, text) in &copy {
+                    if !(tabs.top()..tabs.bottom()).contains(&rect.center().y) {
+                        continue;
+                    }
+                    assert!(
+                        rect.left() >= tabs.left() - 0.5 && rect.right() <= tabs.right() + 0.5,
+                        "{count} statements on the {width}px pane painted {text:?} at {rect:?}, outside the row {tabs:?}"
+                    );
+                    if let Some(total_rect) = total_rect {
+                        if *text != total {
+                            assert!(
+                                rect.right() <= total_rect.left(),
+                                "{count} statements on the {width}px pane painted {text:?} at {} under the run's total at {}",
+                                rect.right(),
+                                total_rect.left()
+                            );
+                        }
+                    }
+                }
+                // What gives way is the run's total — the tabs' own facts already say what each
+                // statement cost — never the statement the register is showing.
+                assert!(
+                    shows(&copy, &tab_facts(&sql.results[count - 1])),
+                    "{count} statements on the {width}px pane lost the active statement's tab: {copy:#?}"
+                );
+                // And a run of more than one states how many it holds somewhere even when the row
+                // cannot count them itself: the register's `.rbar` note names the ordinal `of` the
+                // count.
+                if count > 1 {
+                    assert!(
+                        shows(&copy, &format!("statement {count} of {count}")),
+                        "{count} statements on the {width}px pane dropped the count with no word for it: {copy:#?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A tab whose own facts are as wide as the engine prints them is still never wider than the row:
+    /// `50,000` is `MAX_ROWS`, and the tab carrying it is wider than the 236px pane the app's own
+    /// minimum window leaves. Its facts elide into what the band has left rather than the tab running
+    /// past it — the same run at the design's 776 paints them whole.
+    #[test]
+    fn a_tab_elides_its_facts_into_the_band_rather_than_painting_past_it() {
+        let ctx = egui::Context::default();
+        let sql = state(vec![changed(
+            "update t set plan = 'pro'",
+            50_000,
+            123_456.0,
+        )]);
+        let facts = tab_facts(&sql.results[0]);
+        assert_eq!(facts, "50,000 rows affected · 123456 ms");
+        // The facts the tab prints, wherever the frame painted them: the `.rbar` states the same ones
+        // in full, so only the tab row's own band counts here.
+        let in_tabs = |copy: &[(Rect, String)], tabs: Rect, needle: &str| {
+            copy.iter().any(|(rect, text)| {
+                text == needle && (tabs.top()..tabs.bottom()).contains(&rect.center().y)
+            })
+        };
+
+        let mut register = Register::from(&sql, None);
+        let mut table = TableState::default();
+        let mut actions = Actions::default();
+        let (layout, copy) = run_frame(
+            &ctx,
+            pane(),
+            Vec::new(),
+            &mut register,
+            &sql,
+            datacraft_engine::Density::Compact,
+            &mut table,
+            &mut actions,
+        );
+        assert!(
+            in_tabs(&copy, layout.tabs.expect("the tab row"), &facts),
+            "the design's 776px pane holds the whole fact"
+        );
+
+        let mut register = Register::from(&sql, None);
+        let mut table = TableState::default();
+        let mut actions = Actions::default();
+        let (layout, copy) = run_frame(
+            &ctx,
+            egui::vec2(236.0, 900.0),
+            Vec::new(),
+            &mut register,
+            &sql,
+            datacraft_engine::Density::Compact,
+            &mut table,
+            &mut actions,
+        );
+        let tabs = layout.tabs.expect("the tab row");
+        assert!(
+            !in_tabs(&copy, tabs, &facts),
+            "the 236px pane painted a tab wider than its own band: {copy:#?}"
+        );
+        assert!(
+            shows(&copy, "UPDATE"),
+            "the tab still names the statement it holds"
+        );
+        for (rect, text) in &copy {
+            if !(tabs.top()..tabs.bottom()).contains(&rect.center().y) {
+                continue;
+            }
+            assert!(
+                rect.left() >= tabs.left() - 0.5 && rect.right() <= tabs.right() + 0.5,
+                "the 236px pane painted {text:?} at {rect:?}, outside the row {tabs:?}"
             );
         }
     }

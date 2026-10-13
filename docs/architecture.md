@@ -123,14 +123,17 @@ implementations:
 - **A result tab cannot be closed.** The register's tab row is one tab per statement of the last run —
   the run's own shape — so closing one would ask what the editor should then run. Re-running a script
   reopens every tab it holds; the upgrade path is a per-tab `closed` flag the next run respects.
-- **The register's staleness is the script the run used.** `SqlState::ran_script` is stamped in
-  `begin_run` from what the run actually ran: `run`'s `sql` parameter, so the control channel and the
-  palette record *their* script rather than the editor's; `run_statement`'s picked statement; and
-  `sql.explain`'s explained statement. The register compares its own `script` against it. The rule
-  before this compared the two splits, which was wrong in both directions — a rerun of unchanged
-  statements kept the previous text and reported a run of the on-screen script as stale, and a run
-  given another script reported itself fresh. `SqlState::statements` still carries the split for the
-  editor's own markers, but nothing compares it.
+- **The register's staleness is the text the run's request came from.** `SqlState::ran_script` is
+  stamped in `begin_run` from the text the command was issued against: the `sql` it resolved —
+  `sql.run`'s parameter, and `sql.runSelection` through it — which is the tab's own text when the
+  command was given none. `run_statement` and `sql.explain` cut their statement out of that text and
+  are stamped with it rather than with the cut: an unchanged, newline-terminated script used to report
+  `stale · the script changed since this run` the moment its own statement ran, because the register
+  compares the editor's whole text. The register records `ran_script` and `stale` is that comparison,
+  in both directions — a rerun of on-screen text clears it, and a run whose source differed from the
+  editor raises it. The rule before this compared the two splits, which was wrong in the same two
+  ways. `SqlState::statements` still carries the split for the editor's own markers, but nothing
+  compares it.
 - **Explain is a run.** `sql.explain` goes through the same `begin_run`/`record_run` every other run
   does, so the plan lands in `SqlState::results` as one statement of its own (`EXPLAIN <stmt>`) with
   the driver's own duration and result set: the register paints it in a tab, and the stale rule above
@@ -141,12 +144,21 @@ implementations:
   `.strip` are `nowrap` flex rows in the design with the band's own fact pinned to the right, and
   nothing stopped the pills painting over that fact and past the pane: the run's total was clipped
   mid-glyph at five statements on the 776px pane and dropped altogether at six, and three ordinary
-  statements put the strip's chips over its own facts. `theme::fit_row` plans the row first — the fact
-  keeps the width it measured, the pills that fit are painted, and the rest are counted in `+N more`.
-  The window is built around the pill the caller names, so the register opens on the run's last
-  statement. `ponytail:` the pills that do not fit are hidden rather than scrolled to; the upgrade
-  path is a horizontal `ScrollArea` inside the band, which needs a band as wide as its content —
-  `band_fill` is the pane's width and its fill stops at the pane's edge.
+  statements put the strip's chips over its own facts. `theme::fit_row_with_fact` plans the row first
+  — the fact keeps the width it measured, the pills that fit are painted, the rest are counted in
+  `+N more`, and the window is built around the pill the caller names, so the register opens on the
+  run's last statement. The shell's own minimum window does not leave the row the design's 776px but
+  236, so three more things give way there, in the order that costs the user least: the fact (a run's
+  total is the row's summary, and the tabs' own `{rows} ms` facts still say what each statement cost);
+  then the `+N more` counts (the editor's toolbar counts the statements and the register's `.rbar`
+  note names the ordinal `of` it); and then the volume a pill prints, which the row's own caller
+  elides to the band — a register tab gives up its facts first and then its statement's word, and a
+  strip chip elides its label. **Ceiling**: a pill too wide to elide into the band it is given is
+  dropped whole, so a band narrower than one of them — about 60px of ordinal, ellipsis and paddings,
+  against the 236 the shell's minimum window leaves the pane — paints none of the pills, and the row's
+  fact is never painted in their place. **Upgrade path**: a horizontal `ScrollArea` inside the band,
+  which needs a band as wide as its content — `band_fill` is the pane's width and its fill stops at the
+  pane's edge.
 - **The register's `Export` is painted disabled with the engine's own reason.** The register shows one
   statement's result, but `grid.export` reads the *active tab's* data grid and refuses a query tab —
   after a file picker has already asked the user for a path. So the control is off and its hover text

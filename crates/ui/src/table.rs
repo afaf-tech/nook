@@ -144,7 +144,10 @@ pub fn clip(text: &str, max: usize) -> String {
     format!("{kept}…")
 }
 
-fn ellipsize(ui: &Ui, text: &str, font: egui::FontId, max: f32) -> String {
+/// Truncate `text` to the width `max` with an ellipsis, so a cell or a pill prints what its own rect
+/// has room for rather than overrunning it. The first run of text that fits is kept, so a caller that
+/// reserves the width of the ellipsis is never given more than it asked for.
+pub fn ellipsize(ui: &Ui, text: &str, font: egui::FontId, max: f32) -> String {
     if text_width(ui, text, font.clone()) <= max {
         return text.to_owned();
     }

@@ -76,9 +76,10 @@ fn new_query(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 }
 
 /// Open the tab's SQL state for a run: the previous run's results and the facts describing them go,
-/// because a run replaces the register rather than appending to it. `ran_script` records the script
-/// this run *used* — the `sql` the command resolved, or, for a single statement, that statement — so
-/// the register stamps its rows with what produced them and not with whatever the editor held.
+/// because a run replaces the register rather than appending to it. `ran_script` records the text the
+/// request was issued against — the `sql` the command resolved, which is the tab's own text when the
+/// command was given none — so the register can tell whether the editor has moved on since the run,
+/// and a run whose source differed from the editor still says so.
 fn begin_run(session: &mut Session, ran_script: &str, statements: Vec<String>) {
     if let Ok(tab) = session.active_tab_mut() {
         if tab.kind == TabKind::Query {
@@ -263,7 +264,11 @@ fn run_statement(session: &mut Session, p: &Params) -> Result<serde_json::Value>
         })?
         .clone();
     let conn = session.resolve_conn(p)?;
-    begin_run(session, &picked, vec![picked.clone()]);
+    // The register is stamped with the text the request was issued against, not with the statement
+    // cut out of it: `Register::stale` compares that against the editor's whole text, and the caret's
+    // statement is not the text the editor holds. `sql` is that text — the parameter when the command
+    // was given one, the tab's own otherwise.
+    begin_run(session, &sql, vec![picked.clone()]);
     let mut run_so_far = ResultSet::default();
     run_and_record(session, conn, 0, &picked, None, &mut run_so_far)?;
     Ok(json!({
@@ -366,7 +371,9 @@ fn explain(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         error: None,
     };
     let mut run_so_far = ResultSet::default();
-    begin_run(session, &statement, vec![run.statement.clone()]);
+    // The same stamp the other runs leave: the text the request was issued against, so the register
+    // can tell whether the editor has moved on since — not the statement the explain was reduced to.
+    begin_run(session, &sql, vec![run.statement.clone()]);
     record_run(session, run, &mut run_so_far);
     Ok(out)
 }
@@ -718,8 +725,34 @@ mod tests {
         assert!(!plan.rows.is_empty(), "the plan has its own rows");
         assert_eq!(runs[0].error, None);
         assert_eq!(
-            session.tabs[tab].sql.ran_script, "select 1 as one;",
-            "the tab records the statement the run used"
+            session.tabs[tab].sql.ran_script, "select 1 as one;\n",
+            "the register is stamped with the text the request came from, not the statement cut out of it"
+        );
+    }
+
+    /// The register answers "has the text moved on since this run?" by comparing the editor's whole
+    /// text with the text the run was issued against. The single-statement paths cut their statement
+    /// out of that text and used to stamp the register with the cut, so an unchanged,
+    /// newline-terminated script read as stale the moment `Run statement` ran the statement in it.
+    #[test]
+    fn a_single_statement_run_stamps_the_text_the_request_came_from() {
+        let (_guard, mut session, tab) = live_session();
+        session.tabs[tab].sql.text = "select 1 as one;\n".to_owned();
+        let p = Params::from_json(json!({"index": 0})).expect("params");
+        run_statement(&mut session, &p).expect("the statement runs");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, "select 1 as one;\n",
+            "the register is stamped with the text the request came from, not the statement it cut out"
+        );
+
+        // And a run given a text of its own is stamped with that text, so the register can still say
+        // the editor has moved on since it: the statement came from the parameter, not from the tab.
+        let p =
+            Params::from_json(json!({"index": 0, "sql": "select 2 as two;\n"})).expect("params");
+        run_statement(&mut session, &p).expect("the parameter's statement runs");
+        assert_eq!(
+            session.tabs[tab].sql.ran_script, "select 2 as two;\n",
+            "the register is stamped with the text the request came from"
         );
     }
 

@@ -604,11 +604,23 @@ fn strip(
         |ui| {
             let gap = f32::from(design::S3);
             ui.spacing_mut().item_spacing.x = gap;
+            let band = ui.available_width();
             let labels: Vec<String> = parts
                 .statements
                 .iter()
                 .enumerate()
-                .map(|(index, statement)| chip_label(index, statement))
+                .map(|(index, statement)| {
+                    let dot = parts.caret == Some(index);
+                    // A chip is never wider than the band it is painted in: a clipped label plus the
+                    // chrome around it can already be, and the strip's `.fchips`-sized row has to hold
+                    // on the 236px pane the app's own minimum window leaves.
+                    table::ellipsize(
+                        ui,
+                        &chip_label(index, statement),
+                        tokens.mono(design::T_XS),
+                        (band - chip_chrome(dot)).max(0.0),
+                    )
+                })
                 .collect();
             let widths: Vec<f32> = labels
                 .iter()
@@ -616,15 +628,18 @@ fn strip(
                 .map(|(index, label)| chip_width(ui, tokens, label, parts.caret == Some(index)))
                 .collect();
             // The fact is measured before the chips are painted, so the row's own width is reserved
-            // rather than overrun.
+            // rather than overrun — and it gives way when reserving it would leave the chips less than
+            // they need, which is the case on the 236px pane the app's own minimum window leaves.
             let fact_w = design::text_width(ui, tokens.mono(design::T_XS), fact);
-            let fitted = design::fit_row(
-                (ui.available_width() - fact_w - gap).max(0.0),
+            let row = design::fit_row_with_fact(
+                band,
                 gap,
                 &widths,
                 design::more_pill_width(ui, tokens, labels.len()),
+                fact_w,
                 parts.caret,
             );
+            let fitted = row.fitted;
             if !widths.is_empty() {
                 if fitted.head > 0 {
                     design::more_pill(ui, tokens, fitted.head, design::STMT_H, tokens.panel_high)
@@ -652,13 +667,15 @@ fn strip(
                         .on_hover_text("More statements than the strip can show");
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(fact)
-                        .font(tokens.mono(design::T_XS))
-                        .color(tokens.text_dim),
-                );
-            });
+            if row.fact {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(fact)
+                            .font(tokens.mono(design::T_XS))
+                            .color(tokens.text_dim),
+                    );
+                });
+            }
         },
     );
     // `.strip`'s own `border-top`, drawn on its top edge: 435 with the pane's code above it, 517 with
@@ -699,18 +716,22 @@ fn chip_label(index: usize, statement: &str) -> String {
     )
 }
 
-/// What that label costs in a chip — the mono line, two `--s3` paddings, the 1px border pair and the
-/// 5px dot when the chip is the caret's. The strip measures with this and `chip` paints with it, so
-/// the budget the row plans against is the width it actually spends.
-fn chip_width(ui: &Ui, tokens: &Tokens, label: &str, dot: bool) -> f32 {
-    design::text_width(ui, tokens.mono(design::T_XS), label)
-        + 2.0 * f32::from(design::S3)
+/// What that label costs in a chip besides the label itself: two `--s3` paddings, the 1px border pair
+/// and the 5px dot when the chip is the caret's.
+fn chip_chrome(dot: bool) -> f32 {
+    2.0 * f32::from(design::S3)
         + 2.0
         + if dot {
             5.0 + f32::from(design::S3)
         } else {
             0.0
         }
+}
+
+/// What that label costs in a chip — the mono line and the chrome around it. The strip measures with
+/// this and `chip` paints with it, so the budget the row plans against is the width it actually spends.
+fn chip_width(ui: &Ui, tokens: &Tokens, label: &str, dot: bool) -> f32 {
+    design::text_width(ui, tokens.mono(design::T_XS), label) + chip_chrome(dot)
 }
 
 /// One `.st` chip: 20 tall, pill-radius, with its own fill, ring and ink, and a 5px dot when it is the
@@ -1240,6 +1261,19 @@ mod tests {
         Rect::from_min_max(pos2(344.0, 75.0), pos2(1120.0, 874.0))
     }
 
+    /// The pane the app's own minimum window leaves the central column: 900px less the rail and the
+    /// tree (44 + 300) and the always-shown inspector (320). It is the narrowest the shell's own window
+    /// permits — a panel dragged past it leaves less — and the rows that bound themselves have to hold
+    /// in it.
+    fn narrow_pane() -> Rect {
+        pane_of_width(236.0)
+    }
+
+    /// [`narrow_pane`] at another width, for the sweeps that check a bounded row holds below it too.
+    fn pane_of_width(width: f32) -> Rect {
+        Rect::from_min_max(pos2(344.0, 75.0), pos2(344.0 + width, 874.0))
+    }
+
     /// A live SQLite connection with a two-column `customers` table, a refreshed catalog, and one
     /// query tab holding `script`.
     fn session(name: &str, script: &str) -> Session {
@@ -1274,6 +1308,18 @@ mod tests {
         events: Vec<egui::Event>,
         time: f64,
     ) -> Frame {
+        frame_in(ctx, pane_state, events, time, pane())
+    }
+
+    /// The same frame in a pane of another width: the row tests push the band the shell's own
+    /// minimum window leaves.
+    fn frame_in(
+        ctx: &egui::Context,
+        pane_state: &mut (Session, UiState, Tokens),
+        events: Vec<egui::Event>,
+        time: f64,
+        rect: Rect,
+    ) -> Frame {
         let (session, state, tokens) = pane_state;
         tokens.apply(ctx);
         let input = egui::RawInput {
@@ -1287,7 +1333,6 @@ mod tests {
         };
         let mut layout = Layout::default();
         let mut out = ctx.run_ui(input, |ui| {
-            let rect = pane();
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(rect)
@@ -1875,6 +1920,51 @@ mod tests {
         assert_eq!(f.layout.popup, None, "the accepted text does not reopen it");
     }
 
+    /// The strip holds at every pane width the shell can leave it: the 236px the minimum window gives,
+    /// and the narrower bands a panel dragged over the pane leaves, down to the 60px where the chips are
+    /// all that is left of the row. The chips elide to the band, and a band too narrow for even one
+    /// paints none of them rather than painting past the pane.
+    #[test]
+    fn the_strip_holds_at_the_narrowest_pane_the_app_permits() {
+        for count in [1usize, 3, 6, 100] {
+            let ctx = egui::Context::default();
+            let script: String = (1..=count)
+                .map(|index| {
+                    format!("select id, city from customers where city = 'city {index}';\n")
+                })
+                .collect();
+            let mut world = world(&format!("narrow{count}"), &script);
+            for width in [narrow_pane().width(), 170.0, 120.0, 60.0] {
+                let pane = pane_of_width(width);
+                let f = frame_in(&ctx, &mut world, Vec::new(), 1.0, pane);
+                let strip = f.layout.strip.expect("the strip");
+                assert!(
+                    (strip.width() - width).abs() < 0.5,
+                    "the band is the pane's width, not {}",
+                    strip.width()
+                );
+                let mut painted = 0;
+                for (rect, text) in &f.texts {
+                    if !(strip.top()..strip.bottom()).contains(&rect.center().y) {
+                        continue;
+                    }
+                    painted += 1;
+                    assert!(
+                        rect.left() >= strip.left() - 0.5 && rect.right() <= strip.right() + 0.5,
+                        "{count} statements on the {width}px pane painted {text:?} at {rect:?}, outside the strip {strip:?}"
+                    );
+                }
+                if width == narrow_pane().width() {
+                    assert!(
+                        painted > 0,
+                        "{count} statements on the {}px pane painted no chip at all",
+                        narrow_pane().width()
+                    );
+                }
+            }
+        }
+    }
+
     /// `.strip` is the design's `nowrap` flex row with the script's own facts pinned to the right, so
     /// three ordinary statements paint their chips over the facts' glyphs, four push the facts outside
     /// the pane and six drop them. The chips are bounded now — the facts keep the width they measured
@@ -2013,6 +2103,34 @@ mod tests {
         assert!(
             world.1.registers[&index].stale(&tab(&world).sql.text),
             "the editor never held that script"
+        );
+    }
+
+    /// `Run statement` cuts the caret's statement out of the tab's own text, and the register is
+    /// stamped with the text the request came from rather than with the cut: an unchanged,
+    /// newline-terminated script used to paint `stale · the script changed since this run` the moment
+    /// its own statement was run.
+    #[test]
+    fn running_one_statement_of_an_unchanged_script_is_not_stale() {
+        let ctx = egui::Context::default();
+        let mut world = world("statement", "select 1 as a;\n");
+        let index = world.0.active_tab.unwrap();
+        let run = click_hit(&ctx, &mut world, "Run statement", 1.02);
+        let _ = frame(&ctx, &mut world, run, 1.05);
+        assert!(
+            !tab(&world).sql.results.is_empty(),
+            "the statement ran: the test is about the stamp it left"
+        );
+        let text = tab(&world).sql.text.clone();
+        assert!(
+            !world.1.registers[&index].stale(&text),
+            "the register is stamped with the text the request came from, not the statement it cut out"
+        );
+        let f = frame(&ctx, &mut world, Vec::new(), 1.06);
+        assert!(
+            !f.shows(crate::register::STALE_NOTE),
+            "the register painted the stale pill over an unchanged script: {:#?}",
+            f.strings
         );
     }
 
