@@ -143,22 +143,31 @@ implementations:
   dashboard have no such rule in the design, so they sit flush and were re-measured rather than
   padded). Inside the grid, `show` zeroes `item_spacing.y` so its bands stack hairline to hairline.
 - **The grid asks the widget for its head alone on an empty page.** `TableView::height = 0` is the
-  sentinel: `table::show` paints the head and returns, and the caller owns the space under it (the
-  `.empty` block's own `padding:28px`). The reason is egui's scroll areas: one would floor its
-  viewport at `min_scrolled_size` (64px) and reserve the horizontal bar's strip, which put the block
-  72px below the head instead of 28. `ponytail:` a zero-height body is not expressible — nothing asks
-  for one — so the upgrade path is a `Body` enum (`HeadOnly | Scroll(f32)`) if a caller ever wants a
-  body of no height.
+  sentinel: `table::show` paints the head inside a horizontal scroll area and returns, and the caller
+  owns the space under it (the `.empty` block's own `padding:28px`). The head keeps that scroll area
+  because a table wider than the pane would otherwise be clipped with no bar to reach the columns past
+  the edge. Its viewport is floored at `HEAD_H` rather than egui's `min_scrolled_size` default (64px),
+  so the block still lands one head — plus, when the head overflows, the bar's 8px strip — below the
+  hairline; the 64px floor is what put it 72px down. `ponytail:` a zero-height body is not expressible
+  — nothing asks for one — so the upgrade path is a `Body` enum (`HeadOnly | Scroll(f32)`) if a caller
+  ever wants a body of no height.
 - **The grid's badge and notice marks have one definition each.** The head reserves
   `theme::pk_badge_width` and paints through `theme::paint_pk_badge`, so the toolbar's `.pkbadge` and
   the head's cannot drift apart; `theme::notice_band` takes the band's leading `icons::Glyph` and its
   message `FontId`, which is how the `.errband` gets `.ei` plus a `--t-sm` mono message and the
   `.robanner` gets `.ri` plus its proportional `--t-xs` paragraph.
-- **The grid prints only the facts it holds.** `.matches` shows the count `grid.countRows` returned;
-  until that command has run there is no match total to print, so the band says what is true of the
-  page in hand (`50 rows on this page`). The `.robanner`'s reason comes from the binding and the
-  schema — not from the page — in the order `GridState::editable` checks them, so a keyless table is
-  never told it has no primary key because a page came back empty.
+- **One `editable` flag decides what the grid offers.** `GridState::editable` is false when the engine
+  would refuse an edit (`grid.editCell`, `grid.setNull` and the rest go through `pk_values`), and every
+  surface that names such an action reads it: the toolbar's `+ Row` / `Duplicate` / `Delete`, the
+  selected-cell band's `Double-click` keycap and `Set NULL`, and the widget's own inline editor and
+  dirty stripe. A surface that forgot it would advertise an action the engine rejects.
+- **The grid prints only the facts it holds.** `.matches` shows the count `grid.countRows` returned —
+  and only until the grid starts asking for different rows: `grid.filter`, `grid.clearFilter` and
+  `grid.sort` drop it, because a count read under the previous request is not this page's match total.
+  With no count there is nothing honest to print but the page in hand (`50 rows on this page`). The
+  `.robanner`'s reason comes from the binding and the schema — not from the page — in the order
+  `GridState::editable` checks them, so a keyless table is never told it has no primary key because a
+  page came back empty.
 - **Bar bands.** `theme::bar_frame` contributes no stroke and no margin, and every panel is built with
   `show_separator_line(false)`, so a bar's height is its token plus the hairline painted inside it.
   The ceiling is that any future panel must paint its own edges to be visible.

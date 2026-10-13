@@ -365,9 +365,10 @@ pub fn show(
         (name, desc)
     });
     // The design keeps the head of an empty page: the `.empty` block below it says which of the two
-    // empty states this is. `height: 0` asks the widget for the head alone — with no body there is
-    // nothing to scroll, and a scroll area would floor itself at egui's 64px minimum and push the
-    // block 72px below the head instead of the design's 28.
+    // empty states this is. `height: 0` asks the widget for the head alone — there is no body to
+    // scroll, but the head still scrolls sideways, so a table wider than the pane is reachable
+    // rather than clipped. The widget floors its own viewport at `HEAD_H`, so the block lands 28px
+    // under the hairline as the design has it.
     let empty = empty_state(rows.len(), filter_count);
     let available = match empty {
         EmptyState::None => (ui.available_height() - 96.0).max(140.0),
@@ -474,7 +475,7 @@ pub fn show(
         }
     }
 
-    // Selected cell: what it is and the two shortcuts that act on it.
+    // Selected cell: what it is, and the actions this grid can take on it.
     let hint = design::band(ui, tokens, |ui| {
         ui.horizontal_centered(|ui| {
             match state.table(tab_index).selected {
@@ -487,25 +488,34 @@ pub fn show(
                             .color(tokens.text),
                     );
                     design::chip(ui, tokens, &type_name, tokens.info);
-                    design::keycap(ui, tokens, "Double-click");
-                    ui.label(
-                        RichText::new("edit in place")
-                            .size(11.5)
-                            .color(tokens.text_faint),
-                    );
-                    if design::ghost_button(ui, tokens, "Set NULL", true).clicked() {
-                        command = Some((
-                            "grid.setNull",
-                            serde_json::json!({"row": row, "column": name}),
-                        ));
+                    // Both the keycap and the button name actions the engine refuses without a key —
+                    // `grid.setNull` goes through `pk_values` like the editor does — so a read-only
+                    // grid paints the design's own read-only frame instead of advertising them.
+                    if editable {
+                        design::keycap(ui, tokens, "Double-click");
+                        ui.label(
+                            RichText::new("edit in place")
+                                .size(11.5)
+                                .color(tokens.text_faint),
+                        );
+                        if design::ghost_button(ui, tokens, "Set NULL", true).clicked() {
+                            command = Some((
+                                "grid.setNull",
+                                serde_json::json!({"row": row, "column": name}),
+                            ));
+                        }
+                    } else {
+                        design::tag_lite(ui, tokens, "read-only");
                     }
                 }
                 None => {
-                    ui.label(
-                        RichText::new("Click a cell to select it, double-click to edit it.")
-                            .size(12.0)
-                            .color(tokens.text_faint),
-                    );
+                    // The same refusal: there is no editor to open on a read-only grid.
+                    let hint = if editable {
+                        "Click a cell to select it, double-click to edit it."
+                    } else {
+                        "Click a cell to select it."
+                    };
+                    ui.label(RichText::new(hint).size(12.0).color(tokens.text_faint));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -753,8 +763,9 @@ fn read_only_note(
 }
 
 /// `.fchips`' right-hand fact. `grid.countRows` is the only command that fills `GridState::total_rows`,
-/// so paging and filtering leave it unknown; until the server has counted, the honest fact is the
-/// page in hand rather than a match total that is really just this page's length.
+/// and `grid.filter`, `grid.clearFilter` and `grid.sort` clear it again because they change which rows
+/// the grid is asking for — so there is no count to print until the server has counted, and the honest
+/// fact is the page in hand rather than a match total that is really just this page's length.
 fn matches_note(total: Option<u64>, rows: usize) -> String {
     match total {
         Some(n) => design::matches_label(n),
@@ -854,8 +865,10 @@ mod tests {
     /// under it. A scroll area around that head would floor its viewport at egui's 64px minimum and
     /// push the block 72px further down, which is what this measures.
     ///
-    /// The call shape mirrors `app::show`'s central pane (`CentralPanel::default_margins`) and the
-    /// band stack mirrors this module's `show`, so the numbers here are the ones the app paints.
+    /// The call shape mirrors `app::show`'s central pane — `CentralPanel::default_margins()` *and*
+    /// the `.frame(egui::Frame::new().fill(tokens.panel))` that replaces its inner margin, which is
+    /// what makes the pane's bands start at the window's origin — and the band stack mirrors this
+    /// module's `show`, so the numbers here are the ones the app paints.
     #[test]
     fn the_pane_bands_are_flush_and_an_empty_page_gets_the_head_alone() {
         let ctx = egui::Context::default();
@@ -875,74 +888,84 @@ mod tests {
         let rows: Vec<Vec<datacraft_core::Value>> = Vec::new();
         let mut marks: Vec<(&str, f32, f32)> = Vec::new();
         let mut out = ctx.run_ui(input, |ui| {
-            egui::CentralPanel::default_margins().show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                let toolbar = design::band(ui, &tokens, |ui| {
-                    ui.set_min_height(design::TOOLBAR_H);
-                    ui.horizontal_centered(|ui| {
-                        let _ = design::ghost_button(ui, &tokens, "Refresh", true);
+            egui::CentralPanel::default_margins()
+                .frame(egui::Frame::new().fill(tokens.panel))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let toolbar = design::band(ui, &tokens, |ui| {
+                        ui.set_min_height(design::TOOLBAR_H);
+                        ui.horizontal_centered(|ui| {
+                            let _ = design::ghost_button(ui, &tokens, "Refresh", true);
+                        });
                     });
-                });
-                let fchips = design::band_fill(
-                    ui,
-                    design::filter_row_h(design::FCHIP_H),
-                    tokens.panel_alt,
-                    design::S4,
-                    egui::Align::Center,
-                    |ui| {
-                        let _ = design::chip(ui, &tokens, "x", tokens.text);
-                    },
-                );
-                design::band_hairline(ui, &tokens, fchips);
-                marks.push(("toolbar_to_fchips", fchips.top() - toolbar.bottom(), 0.0));
+                    // The pane's frame carries no margin, so the first band starts at the window's
+                    // origin; with `default_margins()`' own 8px it would measure 8 here.
+                    marks.push(("pane_origin", toolbar.top(), 0.0));
+                    let fchips = design::band_fill(
+                        ui,
+                        design::filter_row_h(design::FCHIP_H),
+                        tokens.panel_alt,
+                        design::S4,
+                        egui::Align::Center,
+                        |ui| {
+                            let _ = design::chip(ui, &tokens, "x", tokens.text);
+                        },
+                    );
+                    design::band_hairline(ui, &tokens, fchips);
+                    marks.push(("toolbar_to_fchips", fchips.top() - toolbar.bottom(), 0.0));
 
-                ui.add_space(2.0);
-                let view = TableView {
-                    columns: &columns,
-                    rows: &rows,
-                    pending: Vec::new(),
-                    inserted: Vec::new(),
-                    selected: None,
-                    sort: None,
-                    editable: true,
-                    sortable: true,
-                    gutter: true,
-                    // An empty page asks for the head alone.
-                    height: 0.0,
-                    row_h: design::row_h(datacraft_engine::Density::Compact),
-                    empty_text: "head-only",
-                };
-                let mut state = crate::table::TableState::default();
-                let before = ui.cursor().top();
-                let _ =
-                    crate::table::show(ui, &tokens, &view, &mut state, egui::Id::new("head-only"));
-                let after = ui.cursor().top();
-                marks.push(("head_only", after - before, design::HEAD_H));
+                    ui.add_space(2.0);
+                    let view = TableView {
+                        columns: &columns,
+                        rows: &rows,
+                        pending: Vec::new(),
+                        inserted: Vec::new(),
+                        selected: None,
+                        sort: None,
+                        editable: true,
+                        sortable: true,
+                        gutter: true,
+                        // An empty page asks for the head alone.
+                        height: 0.0,
+                        row_h: design::row_h(datacraft_engine::Density::Compact),
+                        empty_text: "head-only",
+                    };
+                    let mut state = crate::table::TableState::default();
+                    let before = ui.cursor().top();
+                    let _ = crate::table::show(
+                        ui,
+                        &tokens,
+                        &view,
+                        &mut state,
+                        egui::Id::new("head-only"),
+                    );
+                    let after = ui.cursor().top();
+                    marks.push(("head_only", after - before, design::HEAD_H));
 
-                let block = egui::Frame::new()
-                    .inner_margin(egui::Margin {
-                        left: 20,
-                        right: 20,
-                        top: 28,
-                        bottom: 30,
-                    })
-                    .show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = f32::from(design::S3);
-                            ui.label(
-                                RichText::new("main.customers has no rows yet.")
-                                    .size(design::T_MD)
-                                    .color(tokens.text),
-                            )
-                            .rect
-                            .top()
+                    let block = egui::Frame::new()
+                        .inner_margin(egui::Margin {
+                            left: 20,
+                            right: 20,
+                            top: 28,
+                            bottom: 30,
                         })
-                        .inner
-                    });
-                // The block starts at the head's hairline, and its own 28px puts the first ink there.
-                marks.push(("empty_block_gap", block.response.rect.top() - after, 0.0));
-                marks.push(("first_ink_below_head", block.inner - after, 28.0));
-            });
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = f32::from(design::S3);
+                                ui.label(
+                                    RichText::new("main.customers has no rows yet.")
+                                        .size(design::T_MD)
+                                        .color(tokens.text),
+                                )
+                                .rect
+                                .top()
+                            })
+                            .inner
+                        });
+                    // The block starts at the head's hairline, and its own 28px puts the first ink there.
+                    marks.push(("empty_block_gap", block.response.rect.top() - after, 0.0));
+                    marks.push(("first_ink_below_head", block.inner - after, 28.0));
+                });
         });
         // The frame paints into a texture delta the headless context never applies.
         out.textures_delta.clear();

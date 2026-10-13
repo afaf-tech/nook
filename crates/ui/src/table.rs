@@ -98,7 +98,8 @@ pub struct TableView<'a> {
     /// Row-number column on the left.
     pub gutter: bool,
     /// Height of the scrolling body. `0` for a table that has no body at all: the head is painted on
-    /// its own and the caller owns the space under it (the grid's `.empty` block does).
+    /// its own — still scrollable sideways — and the caller owns the space under it (the grid's
+    /// `.empty` block does).
     pub height: f32,
     /// Row height: the density setting through `theme::row_h`.
     pub row_h: f32,
@@ -243,11 +244,19 @@ pub fn show(
     let total_w = total_width(&widths) + gutter_w;
 
     if view.height <= 0.0 {
-        // No body, so nothing to scroll: the head is painted on its own. Wrapping it in the scroll
-        // area would floor the viewport at egui's `min_scrolled_size` (64px) and reserve the
-        // horizontal bar's strip, which put a caller's `.empty` block 72px below the head where the
-        // design keeps it 28px below — the head and the rows are the only things a page scrolls.
-        return head(ui, tokens, view, &widths, viewport_w, total_w, id);
+        // No body, so nothing to scroll vertically — but the head alone must still move sideways,
+        // or a table wider than the pane is clipped with no bar to reach the columns past the edge.
+        // The floor is the head's own height rather than egui's 64px default, so a caller's `.empty`
+        // block still lands 28px under the hairline where the design keeps it when the head fits.
+        return egui::ScrollArea::horizontal()
+            .id_salt(id.with("h"))
+            .auto_shrink([false, true])
+            .min_scrolled_height(HEAD_H)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                head(ui, tokens, view, &widths, viewport_w, total_w, id)
+            })
+            .inner;
     }
 
     let mut event = TableEvent::None;
@@ -477,8 +486,8 @@ pub fn show(
     event
 }
 
-/// The head: names, the sort caret and the `.pkbadge`, painted either inside the scroll area that
-/// carries the body or — when the caller asked for no body — straight into the page.
+/// The head: names, the sort caret and the `.pkbadge`, painted inside the caller's horizontal scroll
+/// area — the one that carries the body, or the head's own when the caller asked for no body.
 fn head(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -580,4 +589,226 @@ fn head(
         x += widths[index];
     }
     event
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A headless frame the way the app drives one: no texture uploads, one screen rect.
+    fn screen(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(819.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    fn view<'a>(
+        columns: &'a [TableColumn],
+        rows: &'a [Vec<Value>],
+        editable: bool,
+        height: f32,
+    ) -> TableView<'a> {
+        TableView {
+            columns,
+            rows,
+            pending: Vec::new(),
+            inserted: Vec::new(),
+            selected: None,
+            sort: None,
+            editable,
+            sortable: true,
+            gutter: true,
+            height,
+            row_h: design::row_h(datacraft_engine::Density::Compact),
+            empty_text: "no rows",
+        }
+    }
+
+    /// Double-click the cell at `(row, column)` and report the event the widget produced. The first
+    /// frame only lays the table out, so the second one can be pointed at the cell's real rect.
+    fn double_click_cell(
+        view: &TableView<'_>,
+        id: egui::Id,
+        row: usize,
+        column: usize,
+    ) -> TableEvent {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut state = TableState::default();
+        let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+            let _ = show(ui, &tokens, view, &mut state, id);
+        });
+        // The frame paints into a texture delta the headless context never applies.
+        out.textures_delta.clear();
+        let cell = ctx
+            .read_response(id.with(("cell", row, column)))
+            .expect("the cell registered its rect in the first frame")
+            .rect;
+        let mut events = vec![egui::Event::PointerMoved(cell.center())];
+        for _ in 0..2 {
+            events.push(press(cell.center(), true));
+            events.push(press(cell.center(), false));
+        }
+        let mut event = TableEvent::None;
+        let mut out = ctx.run_ui(screen(events), |ui| {
+            event = show(ui, &tokens, view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        event
+    }
+
+    /// The engine refuses `grid.editCell` on a grid with no primary key, so the widget must not offer
+    /// the editor there — a `BeginEdit` the caller has to swallow is the UI advertising a dead action.
+    #[test]
+    fn a_read_only_view_opens_no_editor_on_a_double_click() {
+        let columns = [
+            TableColumn::new("id", "INTEGER").pk(true),
+            TableColumn::new("email", "TEXT"),
+        ];
+        let rows = vec![vec![Value::Int(1), Value::text("a@b.c")]];
+        let id = egui::Id::new("read-only-table");
+        let event = double_click_cell(&view(&columns, &rows, false, 120.0), id, 0, 1);
+        assert_ne!(
+            event,
+            TableEvent::BeginEdit(0, 1),
+            "a read-only grid must not ask for an editor"
+        );
+        assert_eq!(
+            event,
+            TableEvent::Select(0, 1),
+            "the click still selects the cell"
+        );
+    }
+
+    /// The other half of the same contract: an editable grid does open the editor on a double click.
+    #[test]
+    fn an_editable_view_opens_the_editor_on_a_double_click() {
+        let columns = [
+            TableColumn::new("id", "INTEGER").pk(true),
+            TableColumn::new("email", "TEXT"),
+        ];
+        let rows = vec![vec![Value::Int(1), Value::text("a@b.c")]];
+        let id = egui::Id::new("editable-table");
+        let event = double_click_cell(&view(&columns, &rows, true, 120.0), id, 0, 1);
+        assert_eq!(event, TableEvent::BeginEdit(0, 1));
+    }
+
+    /// An empty page asks for the head alone, and that head must still be laid out at its full width
+    /// inside a horizontal scroll area: the pane here is narrower than the table (54px of gutter plus
+    /// five 76px columns), so a head clipped to the pane would leave the columns past its edge with
+    /// no bar to reach them. It must also advance the caller by exactly the head's height, so the
+    /// `.empty` block that follows lands under the hairline as the design has it.
+    #[test]
+    fn an_empty_page_still_reports_the_heads_rects() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let columns: Vec<TableColumn> = (0..5)
+            .map(|index| TableColumn::new(format!("column_{index}"), "TEXT"))
+            .collect();
+        let rows: Vec<Vec<Value>> = Vec::new();
+        let id = egui::Id::new("empty-page-table");
+        let pane_w = 300.0;
+        let mut state = TableState::default();
+        let screen = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(pane_w, 400.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut advanced = 0.0;
+        let mut run = |events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(screen(events), |ui| {
+                // `grid::show` zeroes the pane's spacing so its bands are flush; the measure below
+                // must be the head's, not the default spacing of a wrapped row.
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                let before = ui.cursor().top();
+                let event = show(
+                    ui,
+                    &tokens,
+                    &view(&columns, &rows, true, 0.0),
+                    &mut state,
+                    id,
+                );
+                assert_eq!(event, TableEvent::None);
+                advanced = ui.cursor().top() - before;
+            });
+            // The frame paints into a texture delta the headless context never applies.
+            out.textures_delta.clear();
+            advanced
+        };
+        let advanced = run(Vec::new());
+        assert!(
+            (advanced - HEAD_H).abs() < 0.5,
+            "the head-only page advanced {advanced}, not its head's {HEAD_H}"
+        );
+        let head = |index: usize| {
+            ctx.read_response(id.with(("head", index)))
+                .expect("the head's column registered its rect")
+                .rect
+        };
+        let tail = columns.len() - 1;
+        assert!(
+            head(tail).right() > pane_w,
+            "the head must keep its full width, past the pane it is drawn in"
+        );
+        for index in 0..columns.len() {
+            assert!(
+                (head(index).height() - HEAD_H).abs() < 0.5,
+                "column {index} is not the head's height"
+            );
+            if index > 0 {
+                assert!(
+                    (head(index).left() - head(index - 1).right()).abs() < 0.5,
+                    "the head's columns must tile the row"
+                );
+            }
+        }
+
+        // The bar is what makes the columns past the pane reachable: a wheel over the head moves it
+        // sideways until the last column sits inside the pane. Without the scroll area the head
+        // cannot move at all, whatever its width.
+        let mut reached = false;
+        for _ in 0..10 {
+            let advanced = run(vec![
+                egui::Event::PointerMoved(egui::pos2(pane_w / 2.0, HEAD_H / 2.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(-40.0, 0.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ]);
+            assert!(
+                (advanced - HEAD_H).abs() < 0.5,
+                "the head-only page advanced {advanced}, not its head's {HEAD_H}"
+            );
+            if head(tail).right() <= pane_w + 0.5 {
+                reached = true;
+                break;
+            }
+        }
+        assert!(
+            reached,
+            "the head never scrolled sideways, so the column at x={} is unreachable",
+            head(tail).right()
+        );
+    }
 }

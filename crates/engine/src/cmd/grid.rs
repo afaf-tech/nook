@@ -245,6 +245,8 @@ fn sort(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             wanted
         };
         tab.grid.page = 0;
+        // The count described the request in hand, and this is a new one; `grid.countRows` refills it.
+        tab.grid.total_rows = None;
     }
     load_grid(session, index)?;
     Ok(grid_summary(session, index))
@@ -260,6 +262,8 @@ fn filter(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             .ok_or_else(|| Error::internal("tab is gone"))?;
         tab.grid.filter = where_clause;
         tab.grid.page = 0;
+        // The count belongs to the rows the grid was asking for; this asks for a different set.
+        tab.grid.total_rows = None;
     }
     load_grid(session, index)?;
     Ok(grid_summary(session, index))
@@ -274,6 +278,7 @@ fn clear_filter(session: &mut Session, _p: &Params) -> Result<serde_json::Value>
             .ok_or_else(|| Error::internal("tab is gone"))?;
         tab.grid.filter.clear();
         tab.grid.page = 0;
+        tab.grid.total_rows = None;
     }
     load_grid(session, index)?;
     Ok(grid_summary(session, index))
@@ -891,6 +896,32 @@ mod tests {
                 .map(Vec::len),
             Some(0)
         );
+    }
+
+    /// `grid.countRows` counts the rows the grid is currently asking for, so the moment the filter
+    /// or the order changes the old count stops describing the page: it must not be kept and printed
+    /// as the new match total. `set_page_size` and the pager reload the same slice, so they leave it
+    /// standing deliberately — only the two things that change *which* rows are asked for clear it.
+    #[test]
+    fn changing_the_filter_or_the_order_drops_a_stale_row_count() {
+        let (mut session, tab) = grid_tab();
+        session.tabs[tab].grid.total_rows = Some(12_481);
+        let p = Params::from_json(json!({"column": "id"})).expect("params");
+        sort(&mut session, &p).expect("sort");
+        assert!(session.tabs[tab].grid.total_rows.is_none());
+
+        session.tabs[tab].grid.total_rows = Some(12_481);
+        let p = Params::from_json(json!({"where": "status = 'live'"})).expect("params");
+        let out = filter(&mut session, &p).expect("filter");
+        assert!(session.tabs[tab].grid.total_rows.is_none());
+        assert!(
+            out["total_rows"].is_null(),
+            "the summary printed the pre-filter count as the current match total"
+        );
+
+        session.tabs[tab].grid.total_rows = Some(12_481);
+        clear_filter(&mut session, &Params::none()).expect("clear");
+        assert!(session.tabs[tab].grid.total_rows.is_none());
     }
 
     #[test]
