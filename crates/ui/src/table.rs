@@ -246,8 +246,9 @@ pub fn show(
     if view.height <= 0.0 {
         // No body, so nothing to scroll vertically — but the head alone must still move sideways,
         // or a table wider than the pane is clipped with no bar to reach the columns past the edge.
-        // The floor is the head's own height rather than egui's 64px default, so a caller's `.empty`
-        // block still lands 28px under the hairline where the design keeps it when the head fits.
+        // The area's height is the head's own, so the caller's `.empty` block still lands 28px under
+        // the hairline; `auto_shrink` collapses the viewport to the content and the floor below only
+        // keeps it from egui's 64px default should the bar style ever stop floating.
         return egui::ScrollArea::horizontal()
             .id_salt(id.with("h"))
             .auto_shrink([false, true])

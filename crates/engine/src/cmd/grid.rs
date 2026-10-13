@@ -594,6 +594,9 @@ fn apply(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     }
     if let Some(tab) = session.tabs.get_mut(index) {
         tab.grid.pending.clear();
+        // Rows the grid had counted have just been inserted, updated or deleted; the count described
+        // the request before them, so it goes the way `filter`, `clear_filter` and `sort` send theirs.
+        tab.grid.total_rows = None;
     }
     load_grid(session, index)?;
     session.log(Level::Success, format!("{applied} changes applied"));
@@ -898,10 +901,11 @@ mod tests {
         );
     }
 
-    /// `grid.countRows` counts the rows the grid is currently asking for, so the moment the filter
-    /// or the order changes the old count stops describing the page: it must not be kept and printed
-    /// as the new match total. `set_page_size` and the pager reload the same slice, so they leave it
-    /// standing deliberately — only the two things that change *which* rows are asked for clear it.
+    /// `grid.countRows` counts the rows the grid is currently asking for, so the moment the filter,
+    /// the order or the rows themselves change the old count stops describing the page: it must not
+    /// be kept and printed as the new match total. `set_page_size` and the pager reload the same
+    /// slice, so they leave it standing deliberately — only the commands that change *which* rows
+    /// are asked for clear it.
     #[test]
     fn changing_the_filter_or_the_order_drops_a_stale_row_count() {
         let (mut session, tab) = grid_tab();

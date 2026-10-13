@@ -146,9 +146,12 @@ implementations:
   sentinel: `table::show` paints the head inside a horizontal scroll area and returns, and the caller
   owns the space under it (the `.empty` block's own `padding:28px`). The head keeps that scroll area
   because a table wider than the pane would otherwise be clipped with no bar to reach the columns past
-  the edge. Its viewport is floored at `HEAD_H` rather than egui's `min_scrolled_size` default (64px),
-  so the block still lands one head — plus, when the head overflows, the bar's 8px strip — below the
-  hairline; the 64px floor is what put it 72px down. `ponytail:` a zero-height body is not expressible
+  the edge. Its height is the head's own, so the block still lands one head below the hairline — the
+  scroll area collapses to its content, and the horizontal bar is charged to the width, not the height,
+  so an overflowing head does not push the block down either. The viewport's floor is `HEAD_H` rather
+  than egui's `min_scrolled_size` default (64px), which is what put the block 72px down before; the
+  floor is idle while egui's bars float, and holds the band if a future style stops them floating.
+  `ponytail:` a zero-height body is not expressible
   — nothing asks for one — so the upgrade path is a `Body` enum (`HeadOnly | Scroll(f32)`) if a caller
   ever wants a body of no height.
 - **The grid's badge and notice marks have one definition each.** The head reserves
@@ -162,8 +165,9 @@ implementations:
   selected-cell band's `Double-click` keycap and `Set NULL`, and the widget's own inline editor and
   dirty stripe. A surface that forgot it would advertise an action the engine rejects.
 - **The grid prints only the facts it holds.** `.matches` shows the count `grid.countRows` returned —
-  and only until the grid starts asking for different rows: `grid.filter`, `grid.clearFilter` and
-  `grid.sort` drop it, because a count read under the previous request is not this page's match total.
+  and only until the grid starts asking for different rows: `grid.filter`, `grid.clearFilter`,
+  `grid.sort` and `grid.apply` drop it, because a count read under the previous request is not this
+  page's match total (an applied edit inserts, updates or deletes rows of the set just counted).
   With no count there is nothing honest to print but the page in hand (`50 rows on this page`). The
   `.robanner`'s reason comes from the binding and the schema — not from the page — in the order
   `GridState::editable` checks them, so a keyless table is never told it has no primary key because a
