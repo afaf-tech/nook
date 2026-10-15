@@ -338,6 +338,11 @@ pub struct PendingEdit {
     pub row: usize,
     pub column: String,
     pub value: Value,
+    /// The columns an insert writes: kept so `grid.apply` can plan the statement again against the
+    /// table as it is when the apply runs, rather than run a statement planned against a table that
+    /// has since changed.
+    pub insert: Vec<(String, Value)>,
+    /// The statement this edit planned to. The grid shows it; the apply re-plans it.
     pub sql: String,
 }
 
@@ -1313,6 +1318,7 @@ mod tests {
             row: 0,
             column: String::new(),
             value: Value::Null,
+            insert: Vec::new(),
             sql: String::new(),
         }
     }

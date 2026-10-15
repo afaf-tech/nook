@@ -297,6 +297,42 @@ pub fn load_grid(session: &mut Session, tab_index: usize) -> Result<()> {
     Ok(())
 }
 
+/// Bring a data tab back in step with the catalog before its rows are edited.
+///
+/// The binding is taken when the tab opens — `GridState::columns`, `GridState::primary_key` and
+/// the page beside them describe the table as it was then. A schema edit made since, in the designer,
+/// the SQL editor or another client altogether, leaves the tab planning against columns that are
+/// gone, and a stale `WHERE` is worse than an error: SQLite reads a double-quoted name that matches
+/// no column as a string literal, so the statement matched no row while the grid reported it applied.
+///
+/// ponytail: the page is fetched again only when it no longer describes the table, so a schema change
+/// costs one round trip and a stable schema costs a catalog lookup. Reloading smartly (keeping the
+/// scroll position, say) waits for a user who notices the jump.
+pub(crate) fn sync_grid_table(session: &mut Session, tab_index: usize) -> Result<()> {
+    let reference = session
+        .tabs
+        .get(tab_index)
+        .and_then(|tab| tab.grid.table.clone())
+        .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
+    bind_grid_table(session, tab_index, reference)?;
+    let stale_page = {
+        let tab = session
+            .tabs
+            .get(tab_index)
+            .ok_or_else(|| Error::not_found("tab is gone"))?;
+        let current: Vec<String> = tab
+            .table
+            .as_ref()
+            .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        !current.is_empty() && current != tab.grid.result.columns
+    };
+    if stale_page {
+        load_grid(session, tab_index)?;
+    }
+    Ok(())
+}
+
 /// Attach a table's key information to a grid so edits can be planned.
 pub fn bind_grid_table(session: &mut Session, tab_index: usize, table: TableRef) -> Result<()> {
     let conn_index = session

@@ -6,7 +6,7 @@ use nook_core::{Error, Result, Value};
 use nook_model::{plan_edits, EditKind, RowEdit};
 use serde_json::json;
 
-use crate::cmd::{bind_grid_table, load_grid, pk_values, run_sql};
+use crate::cmd::{bind_grid_table, load_grid, pk_values, run_sql, sync_grid_table};
 use crate::{CommandSpec, Level, Params, Session, TabKind, TableRef};
 
 pub fn commands() -> Vec<CommandSpec> {
@@ -344,49 +344,15 @@ fn record_edit(
     value: Option<Value>,
     insert_values: Vec<(String, Value)>,
 ) -> Result<serde_json::Value> {
-    let dialect = session.tabs[tab_index]
-        .payload
-        .get("dialect")
-        .and_then(|v| v.as_str())
-        .and_then(super::parse_dialect)
-        .unwrap_or(nook_core::Dialect::Sqlite);
-    let edit = {
-        let tab = session
-            .tabs
-            .get(tab_index)
-            .ok_or_else(|| Error::internal("tab is gone"))?;
-        let table_ref = tab
-            .grid
-            .table
-            .clone()
-            .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
-        let pk = match kind {
-            EditKind::InsertRow => Vec::new(),
-            _ => pk_values(tab, row)?,
-        };
-        let changes = match kind {
-            EditKind::InsertRow => insert_values.clone(),
-            EditKind::SetCell => vec![(
-                column
-                    .clone()
-                    .ok_or_else(|| Error::config("pass \"column\""))?,
-                value.clone().unwrap_or(Value::Null),
-            )],
-            EditKind::DeleteRow => Vec::new(),
-        };
-        RowEdit {
-            kind,
-            row_index: row,
-            schema: table_ref.schema.clone(),
-            table: table_ref.table.clone(),
-            pk,
-            changes,
-        }
-    };
-    let sql = plan_edits(std::slice::from_ref(&edit), dialect)?
-        .first()
-        .cloned()
-        .unwrap_or_default();
+    let sql = plan_edit(
+        session,
+        tab_index,
+        kind,
+        row,
+        column.as_deref(),
+        value.as_ref(),
+        &insert_values,
+    )?;
     let tab = session
         .tabs
         .get_mut(tab_index)
@@ -396,6 +362,7 @@ fn record_edit(
         row,
         column: column.unwrap_or_default(),
         value: value.unwrap_or(Value::Null),
+        insert: insert_values,
         sql: sql.clone(),
     });
     Ok(json!({
@@ -403,6 +370,60 @@ fn record_edit(
         "sql": sql,
         "kind": format!("{kind:?}").to_lowercase(),
     }))
+}
+
+/// The statement one grid edit becomes, planned against the table and the page as they are now: the
+/// primary key values come from the page, the names and the dialect from the binding.
+fn plan_edit(
+    session: &Session,
+    tab_index: usize,
+    kind: EditKind,
+    row: usize,
+    column: Option<&str>,
+    value: Option<&Value>,
+    insert_values: &[(String, Value)],
+) -> Result<String> {
+    let dialect = session.tabs[tab_index]
+        .payload
+        .get("dialect")
+        .and_then(|v| v.as_str())
+        .and_then(super::parse_dialect)
+        .unwrap_or(nook_core::Dialect::Sqlite);
+    let tab = session
+        .tabs
+        .get(tab_index)
+        .ok_or_else(|| Error::internal("tab is gone"))?;
+    let table_ref = tab
+        .grid
+        .table
+        .clone()
+        .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
+    let pk = match kind {
+        EditKind::InsertRow => Vec::new(),
+        _ => pk_values(tab, row)?,
+    };
+    let changes = match kind {
+        EditKind::InsertRow => insert_values.to_vec(),
+        EditKind::SetCell => vec![(
+            column
+                .ok_or_else(|| Error::config("pass \"column\""))?
+                .to_string(),
+            value.cloned().unwrap_or(Value::Null),
+        )],
+        EditKind::DeleteRow => Vec::new(),
+    };
+    let edit = RowEdit {
+        kind,
+        row_index: row,
+        schema: table_ref.schema.clone(),
+        table: table_ref.table.clone(),
+        pk,
+        changes,
+    };
+    Ok(plan_edits(std::slice::from_ref(&edit), dialect)?
+        .first()
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// A value that satisfies a NOT NULL column the server would otherwise reject.
@@ -425,6 +446,9 @@ fn fallback(column: &nook_model::Column) -> Value {
 
 fn edit_cell(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    // Before the column's type is read: a schema edit since the tab was bound would coerce the new
+    // value with the old type, and a stale page would plan the edit behind it.
+    sync_grid_table(session, index)?;
     let row = p.int_arg("row").unwrap_or(0).max(0) as usize;
     let column = p.str_arg("column")?;
     let raw = p.cell("value").unwrap_or(Value::Null);
@@ -451,6 +475,7 @@ fn edit_cell(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 
 fn set_null(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    sync_grid_table(session, index)?;
     let row = p.int_arg("row").unwrap_or(0).max(0) as usize;
     let column = p.str_arg("column")?;
     record_edit(
@@ -466,6 +491,8 @@ fn set_null(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 
 fn insert_row(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    // The NOT NULL columns the empty row is filled from come from the binding.
+    sync_grid_table(session, index)?;
     let values = match p.get("values") {
         Some(serde_json::Value::Object(map)) => map
             .iter()
@@ -490,6 +517,7 @@ fn insert_row(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 
 fn delete_row(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    sync_grid_table(session, index)?;
     let row = p.int_arg("row").unwrap_or(0).max(0) as usize;
     {
         let tab = &session.tabs[index];
@@ -502,6 +530,7 @@ fn delete_row(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 
 fn duplicate_row(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    sync_grid_table(session, index)?;
     let row = p.int_arg("row").unwrap_or(0).max(0) as usize;
     let values: Vec<(String, Value)> = {
         let tab = &session.tabs[index];
@@ -564,16 +593,32 @@ fn revert(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
 
 fn apply(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
-    let (conn, statements): (usize, Vec<String>) = {
-        let tab = &session.tabs[index];
-        let conn = tab
-            .conn
-            .ok_or_else(|| Error::config("this tab has no connection"))?;
-        (
-            conn,
-            tab.grid.pending.iter().map(|e| e.sql.clone()).collect(),
-        )
-    };
+    // Plan every pending edit again, against the table and the page as they are now. A statement
+    // planned before the table changed cannot be trusted: the columns it names may be gone, and a
+    // stale `WHERE` matches no row while reporting the edit applied — the SQL that runs here is the
+    // SQL the grid shows afterwards, and an edit that cannot be planned fails before anything runs.
+    sync_grid_table(session, index)?;
+    let pending = session.tabs[index].grid.pending.clone();
+    let mut statements: Vec<String> = Vec::with_capacity(pending.len());
+    for edit in &pending {
+        let column = (!edit.column.is_empty()).then_some(edit.column.as_str());
+        let sql = plan_edit(
+            session,
+            index,
+            edit.kind,
+            edit.row,
+            column,
+            Some(&edit.value),
+            &edit.insert,
+        )?;
+        if let Some(slot) = session.tabs[index].grid.pending.get_mut(statements.len()) {
+            slot.sql = sql.clone();
+        }
+        statements.push(sql);
+    }
+    let conn = session.tabs[index]
+        .conn
+        .ok_or_else(|| Error::config("this tab has no connection"))?;
     if statements.is_empty() {
         return Ok(json!({ "applied": 0, "message": "nothing to apply" }));
     }
@@ -803,7 +848,6 @@ fn form_view(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     }))
 }
 
-
 fn copy_as_sql(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
     let tab = &session.tabs[index];
@@ -837,7 +881,22 @@ mod tests {
     fn grid_tab() -> (Session, usize) {
         let mut session = Session::new();
         let conn = nook_core::ConnectionConfig::new("mem", nook_core::DriverKind::Sqlite);
-        session.conns.push(crate::Conn::new(conn));
+        let mut conn = crate::Conn::new(conn);
+        // The grid's columns and key are read from the catalog, so the connection carries the same
+        // table the tab claims to show: a tab bound to nothing would edit nothing.
+        let mut id = Column::new("id", "INTEGER");
+        id.primary_key = true;
+        let mut users = nook_model::Table::new(None, "users");
+        users.columns = vec![id, Column::new("email", "TEXT")];
+        conn.catalog = Some(nook_model::Catalog {
+            driver: "SQLite".into(),
+            schemas: vec![nook_model::Schema {
+                name: "main".into(),
+                tables: vec![users],
+            }],
+            ..nook_model::Catalog::default()
+        });
+        session.conns.push(conn);
         let index = session.add_tab(TabKind::Data, "users", Some(0));
         let tab = &mut session.tabs[index];
         tab.grid.result = ResultSet {
@@ -915,10 +974,23 @@ mod tests {
     #[test]
     fn editing_without_a_primary_key_is_refused() {
         let (mut session, tab) = grid_tab();
+        // The key comes from the catalog, so a keyless table is one the catalog has no key for —
+        // and the set of columns the tab would plan against has to match it, or the page is reloaded.
+        let table = session.conns[0]
+            .catalog
+            .as_mut()
+            .and_then(|c| c.schemas.get_mut(0))
+            .and_then(|s| s.tables.first_mut())
+            .expect("the fixture holds a table");
+        table.columns[0].primary_key = false;
         session.tabs[tab].grid.primary_key.clear();
         let p =
             Params::from_json(json!({"row": 0, "column": "email", "value": "x"})).expect("params");
-        assert!(edit_cell(&mut session, &p).is_err());
+        let err = edit_cell(&mut session, &p).expect_err("a keyless table is refused");
+        assert!(
+            err.to_string().contains("primary key"),
+            "the refusal has to name the reason: {err}"
+        );
     }
 
     #[test]
