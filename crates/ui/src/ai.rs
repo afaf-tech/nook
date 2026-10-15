@@ -573,22 +573,24 @@ fn steps(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
     let spend = columns * (STEP_LABEL_W + f32::from(design::S5)) + gaps * f32::from(design::S6);
     let share = ((room - spend) / columns).max(COL_MIN_W);
     let column = |wanted: f32| wanted.min(share);
+    // One width per column, the widest control's own: a table's column does not rag — 01 and 03 take
+    // the same box, 02 and 04 too, whatever the provider. (`KEY_W`/`MODEL_W` keep naming the floors
+    // the engine's controls want; the column is what the pane sees.)
+    let control_w = column(PROVIDER_W.max(BASE_URL_W).max(KEY_W).max(MODEL_W));
     let grid = egui::Grid::new("ai-steps")
         .num_columns(2)
         .spacing([f32::from(design::S6), f32::from(design::S5)]);
     grid.show(ui, |ui| {
-        let (one, two) = (column(PROVIDER_W), column(BASE_URL_W));
-        step(ui, tokens, "01", "Provider", one, |ui| {
-            provider_control(ui, tokens, form, one);
+        step(ui, tokens, "01", "Provider", control_w, |ui| {
+            provider_control(ui, tokens, form, control_w);
         });
-        step(ui, tokens, "02", "Base URL", two, |ui| {
-            base_url_control(ui, tokens, form, two);
+        step(ui, tokens, "02", "Base URL", control_w, |ui| {
+            base_url_control(ui, tokens, form, control_w);
         });
         ui.end_row();
-        let (three, four) = (column(KEY_W), column(MODEL_W));
-        step(ui, tokens, "03", "API key", three, |ui| {
+        step(ui, tokens, "03", "API key", control_w, |ui| {
             if form.provider.needs_key() {
-                key_control(ui, tokens, form, three);
+                key_control(ui, tokens, form, control_w);
             } else {
                 ui.label(
                     RichText::new("not needed")
@@ -597,8 +599,8 @@ fn steps(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
                 );
             }
         });
-        step(ui, tokens, "04", "Model", four, |ui| {
-            model_control(ui, tokens, form, four);
+        step(ui, tokens, "04", "Model", control_w, |ui| {
+            model_control(ui, tokens, form, control_w);
         });
         ui.end_row();
     });
@@ -1410,6 +1412,18 @@ mod tests {
         );
         // And the controls themselves are top-aligned with their own labels: the provider combo's box
         // starts where its `01` does, on a pane that gives the row its full width.
+        // And the footer's Generate is on the pane, not below the fold: the band's cap bounds the
+        // grid's two rows plus head, prompt and foot, and a band that scrolls hides the one button
+        // the band exists for.
+        let generate = texts
+            .iter()
+            .find(|(text, _)| text == "Generate")
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("Generate was not painted"));
+        assert!(
+            pane.contains_rect(generate),
+            "Generate at {generate:?} is below the pane's fold"
+        );
         for label in ["PROVIDER", "BASE URL", "API KEY", "MODEL"] {
             let rect = texts
                 .iter()
