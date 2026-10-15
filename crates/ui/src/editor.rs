@@ -2453,8 +2453,13 @@ mod tests {
             f.strings
         );
         assert!(
+            f.shows("where the request goes"),
+            "the provider's description line is painted: {:#?}",
+            f.strings
+        );
+        assert!(
             !f.shows("this server serves what it was started with"),
-            "the text-field note belongs to list-less providers only: {:#?}",
+            "the model description belongs to list-less providers' cells only: {:#?}",
             f.strings
         );
     }

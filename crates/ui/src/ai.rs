@@ -581,27 +581,63 @@ fn steps(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
         .num_columns(2)
         .spacing([f32::from(design::S6), f32::from(design::S5)]);
     grid.show(ui, |ui| {
-        step(ui, tokens, "01", "Provider", control_w, |ui| {
-            provider_control(ui, tokens, form, control_w);
-        });
-        step(ui, tokens, "02", "Base URL", control_w, |ui| {
-            base_url_control(ui, tokens, form, control_w);
-        });
+        step(
+            ui,
+            tokens,
+            "01",
+            "Provider",
+            control_w,
+            "where the request goes",
+            |ui| {
+                provider_control(ui, tokens, form, control_w);
+            },
+        );
+        step(
+            ui,
+            tokens,
+            "02",
+            "Base URL",
+            control_w,
+            "saved with the provider — an address, not a secret",
+            |ui| {
+                base_url_control(ui, tokens, form, control_w);
+            },
+        );
         ui.end_row();
-        step(ui, tokens, "03", "API key", control_w, |ui| {
-            if form.provider.needs_key() {
-                key_control(ui, tokens, form, control_w);
+        step(
+            ui,
+            tokens,
+            "03",
+            "API key",
+            control_w,
+            "in the keychain, never in the file",
+            |ui| {
+                if form.provider.needs_key() {
+                    key_control(ui, tokens, form, control_w);
+                } else {
+                    ui.label(
+                        RichText::new("not needed")
+                            .font(tokens.mono(design::T_XS))
+                            .color(tokens.text_dim),
+                    );
+                }
+            },
+        );
+        step(
+            ui,
+            tokens,
+            "04",
+            "Model",
+            control_w,
+            if form.provider.models().is_empty() {
+                "this server serves what it was started with"
             } else {
-                ui.label(
-                    RichText::new("not needed")
-                        .font(tokens.mono(design::T_XS))
-                        .color(tokens.text_faint),
-                );
-            }
-        });
-        step(ui, tokens, "04", "Model", control_w, |ui| {
-            model_control(ui, tokens, form, control_w);
-        });
+                "the ids the provider ships"
+            },
+            |ui| {
+                model_control(ui, tokens, form, control_w);
+            },
+        );
         ui.end_row();
     });
 }
@@ -635,11 +671,6 @@ fn model_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width: f
                     }
                     response
                 });
-                ui.label(
-                    RichText::new("this server serves what it was started with")
-                        .font(tokens.mono(design::T_XS))
-                        .color(tokens.text_faint),
-                );
             },
         );
         return;
@@ -665,29 +696,44 @@ fn model_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width: f
         });
 }
 
-/// One numbered step — its label column and its control — as a single child, so [`steps`]' wrap falls
-/// between two steps and never inside one.
+/// One numbered step as its own nested grid: the number+name column on the left, the control on the
+/// right with the description under it — the second row's right cell, so the description always
+/// starts at the control's left edge and every cell ends on a description line, whatever the step.
 ///
-/// `width` is the control column's own width, and it is passed to `allocate_ui_with_layout` rather
-/// than left to the content: egui's wrap decides from the *declared* child size, so a child declared
-/// zero wide never triggers a row break and the last step lands past the pane.
+/// `width` is the control column's own width, declared so the outer [`steps`] grid sizes its cell
+/// from the plan rather than the content.
 fn step(
     ui: &mut egui::Ui,
     tokens: &Tokens,
     number: &str,
     name: &str,
     width: f32,
+    description: &str,
     add: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.allocate_ui_with_layout(
-        Vec2::new(STEP_LABEL_W + f32::from(design::S5) + width, 0.0),
-        egui::Layout::left_to_right(egui::Align::Min),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = f32::from(design::S5);
+    egui::Grid::new(egui::Id::new(("ai-step", number)))
+        .num_columns(2)
+        .spacing([f32::from(design::S5), f32::from(design::S2)])
+        .show(ui, |ui| {
             step_label(ui, tokens, number, name);
-            add(ui);
-        },
-    );
+            // Reserve the control column: a combo sizes to its text, and the description under
+            // it must start at the column's own left edge, not the combo's.
+            ui.allocate_ui_with_layout(
+                Vec2::new(width, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                add,
+            );
+            ui.end_row();
+            ui.weak("");
+            if !description.is_empty() {
+                ui.label(
+                    RichText::new(description)
+                        .font(tokens.mono(design::T_XS))
+                        .color(tokens.text_faint),
+                );
+            }
+            ui.end_row();
+        });
 }
 
 /// A numbered step's label column, from the design's 132px.
@@ -766,11 +812,6 @@ fn base_url_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width
                 }
                 response
             });
-            ui.label(
-                RichText::new("saved with the provider — an address, not a secret")
-                    .font(tokens.mono(design::T_XS))
-                    .color(tokens.text_faint),
-            );
         },
     );
 }
