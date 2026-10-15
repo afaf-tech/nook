@@ -878,10 +878,21 @@ fn form_view(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     // The form shows what `grid.apply` will send, not the page as it was fetched: a pending edit
     // to this row overlays the cell the form paints. Pending edits apply in order, so the last
     // one to a cell wins — the same rule the apply loop follows.
+    //
+    // "This row" is the record, not the index: a sort or a page turn between the edit and this call
+    // moves the record, and `PendingEdit::row` would then overlay the edit onto whichever record took
+    // that row. The key is what says they belong together, and it is the same key the apply uses.
+    let belongs_to_this_record = |edit: &crate::PendingEdit| {
+        if edit.key.is_empty() {
+            edit.row == row
+        } else {
+            super::row_of_key(&grid.result, &grid.primary_key, &edit.key) == Some(row)
+        }
+    };
     let overlaid: std::collections::BTreeMap<&str, &Value> = grid
         .pending
         .iter()
-        .filter(|e| e.row == row)
+        .filter(|e| belongs_to_this_record(e))
         .filter_map(|e| match e.kind {
             nook_model::EditKind::SetCell => Some((e.column.as_str(), &e.value)),
             _ => None,
@@ -1120,6 +1131,35 @@ mod tests {
             .run("grid.formView", json!({"row": 0}))
             .expect("form view");
         assert_eq!(other["fields"][1]["value"], "a@b.c");
+    }
+
+    /// The form paints a pending edit onto the record the edit was made on, not onto the row it was
+    /// made at. `grid.sort`, a filter and a page turn all reload the page under the pending buffer, and
+    /// the apply keys its statement by the record — the overlay has to follow the same rule, or the form
+    /// shows one record's edit on another record. The end-to-end version of this, through a real sort
+    /// against a real database, is `an_edit_applied_after_a_sort_lands_on_the_record_it_was_made_on`.
+    #[test]
+    fn the_form_view_paints_a_pending_edit_on_its_own_record_after_the_page_moves() {
+        let (mut session, tab) = grid_tab();
+        session
+            .run(
+                "grid.editCell",
+                json!({"row": 0, "column": "email", "value": "z@z.z"}),
+            )
+            .expect("edit");
+        // What sorting descending by email does to the page: the same two records, the other way round.
+        session.tabs[tab].grid.result.rows.swap(0, 1);
+
+        // Row 0 holds id 2 now, which nobody edited, so it shows its own email.
+        let other = session
+            .run("grid.formView", json!({"row": 0}))
+            .expect("form view");
+        assert_eq!(other["fields"][1]["value"], "d@e.f", "{:#?}", other);
+        // Row 1 holds the record the edit was made on, so it shows the edit.
+        let moved = session
+            .run("grid.formView", json!({"row": 1}))
+            .expect("form view");
+        assert_eq!(moved["fields"][1]["value"], "z@z.z", "{:#?}", moved);
     }
 
     /// The last edit to a cell wins, matching what `grid.apply` sends: the pending list is applied

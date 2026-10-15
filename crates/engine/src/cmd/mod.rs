@@ -387,6 +387,30 @@ pub(crate) fn dialect_name(d: nook_core::Dialect) -> &'static str {
 }
 
 /// Primary-key values for a grid row, used when planning an edit.
+/// The row a key belongs to on this page, or `None` when the page does not hold that record.
+///
+/// A page moves under a pending edit — a sort, a filter, a page turn — so the row an edit was made on
+/// cannot say where its record is now. Its key can. Everything that has to point at a pending edit on
+/// the page must go through here rather than through `PendingEdit::row`, which is only the record's
+/// place at the time of the edit.
+pub fn row_of_key(
+    result: &ResultSet,
+    primary_key: &[String],
+    key: &[nook_core::Value],
+) -> Option<usize> {
+    // A length mismatch is a key set that changed since the edit was made; there is nothing to match.
+    if key.is_empty() || primary_key.len() != key.len() {
+        return None;
+    }
+    (0..result.rows.len()).find(|row| {
+        primary_key.iter().zip(key).all(|(name, expected)| {
+            result
+                .value_at(*row, name)
+                .is_some_and(|value| value == expected)
+        })
+    })
+}
+
 pub(crate) fn pk_values(tab: &Tab, row: usize) -> Result<Vec<(String, nook_core::Value)>> {
     let mut out = Vec::new();
     for column in &tab.grid.primary_key {

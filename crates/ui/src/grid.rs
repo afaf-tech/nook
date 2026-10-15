@@ -19,6 +19,35 @@ const FORM_HEAD_H: f32 = 40.0;
 /// The band's floor: a one-column record still shows its header and a row of context.
 const FORM_MIN_H: f32 = 112.0;
 
+/// The cells the table paints as dirty: one per pending `SetCell` edit, on the row its record is on
+/// *now*.
+///
+/// A pending edit carries the key of the record it was made on as well as its row, and a sort or a page
+/// turn between the edit and this frame moves that record: keying by `PendingEdit::row` would mark
+/// whichever record took that row, so the highlight would sit on a cell the edit does not touch while
+/// the apply writes the right one. A record the page no longer holds has no cell to mark.
+pub(crate) fn dirty_cells(tab: &nook_engine::Tab) -> Vec<(usize, usize)> {
+    let result = &tab.grid.result;
+    let primary_key = &tab.grid.primary_key;
+    tab.grid
+        .pending
+        .iter()
+        .filter(|edit| edit.kind == nook_model::EditKind::SetCell)
+        .filter_map(|edit| {
+            let column = result
+                .columns
+                .iter()
+                .position(|name| name == &edit.column)?;
+            let row = if edit.key.is_empty() {
+                edit.row
+            } else {
+                nook_engine::cmd::row_of_key(result, primary_key, &edit.key)?
+            };
+            Some((row, column))
+        })
+        .collect()
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     session: &mut Session,
@@ -53,18 +82,7 @@ pub fn show(
         .iter()
         .map(|edit| edit.sql.clone())
         .collect();
-    let dirty_cells: Vec<(usize, usize)> = tab
-        .grid
-        .pending
-        .iter()
-        .filter(|edit| edit.kind == nook_model::EditKind::SetCell)
-        .filter_map(|edit| {
-            columns
-                .iter()
-                .position(|name| name == &edit.column)
-                .map(|index| (edit.row, index))
-        })
-        .collect();
+    let dirty_cells = dirty_cells(tab);
     let inserted_rows: Vec<usize> = tab
         .grid
         .pending
@@ -996,6 +1014,59 @@ fn stale_note(filter: &str, order: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The dirty-cell highlight marks the row the edit's *record* is on now, not the row the edit was
+    /// made at: the page moves under the pending buffer (a sort, a filter, a page turn), and the apply
+    /// keys its statement by the record. Marking by row index would light a cell the edit does not
+    /// touch while the statement writes the right one.
+    #[test]
+    fn a_pending_edit_marks_the_row_its_record_is_on_now() {
+        let mut session = nook_engine::Session::new();
+        let tab = session.add_tab(nook_engine::TabKind::Data, "users", Some(0));
+        {
+            let grid = &mut session.tabs[tab].grid;
+            // Sorted by email descending: the record the edit was made on (id 1) is at row 1, and id 2
+            // has taken the row the edit was made at.
+            grid.result = nook_model::ResultSet {
+                columns: vec!["id".into(), "email".into()],
+                column_types: vec!["INTEGER".into(), "TEXT".into()],
+                rows: vec![
+                    vec![nook_core::Value::Int(2), nook_core::Value::text("d@e.f")],
+                    vec![nook_core::Value::Int(1), nook_core::Value::text("a@b.c")],
+                ],
+                ..nook_model::ResultSet::default()
+            };
+            grid.primary_key = vec!["id".into()];
+            grid.pending.push(nook_engine::PendingEdit {
+                kind: nook_model::EditKind::SetCell,
+                row: 0,
+                column: "email".into(),
+                value: nook_core::Value::text("z@z.z"),
+                insert: Vec::new(),
+                key: vec![nook_core::Value::Int(1)],
+                sql: String::new(),
+            });
+        }
+        assert_eq!(
+            dirty_cells(&session.tabs[tab]),
+            vec![(1, 1)],
+            "the highlight follows the record, not the row index"
+        );
+
+        // A record the page no longer holds has no cell to mark, and marks none: the stale index would
+        // otherwise light the cell of whichever record took its place.
+        session.tabs[tab].grid.result.rows.truncate(1);
+        assert!(dirty_cells(&session.tabs[tab]).is_empty());
+
+        // A key set that no longer matches the captured values cannot be resolved either, and a
+        // mismatch must not be taken for a match — the same rule `grid.apply` refuses on.
+        session.tabs[tab].grid.result.rows = vec![vec![
+            nook_core::Value::Int(1),
+            nook_core::Value::text("a@b.c"),
+        ]];
+        session.tabs[tab].grid.primary_key = vec!["id".into(), "email".into()];
+        assert!(dirty_cells(&session.tabs[tab]).is_empty());
+    }
+
     #[test]
     fn the_empty_state_follows_the_rows_and_the_filter() {
         assert_eq!(empty_state(0, 1), EmptyState::NoMatch);
@@ -1478,12 +1549,20 @@ mod tests {
             .pop()
             .expect("two frames are painted");
         let (_, clip) = fields.first().ok_or("the wide record painted no field")?;
-        // Half the pane is the band's ceiling: past it the table it belongs to would be a strip.
-        if clip.height() > pane.height() / 2.0 + FORM_HEAD_H + FORM_ROW_H {
+        // Half of what the pane leaves below the toolbar and the filter chips is the band's ceiling
+        // (`form_height` clamps to it), and its header comes out of that — so a viewport taller than the
+        // half means the ceiling came off and the table below it has become the strip.
+        let share = (pane.height() - design::TOOLBAR_H - design::FCHIPS_H) / 2.0;
+        if clip.height() > share {
             return Err(format!(
-                "the band holds {} of a {} pane, past its half",
-                clip.height(),
-                pane.height()
+                "the band's viewport holds {} where half a pane of {share} is the ceiling",
+                clip.height()
+            ));
+        }
+        if clip.height() < FORM_ROW_H {
+            return Err(format!(
+                "the band's viewport is {} tall, under one {FORM_ROW_H} row",
+                clip.height()
             ));
         }
         if clip.bottom() > pane.bottom() + 0.5 {

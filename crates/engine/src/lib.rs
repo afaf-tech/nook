@@ -347,6 +347,12 @@ pub struct PendingEdit {
     /// page under the tab can be sorted, filtered or paged between the two, and re-reading the row by
     /// index would key the statement to whichever record moved into that row. Keeping values rather
     /// than names is what lets a key column renamed in the meantime still resolve.
+    ///
+    /// The pairing is positional, so a key *set* replaced by another one of the same arity between the
+    /// edit and the apply would pair an old value with a new name. Carrying the names instead would
+    /// refuse the renamed key column above, which is the common case; SQLite cannot replace a key at
+    /// all, and on MySQL and Postgres it takes a deliberate pair of statements while the tab is open,
+    /// so the tradeoff is the one worth making.
     pub key: Vec<Value>,
     /// The statement this edit planned to. The grid shows it; the apply re-plans it.
     pub sql: String,
