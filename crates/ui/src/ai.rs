@@ -78,9 +78,7 @@ fn collect_ai_context(session: &Session, form: &AiForm) -> Result<AiContext, Str
     // comes from the tab, else the active connection, else SQLite.
     let conn_index = session
         .active_conn
-        .filter(|&i| {
-            session.conns.get(i).is_some_and(|c| c.driver.is_some())
-        });
+        .filter(|&i| session.conns.get(i).is_some_and(|c| c.driver.is_some()));
     let dialect = conn_index
         .and_then(|i| session.conns.get(i))
         .and_then(|c| c.driver.as_ref())
@@ -159,8 +157,13 @@ fn run_ai_worker(context: AiContext) -> AiOutcome {
     };
     let system = nook_ai::system_prompt(context.dialect, &context.table_contexts);
     let client = nook_ai::CurlChat;
-    let answer = match nook_ai::Chat::chat(&client, &cfg, context.key.as_deref(), &system, &context.prompt)
-    {
+    let answer = match nook_ai::Chat::chat(
+        &client,
+        &cfg,
+        context.key.as_deref(),
+        &system,
+        &context.prompt,
+    ) {
         Ok(answer) => answer,
         Err(e) => return Err(e.to_string()),
     };
@@ -208,7 +211,6 @@ pub fn drain_ai_outcome(session: &mut Session, state: &mut crate::app::UiState) 
         }
     }
 }
-
 
 /// The prompt field's height: three 20px rows and its own padding.
 const PROMPT_H: f32 = 74.0;
@@ -283,7 +285,14 @@ pub fn band(
                         rule(ui, tokens);
                         steps(ui, tokens, &mut form);
                         rule(ui, tokens);
-                        foot(ui, tokens, &form, generating, &mut generate_clicked, &mut close);
+                        foot(
+                            ui,
+                            tokens,
+                            &form,
+                            generating,
+                            &mut generate_clicked,
+                            &mut close,
+                        );
                     });
                 });
         });
@@ -367,7 +376,8 @@ pub fn band(
                         form.effective_model()
                     ),
                 );
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
             }
             Err(e) => {
                 session.log(nook_engine::Level::Error, format!("ai.generate: {e}"));
@@ -407,7 +417,8 @@ fn head(ui: &mut egui::Ui, tokens: &Tokens, form: &AiForm, close: &mut bool) {
     let close_w = design::toolbar_button_width(ui, tokens, "Close", None);
     let title_w = design::text_width(ui, tokens.font(design::T_XL), title);
     let subtitle_w = design::measured_width(ui, tokens, &subtitle);
-    let subtitle_fits = avail >= title_w + f32::from(design::S5) + subtitle_w + f32::from(design::S5) + close_w;
+    let subtitle_fits =
+        avail >= title_w + f32::from(design::S5) + subtitle_w + f32::from(design::S5) + close_w;
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = f32::from(design::S5);
@@ -486,9 +497,13 @@ fn mentions(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
             );
             if form.mentions.is_empty() {
                 ui.label(
-                    RichText::new(if live { "no table matches" } else { "no connection open" })
-                        .font(tokens.mono(design::T_XS))
-                        .color(tokens.text_faint),
+                    RichText::new(if live {
+                        "no table matches"
+                    } else {
+                        "no connection open"
+                    })
+                    .font(tokens.mono(design::T_XS))
+                    .color(tokens.text_faint),
                 );
                 return;
             }
@@ -552,33 +567,41 @@ fn steps(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
     // the step overflowing the band's own edge, which drags the footer's buttons with it.
     let fit = (room - STEP_LABEL_W - f32::from(design::S5)).max(0.0);
     let column = |wanted: f32| wanted.min(fit).max(fit.min(COL_MIN_W));
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = f32::from(design::S6);
-        ui.spacing_mut().item_spacing.y = f32::from(design::S5);
-        step(ui, tokens, "01", "Provider", column(PROVIDER_W), |ui| {
-            provider_control(ui, tokens, form, column(PROVIDER_W));
-        });
-        let base_w = column(BASE_URL_W);
-        step(ui, tokens, "02", "Base URL", base_w, |ui| {
-            base_url_control(ui, tokens, form, base_w);
-        });
-        let key_w = column(KEY_W);
-        step(ui, tokens, "03", "API key", key_w, |ui| {
-            if form.provider.needs_key() {
-                key_control(ui, tokens, form, key_w);
-            } else {
-                ui.label(
-                    RichText::new("not needed")
-                        .font(tokens.mono(design::T_XS))
-                        .color(tokens.text_faint),
-                );
-            }
-        });
-        let model_w = column(MODEL_W);
-        step(ui, tokens, "04", "Model", model_w, |ui| {
-            model_control(ui, tokens, form, model_w);
-        });
-    });
+    // Top-aligned (`Align::Min`): `horizontal_wrapped`'s own cross align is Center, which centers a
+    // short step against a tall neighbour — provider, a combo alone, against base URL, an input with a
+    // caption under it — and the numbered labels stop sharing a top edge. Steps are as tall as their
+    // caption needs, so Min puts every label and every control on the same baseline instead.
+    ui.allocate_ui_with_layout(
+        ui.available_size_before_wrap(),
+        egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = f32::from(design::S6);
+            ui.spacing_mut().item_spacing.y = f32::from(design::S5);
+            step(ui, tokens, "01", "Provider", column(PROVIDER_W), |ui| {
+                provider_control(ui, tokens, form, column(PROVIDER_W));
+            });
+            let base_w = column(BASE_URL_W);
+            step(ui, tokens, "02", "Base URL", base_w, |ui| {
+                base_url_control(ui, tokens, form, base_w);
+            });
+            let key_w = column(KEY_W);
+            step(ui, tokens, "03", "API key", key_w, |ui| {
+                if form.provider.needs_key() {
+                    key_control(ui, tokens, form, key_w);
+                } else {
+                    ui.label(
+                        RichText::new("not needed")
+                            .font(tokens.mono(design::T_XS))
+                            .color(tokens.text_faint),
+                    );
+                }
+            });
+            let model_w = column(MODEL_W);
+            step(ui, tokens, "04", "Model", model_w, |ui| {
+                model_control(ui, tokens, form, model_w);
+            });
+        },
+    );
 }
 
 /// The model: a dropdown of the provider's own list, with a free-text field only where the provider
@@ -623,6 +646,7 @@ fn model_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width: f
     // would widen the column past the pane — the text elides in the button instead.
     egui::ComboBox::from_id_salt("ai-model")
         .width(width)
+        .height(design::INPUT_H)
         .selected_text(RichText::new(form.effective_model()).font(tokens.mono(design::T_XS)))
         .show_ui(ui, |ui| {
             for model in models {
@@ -690,10 +714,14 @@ fn step_label(ui: &mut egui::Ui, tokens: &Tokens, number: &str, name: &str) {
 fn provider_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width: f32) {
     egui::ComboBox::from_id_salt("ai-provider")
         .width(width)
+        .height(design::INPUT_H)
         .selected_text(RichText::new(form.provider.label()).font(tokens.mono(design::T_XS)))
         .show_ui(ui, |ui| {
             for provider in Provider::ALL.iter().copied() {
-                if ui.selectable_label(provider == form.provider, provider.label()).clicked() {
+                if ui
+                    .selectable_label(provider == form.provider, provider.label())
+                    .clicked()
+                {
                     choose_provider(form, provider);
                 }
             }
@@ -989,7 +1017,10 @@ mod mention_tests {
 
     #[test]
     fn a_partial_table_name_is_the_filter() {
-        assert_eq!(active_mention_query("summarise @bangu"), Some("bangu".to_string()));
+        assert_eq!(
+            active_mention_query("summarise @bangu"),
+            Some("bangu".to_string())
+        );
     }
 
     #[test]
@@ -1002,7 +1033,10 @@ mod mention_tests {
 
     #[test]
     fn the_schema_dot_counts_as_identifier() {
-        assert_eq!(active_mention_query("join @public."), Some("public.".to_string()));
+        assert_eq!(
+            active_mention_query("join @public."),
+            Some("public.".to_string())
+        );
     }
 
     #[test]
@@ -1030,7 +1064,10 @@ mod mention_tests {
     #[test]
     fn a_mention_after_punctuation_is_live() {
         // A gate that demanded whitespace would kill this, the commonest shape in prose.
-        assert_eq!(active_mention_query("(from @users"), Some("users".to_string()));
+        assert_eq!(
+            active_mention_query("(from @users"),
+            Some("users".to_string())
+        );
         assert_eq!(
             active_mention_query("join @orders,"),
             None,
@@ -1053,7 +1090,10 @@ mod mention_tests {
     fn a_click_replaces_when_a_mention_is_live_and_appends_when_not() {
         let mut live = "summarise @bangu".to_string();
         apply_mention(&mut live, "public.bangunan");
-        assert_eq!(live, "summarise @public.bangunan ", "live token is replaced");
+        assert_eq!(
+            live, "summarise @public.bangunan ",
+            "live token is replaced"
+        );
 
         let mut fallback = "summarise the bangunan rows".to_string();
         apply_mention(&mut fallback, "public.bangunan");
@@ -1064,7 +1104,10 @@ mod mention_tests {
 
         let mut empty = String::new();
         apply_mention(&mut empty, "public.bangunan");
-        assert_eq!(empty, "@public.bangunan ", "an empty prompt takes the mention bare");
+        assert_eq!(
+            empty, "@public.bangunan ",
+            "an empty prompt takes the mention bare"
+        );
     }
 }
 
@@ -1252,6 +1295,124 @@ pub fn preferences(
 mod tests {
     use super::*;
 
+    /// Every step's numbered label and its control from one frame of the band, with the pane they were
+    /// painted in.
+    type Painted = (Vec<(String, egui::Rect)>, egui::Rect);
+
+    /// The AI band in a pane, one frame: a session holding `users`, the band open, the tokens.
+    ///
+    /// `name` keeps the test's config directory its own, the same reason the grid tests tag their
+    /// database: `seed` and the dirty-flush write the session's settings, and parallel tests would
+    /// race on one shared `NOOK_CONFIG_DIR`.
+    fn band_pane(name: &str, size: egui::Vec2) -> Painted {
+        let dir = std::env::temp_dir().join(format!("nook-ai-band-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch config dir");
+        std::env::set_var("NOOK_CONFIG_DIR", &dir);
+        let mut session = Session::new();
+        session
+            .conns
+            .push(nook_engine::Conn::new(nook_core::ConnectionConfig::sqlite(
+                ":memory:",
+            )));
+        session.active_conn = Some(0);
+        nook_engine::cmd::open_now(&mut session, 0).expect("the in-memory database opens");
+        nook_engine::cmd::run_sql(
+            &mut session,
+            0,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL);",
+            Some(10),
+        )
+        .expect("the fixture schema is valid");
+        nook_engine::cmd::refresh_catalog(&mut session, 0).expect("the catalog refreshes");
+        let mut state = crate::app::UiState::default();
+        state.ai_band = true;
+        let tokens = Tokens::of("dark");
+        let ctx = egui::Context::default();
+        tokens.apply(&ctx);
+        let pane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size);
+        let input = egui::RawInput {
+            screen_rect: Some(pane),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default_margins()
+                .frame(egui::Frame::new().fill(tokens.panel))
+                .show(ui, |ui| {
+                    band(ui, &mut session, &mut state, &tokens);
+                });
+        });
+        out.textures_delta.clear();
+        (painted_step_text(&out.shapes), pane)
+    }
+
+    /// Every text run painted whole under its clip rect, with that rect: a label the band clipped away
+    /// is not evidence that the label is on screen. The same filter the grid tests give their texts.
+    fn painted_step_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, clip: egui::Rect, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    let rect = text.visual_bounding_rect();
+                    if rect.top() >= clip.top() - 0.5 && rect.bottom() <= clip.bottom() + 0.5 {
+                        out.push((text.galley.text().to_owned(), rect));
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, clip, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        texts
+    }
+
+    /// The band's four numbered steps must share a top edge: the wrap's own cross align is Center,
+    /// which centers provider — a combo alone — against base URL — an input with a caption under it —
+    /// and the numbered labels stop lining up, which is exactly the mess the screenshot showed.
+    ///
+    /// The pane is the width one row needs (four steps at label + gap + control, plus the band's own
+    /// margins), so every step is on the one row and the top edge is a single number. A narrower pane
+    /// wraps a step to the next row, which is correct on its own terms — the wrap is there so the row
+    /// can break — and out of this assertion's reach.
+    #[test]
+    fn the_numbered_steps_share_a_top_edge() {
+        let (texts, pane) = band_pane("tops", egui::vec2(1440.0, 600.0));
+        let tops = |needle: &str| {
+            texts
+                .iter()
+                .find(|(text, _)| text == needle)
+                .map(|(_, rect)| rect.top())
+                .unwrap_or_else(|| panic!("{needle} was not painted on the pane"))
+        };
+        for number in ["01", "02", "03", "04"] {
+            let top = tops(number);
+            assert!(
+                (top - tops("01")).abs() < 0.5,
+                "{number} sits at {top}, not at {} where 01 sits",
+                tops("01")
+            );
+        }
+        // And the controls themselves are top-aligned with their own labels: the provider combo's box
+        // starts where its `01` does, on a pane that gives the row its full width.
+        for label in ["PROVIDER", "BASE URL", "API KEY", "MODEL"] {
+            let rect = texts
+                .iter()
+                .find(|(text, _)| *text == label)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("{label} was not painted"));
+            assert!(
+                pane.contains_rect(rect),
+                "{label} at {rect:?} is off the pane"
+            );
+        }
+    }
+
     /// The whole async flow: spawn a real worker against a fake curl that answers after ~200 ms,
     /// poll with [`drain_ai_outcome`] while it is still in flight (the receiver must survive the
     /// empty polls), and verify the tab opens with the draft when the result lands.
@@ -1284,7 +1445,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions("/tmp/nook-test-fake-curl", std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+            std::fs::set_permissions(
+                "/tmp/nook-test-fake-curl",
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("chmod stub");
         }
 
         let mut session = Session::new();
@@ -1309,14 +1474,8 @@ mod tests {
             polls_in_flight >= 1,
             "at least one empty poll must have kept the request alive before it landed"
         );
-        assert!(
-            state.ai_request.is_none(),
-            "the landed request was drained"
-        );
-        assert!(
-            !state.ai_band,
-            "the band closes when the draft lands"
-        );
+        assert!(state.ai_request.is_none(), "the landed request was drained");
+        assert!(!state.ai_band, "the band closes when the draft lands");
         let draft = session
             .tabs
             .last()
