@@ -471,18 +471,28 @@ fn clear_history(session: &mut Session, _p: &Params) -> Result<serde_json::Value
 fn transaction(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let conn = session.resolve_conn(p)?;
     let action = p.str_arg("action")?.to_ascii_lowercase();
-    let driver = session.driver_for(conn)?;
-    match action.as_str() {
-        "begin" | "start" => driver.begin()?,
-        "commit" => driver.commit()?,
-        "rollback" => driver.rollback()?,
-        other => {
-            return Err(Error::config(format!(
-                "unknown transaction action '{other}'; try begin, commit or rollback"
-            )))
+    let open = {
+        let driver = session.driver_for(conn)?;
+        match action.as_str() {
+            "begin" | "start" => driver.begin()?,
+            "commit" => driver.commit()?,
+            "rollback" => driver.rollback()?,
+            other => {
+                return Err(Error::config(format!(
+                    "unknown transaction action '{other}'; try begin, commit or rollback"
+                )))
+            }
         }
+        driver.in_transaction()
+    };
+    // A transaction typed in the editor ends here, and the catalog is read again: the statements that
+    // ran inside it already refreshed it, and a rollback has just undone the DDL they saw — the tree,
+    // the inspector and the next grid edit would otherwise describe a column the database does not
+    // have. A commit is refreshed too, because MySQL commits DDL implicitly and a `rollback` there is
+    // not a promise that nothing changed. `begin` changes no shape.
+    if action != "begin" && action != "start" {
+        let _ = super::refresh_catalog(session, conn);
     }
-    let open = driver.in_transaction();
     Ok(json!({ "action": action, "in_transaction": open }))
 }
 
@@ -504,6 +514,10 @@ fn run_in_transaction(session: &mut Session, p: &Params) -> Result<serde_json::V
             }
             Err(e) => {
                 let _ = session.driver_for(conn).and_then(|d| d.rollback());
+                // The rollback undid the statements that ran, and the DDL among them may already have
+                // been read into the catalog — or, on MySQL, committed for real. Reading the schema
+                // again is the only answer that matches the database in both cases.
+                let _ = super::refresh_catalog(session, conn);
                 session.log(
                     Level::Error,
                     format!(
@@ -517,9 +531,9 @@ fn run_in_transaction(session: &mut Session, p: &Params) -> Result<serde_json::V
         }
     }
     session.driver_for(conn)?.commit()?;
-    // Committed, so the shape readers have to see is the one this transaction just made. Nothing is
-    // read mid-transaction on purpose: a rollback (the early return above) leaves the catalog holding
-    // the shape from before the transaction, which is what the database then has.
+    // Committed, so the shape readers have to see is the one this transaction just made. Nothing here
+    // is read mid-transaction: a rollback is the early return above, which reads the schema back
+    // itself, and a statement that changed the shape but failed is not in this list.
     for statement in &statements {
         refresh_if_the_shape_changed(session, conn, statement);
     }
@@ -1047,6 +1061,64 @@ mod tests {
             .and_then(|catalog| catalog.find_table(None, table))
             .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    /// A rollback in the editor undoes the DDL that the run path already refreshed the catalog for.
+    /// The catalog then describes a column the database no longer has, and the next grid edit, the
+    /// tree and the inspector all read it: `row 0 has no value for key memo` is that stale shape.
+    #[test]
+    fn a_rollback_in_the_editor_puts_the_catalog_back() {
+        let (_guard, mut session, _tab) = live_session();
+        session
+            .run(
+                "sql.run",
+                json!({"sql": "create table t (id integer primary key, note text)"}),
+            )
+            .expect("create");
+        session
+            .run("sql.transaction", json!({"action": "begin"}))
+            .expect("begin");
+        session
+            .run(
+                "sql.run",
+                json!({"sql": "alter table t rename column note to memo"}),
+            )
+            .expect("rename");
+
+        session
+            .run("sql.transaction", json!({"action": "rollback"}))
+            .expect("rollback");
+
+        assert_eq!(
+            catalog_columns(&session, "local", "t"),
+            vec!["id".to_string(), "note".to_string()],
+            "the rollback put the database back and the catalog has to follow it"
+        );
+    }
+
+    /// The atomic run's own rollback: the statements before the failing one are undone, so the shape
+    /// the readers see must be the one the database has, not the one the transaction attempted.
+    #[test]
+    fn a_failed_atomic_run_leaves_the_catalog_on_the_shape_the_database_kept() {
+        let (_guard, mut session, _tab) = live_session();
+        session
+            .run(
+                "sql.run",
+                json!({"sql": "create table t (id integer primary key, note text)"}),
+            )
+            .expect("create");
+
+        let failed = session.run(
+            "sql.runInTransaction",
+            json!({"sql": "alter table t rename column note to memo; select * from nope;"}),
+        );
+        assert!(failed.is_err(), "the second statement cannot run");
+
+        assert_eq!(
+            catalog_columns(&session, "local", "t"),
+            vec!["id".to_string(), "note".to_string()],
+            "the transaction was rolled back, so the catalog must not keep its shape"
+        );
     }
 
     #[test]
