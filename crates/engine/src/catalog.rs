@@ -244,12 +244,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "typed value, display string and type",
     ),
     ("Data", "grid.copyAsSql", "Copy as INSERT", ""),
-    (
-        "Data",
-        "grid.formView",
-        "Form view",
-        "",
-    ),
+    ("Data", "grid.formView", "Form view", ""),
     (
         "Data",
         "grid.blobEditor",
