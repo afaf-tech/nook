@@ -141,6 +141,7 @@ fn table_from_params(
     let index = session.resolve_conn(p)?;
     let spec = p
         .str_opt("table")
+        .filter(|spec| !spec.trim().is_empty())
         .ok_or_else(|| Error::config("pass \"table\""))?;
     let reference = TableRef::parse(&spec);
     let table = session.table_of(index, reference.schema.as_deref(), &reference.table)?;

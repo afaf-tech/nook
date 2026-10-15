@@ -80,6 +80,27 @@ pub(crate) fn list(
     table::show(ui, tokens, &view, state, spec.id)
 }
 
+/// The table the design tab draws: the catalog's copy, not the tab's. The tab's copy is taken when
+/// the tab opens, so after an edit — add column, rename column — it would keep drawing the table the
+/// user just changed, and the next edit would run against what they no longer see on screen.
+fn design_table(session: &Session, tab_index: usize) -> Option<nook_model::Table> {
+    let live = session.tabs.get(tab_index).and_then(|tab| {
+        let reference = tab.grid.table.as_ref()?;
+        session
+            .conns
+            .get(tab.conn?)
+            .and_then(|c| c.catalog.as_ref())
+            .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
+            .cloned()
+    });
+    live.or_else(|| {
+        session
+            .tabs
+            .get(tab_index)
+            .and_then(|tab| tab.table.clone())
+    })
+}
+
 /// Object design: columns, indexes, foreign keys and the DDL, with the designer buttons.
 pub fn design(
     ui: &mut egui::Ui,
@@ -88,7 +109,7 @@ pub fn design(
     state: &mut UiState,
     tokens: &Tokens,
 ) {
-    let Some(table_snapshot) = session.tabs[tab_index].table.clone() else {
+    let Some(table_def) = design_table(session, tab_index) else {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| {
             ui.label(
@@ -99,9 +120,22 @@ pub fn design(
         });
         return;
     };
-    let table_def = table_snapshot;
     let mut show_ddl = false;
     let mut er_diagram = false;
+    // What the designer commands act on, handed over as data: the string form `open_command` takes is
+    // `&`-delimited, and both a table named `R&D` and SQLite's file path as the connection id would
+    // be cut in half by it. The buttons used to send no table at all, so every one of them opened a
+    // dialog whose only possible Run failed with "no such table: ".
+    let mut prefill: Vec<(&str, &str)> = Vec::new();
+    if let Some(conn) = session.tabs[tab_index]
+        .conn
+        .and_then(|index| session.conns.get(index))
+        .map(|c| c.cfg.id.as_str())
+    {
+        prefill.push(("conn", conn));
+    }
+    let table_key = table_def.key();
+    prefill.push(("table", &table_key));
 
     let toolbar = design::band(ui, tokens, |ui| {
         ui.set_min_height(design::TOOLBAR_H);
@@ -132,13 +166,13 @@ pub fn design(
                 }
                 design::divider(ui, tokens);
                 if design::ghost_button(ui, tokens, "+ Foreign key", true).clicked() {
-                    state.open_command("schema.addForeignKey&table=".to_string());
+                    state.open_command_with("schema.addForeignKey", &prefill);
                 }
                 if design::ghost_button(ui, tokens, "+ Index", true).clicked() {
-                    state.open_command("schema.createIndex&table=".to_string());
+                    state.open_command_with("schema.createIndex", &prefill);
                 }
                 if design::primary_button(ui, tokens, "+ Column", true).clicked() {
-                    state.open_command("schema.addColumn&table=".to_string());
+                    state.open_command_with("schema.addColumn", &prefill);
                 }
             });
         });
@@ -2036,4 +2070,54 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
             });
             ui.add_space(20.0);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_design_tab_draws_the_table_the_edit_left_behind() {
+        let mut session = crate::demo_session();
+        let tab = session.add_tab(TabKind::Design, "main.customers", Some(0));
+        let reference = nook_engine::TableRef {
+            schema: None,
+            table: "customers".into(),
+        };
+        session.tabs[tab].grid.table = Some(reference.clone());
+        session.tabs[tab].table = Some(
+            session
+                .table_of(0, None, "customers")
+                .expect("the demo session has customers"),
+        );
+
+        session
+            .run(
+                "schema.addColumn",
+                serde_json::json!({
+                    "conn": session.conns[0].cfg.id.clone(),
+                    "table": "customers",
+                    "name": "loyalty_tier",
+                    "type": "TEXT",
+                }),
+            )
+            .expect("the column is added");
+
+        let names = |table: &nook_model::Table| {
+            table
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>()
+        };
+        let drawn = design_table(&session, tab).expect("the tab still names a table");
+        assert!(
+            names(&drawn).contains(&"loyalty_tier".to_string()),
+            "the tab must draw the edited definition, drew {:?}",
+            names(&drawn)
+        );
+        // The tab's own copy is the stale one this fix steps over.
+        let stale = session.tabs[tab].table.clone().expect("a snapshot");
+        assert!(!names(&stale).contains(&"loyalty_tier".to_string()));
+    }
 }

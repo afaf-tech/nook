@@ -585,11 +585,39 @@ impl UiState {
     }
 
     /// `id` for a plain command; `id&key=value` prefills those keys.
+    ///
+    /// The string form is meant for a caller that writes the id out by hand. A caller that already
+    /// holds the values — a table named `R&D`, SQLite's file path as the connection id — must use
+    /// [`UiState::open_command_with`]: `&` and `=` are the delimiters here.
     pub fn open_command(&mut self, spec: String) {
         let (id, prefill) = match spec.split_once('&') {
             Some((id, rest)) => (id.to_string(), rest.to_string()),
             None => (spec, String::new()),
         };
+        let pairs: Vec<(String, String)> = prefill
+            .split('&')
+            .filter_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                // An empty value is not a preference, it is a missing one: `table=` used to overwrite
+                // the command's own example with nothing, so the dialog opened prefilled with a
+                // parameter that could only fail.
+                (!key.is_empty() && !value.is_empty()).then(|| (key.to_string(), value.to_string()))
+            })
+            .collect();
+        self.open_command_prefilled(&id, &pairs);
+    }
+
+    /// [`UiState::open_command`] for a caller that has the parameters as data rather than as text.
+    pub fn open_command_with(&mut self, id: &str, prefill: &[(&str, &str)]) {
+        let pairs: Vec<(String, String)> = prefill
+            .iter()
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        self.open_command_prefilled(id, &pairs);
+    }
+
+    fn open_command_prefilled(&mut self, id: &str, prefill: &[(String, String)]) {
         // Preferences is a form, not a JSON runner: the top bar has no Settings button any more
         // (the design does not), so its one entry in the File menu opens the dialog.
         if id == "app.settings" {
@@ -598,19 +626,15 @@ impl UiState {
             self.ai_providers = None;
             return;
         }
-        self.command_id = id.clone();
-        let base = nook_engine::find(&id)
+        self.command_id = id.to_string();
+        let base = nook_engine::find(id)
             .map(|s| s.params.to_string())
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| "{}".into());
         let mut params: serde_json::Map<String, Value> =
             serde_json::from_str(&base).unwrap_or_default();
-        for pair in prefill.split('&') {
-            if let Some((key, value)) = pair.split_once('=') {
-                if !key.is_empty() {
-                    params.insert(key.to_string(), Value::String(value.to_string()));
-                }
-            }
+        for (key, value) in prefill {
+            params.insert(key.clone(), Value::String(value.clone()));
         }
         self.command_params =
             serde_json::to_string_pretty(&Value::Object(params)).unwrap_or_else(|_| "{}".into());
@@ -2708,6 +2732,46 @@ fn save_png(path: &str, image: &egui::ColorImage) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_design_dialog_gets_the_table_it_was_opened_for() {
+        // The buttons used to be sent as `…&table=` with nothing after it, which filled the dialog's
+        // parameters with an empty table and made each button's Run fail.
+        let mut state = UiState::default();
+        state.open_command_with(
+            "schema.addColumn",
+            &[("conn", "conn-1"), ("table", "public.users")],
+        );
+        assert_eq!(state.command_id, "schema.addColumn");
+        let params: serde_json::Value =
+            serde_json::from_str(&state.command_params).expect("the dialog holds JSON");
+        assert_eq!(params["conn"], "conn-1");
+        assert_eq!(params["table"], "public.users");
+        assert!(
+            state.command_open,
+            "the dialog has to be the thing that opened"
+        );
+    }
+
+    #[test]
+    fn a_table_or_a_path_holding_a_delimiter_survives_the_dialog() {
+        // SQLite's connection id is the database path, and both a path and a table name may hold `&`
+        // or `=`. Handing those through the `id&key=value` string would cut them in half — exactly
+        // the failure the designer buttons used to have.
+        let mut state = UiState::default();
+        state.open_command_with(
+            "schema.addColumn",
+            &[("conn", "/Users/ann/R&D=1/app.db"), ("table", "R&D")],
+        );
+        let params: serde_json::Value =
+            serde_json::from_str(&state.command_params).expect("the dialog holds JSON");
+        assert_eq!(params["conn"], "/Users/ann/R&D=1/app.db");
+        assert_eq!(params["table"], "R&D");
+        assert!(
+            params.get("1/app.db").is_none(),
+            "nothing may leak in as a key: {params}"
+        );
+    }
 
     #[test]
     fn the_workspace_popup_offers_ids_not_positions() {
