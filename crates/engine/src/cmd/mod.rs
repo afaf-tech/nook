@@ -402,12 +402,18 @@ pub fn row_of_key(
     if key.is_empty() || primary_key.len() != key.len() {
         return None;
     }
+    // The columns are resolved once, not through `value_at` per row: the table's dirty-cell highlight
+    // runs this per pending edit on every frame, against a page the picker allows up to 5000 rows.
+    let indices: Option<Vec<usize>> = primary_key
+        .iter()
+        .map(|name| result.columns.iter().position(|column| column == name))
+        .collect();
+    let indices = indices?;
     (0..result.rows.len()).find(|row| {
-        primary_key.iter().zip(key).all(|(name, expected)| {
-            result
-                .value_at(*row, name)
-                .is_some_and(|value| value == expected)
-        })
+        indices
+            .iter()
+            .zip(key)
+            .all(|(index, expected)| result.rows[*row].get(*index) == Some(expected))
     })
 }
 
