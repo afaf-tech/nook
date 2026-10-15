@@ -484,7 +484,7 @@ pub fn show(
 
     // Form view: the selected record as a vertical form, under the table it belongs to.
     if let Some(record) = &form {
-        if let Some(edit) = form_band(ui, tokens, record, tab_index, state) {
+        if let Some(edit) = form_band(ui, tokens, record, tab_index, state, form_h) {
             command = Some(edit);
         }
     }
@@ -745,6 +745,7 @@ fn form_band(
     record: &Result<serde_json::Value, String>,
     tab_index: usize,
     state: &mut UiState,
+    reserved: f32,
 ) -> Option<(&'static str, serde_json::Value)> {
     let mut command = None;
     let out = match record {
@@ -775,9 +776,13 @@ fn form_band(
         }
     });
     if let Some(fields) = out["fields"].as_array() {
+        // The band holds the height the pane reserved for it, not whatever is left over: the hint and
+        // the pending drawer are painted after it, and a band that grew to the pane's end would push
+        // their buttons out of reach. The rest of the fields scroll.
         egui::ScrollArea::vertical()
             .id_salt(("form_scroll", tab_index))
             .auto_shrink([false, false])
+            .max_height((reserved - FORM_HEAD_H).max(FORM_ROW_H))
             .show(ui, |ui| {
                 for f in fields {
                     let name = f["name"].as_str().unwrap_or_default().to_owned();
@@ -1271,14 +1276,18 @@ mod tests {
         egui::Rect,
     );
 
-    /// Two frames of the grid with the form open, in the pane the app's own window leaves. Two, because
-    /// egui carries a grid's column widths into the next frame: a form whose columns move between the
-    /// frame the form opens on and the one after it is exactly what the user sees as unaligned.
+    /// Two frames of the grid with the form open, in the pane the app's own window leaves — the window
+    /// less the app bar, the tab strip and the status bar, which is what `app::show` hands the pane.
+    /// Two frames, because egui carries a grid's column widths into the next frame: a form whose
+    /// columns move between the frame the form opens on and the one after it is exactly what the user
+    /// sees as unaligned.
     fn form_frames(name: &str, size: egui::Vec2, selected: usize, extra: usize) -> Vec<Painted> {
         let (mut session, mut state, tokens, index) = form_pane(name, selected, extra);
         let ctx = egui::Context::default();
         tokens.apply(&ctx);
-        let pane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size);
+        let chrome = design::APP_BAR_H + design::TAB_BAR_H + design::STATUS_H;
+        let pane =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(size.x, size.y - chrome));
         let input = egui::RawInput {
             screen_rect: Some(pane),
             ..Default::default()
@@ -1300,6 +1309,40 @@ mod tests {
             ));
         }
         frames
+    }
+
+    /// The band's reservation: a header, a row per field and one spare so the last row is not the
+    /// pane's edge — floored so a one-field record still shows a form, and capped at half the pane so
+    /// a wide record cannot leave the table it belongs to a strip. The band's inner scroll area is
+    /// bounded by this same number, so what it does not use stays with the bands painted after it.
+    #[test]
+    fn the_form_band_reserves_a_floor_and_a_ceiling() {
+        let record = |fields: usize| {
+            let fields: Vec<serde_json::Value> = (0..fields)
+                .map(|i| serde_json::json!({"name": format!("c{i}")}))
+                .collect();
+            Ok(serde_json::json!({ "fields": fields }))
+        };
+        assert_eq!(
+            form_height(&record(4), 900.0),
+            FORM_HEAD_H + 5.0 * FORM_ROW_H,
+            "four fields and the header, plus a row to show there is more"
+        );
+        assert_eq!(
+            form_height(&record(40), 600.0),
+            300.0,
+            "half the pane is the ceiling, however wide the record"
+        );
+        assert_eq!(
+            form_height(&record(1), 200.0),
+            FORM_MIN_H,
+            "a floor, so a narrow record and a short pane still read as a form"
+        );
+        assert_eq!(
+            form_height(&Err("the row is gone".to_owned()), 900.0),
+            FORM_MIN_H,
+            "an error band is a band too"
+        );
     }
 
     /// The form band: the table's own height is cut by the band's before the table is laid out, so a
@@ -1476,8 +1519,9 @@ mod tests {
                 "the band shows all {FIELDS} fields, so the table lost its share of the pane"
             ));
         }
-        // The table keeps its own row above the band.
-        if !texts.iter().any(|(text, _)| text == "d@e.f") {
+        // The table keeps its own row above the band. `a@b.c` is the record the form does *not* show,
+        // so only the table can paint it.
+        if !texts.iter().any(|(text, _)| text == "a@b.c") {
             return Err("the table painted no row above the wide form".to_owned());
         }
         Ok(())

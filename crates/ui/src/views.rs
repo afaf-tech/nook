@@ -84,21 +84,22 @@ pub(crate) fn list(
 /// the tab opens, so after an edit — add column, rename column — it would keep drawing the table the
 /// user just changed, and the next edit would run against what they no longer see on screen.
 fn design_table(session: &Session, tab_index: usize) -> Option<nook_model::Table> {
-    let live = session.tabs.get(tab_index).and_then(|tab| {
-        let reference = tab.grid.table.as_ref()?;
-        session
-            .conns
-            .get(tab.conn?)
-            .and_then(|c| c.catalog.as_ref())
-            .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
-            .cloned()
-    });
-    live.or_else(|| {
-        session
-            .tabs
-            .get(tab_index)
-            .and_then(|tab| tab.table.clone())
-    })
+    let tab = session.tabs.get(tab_index)?;
+    let reference = tab.grid.table.as_ref()?;
+    let catalog = session
+        .conns
+        .get(tab.conn?)
+        .and_then(|c| c.catalog.as_ref());
+    match catalog {
+        // The catalog is the truth when the connection has one: a table it does not hold has been
+        // renamed or dropped away from this tab, and drawing the tab's open-time copy would hand the
+        // designer buttons a name that no longer exists, to fail with `no such table`.
+        Some(catalog) => catalog
+            .find_table(reference.schema.as_deref(), &reference.table)
+            .cloned(),
+        // No catalog read yet — the connection is not open — so the snapshot is all there is.
+        None => tab.table.clone(),
+    }
 }
 
 /// Object design: columns, indexes, foreign keys and the DDL, with the designer buttons.
@@ -2119,5 +2120,59 @@ mod tests {
         // The tab's own copy is the stale one this fix steps over.
         let stale = session.tabs[tab].table.clone().expect("a snapshot");
         assert!(!names(&stale).contains(&"loyalty_tier".to_string()));
+    }
+
+    /// A connection of this test's own, holding `users`: the demo session's database is one file at
+    /// one path that every test in this crate shares, and this one renames a table.
+    fn session_with_users(name: &str) -> (nook_engine::Session, usize) {
+        let path =
+            std::env::temp_dir().join(format!("nook-views-{}-{name}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut session = nook_engine::Session::new();
+        session
+            .conns
+            .push(nook_engine::Conn::new(nook_core::ConnectionConfig::sqlite(
+                path.to_string_lossy(),
+            )));
+        session.active_conn = Some(0);
+        nook_engine::cmd::open_now(&mut session, 0).expect("the fixture database opens");
+        nook_engine::cmd::run_sql(
+            &mut session,
+            0,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);",
+            Some(10),
+        )
+        .expect("the fixture schema is valid");
+        nook_engine::cmd::refresh_catalog(&mut session, 0).expect("the catalog refreshes");
+        let tab = session.add_tab(TabKind::Design, "main.users", Some(0));
+        session.tabs[tab].grid.table = Some(nook_engine::TableRef {
+            schema: None,
+            table: "users".into(),
+        });
+        session.tabs[tab].table = Some(
+            session
+                .table_of(0, None, "users")
+                .expect("the table is in the catalog"),
+        );
+        (session, tab)
+    }
+
+    /// A table renamed away from the tab is gone from the catalog, and the tab's open-time copy is
+    /// then the wrong answer: drawing it keeps the old columns on screen and hands the designer
+    /// buttons `users`, which no longer exists, so their Run can only fail with `no such table`.
+    #[test]
+    fn the_design_tab_draws_nothing_for_a_table_that_is_gone() {
+        let (mut session, tab) = session_with_users("gone");
+        session
+            .run(
+                "sql.run",
+                serde_json::json!({"sql": "ALTER TABLE users RENAME TO people"}),
+            )
+            .expect("the table is renamed away");
+
+        assert!(
+            design_table(&session, tab).is_none(),
+            "the tab must not keep drawing a table the catalog no longer holds"
+        );
     }
 }
