@@ -195,3 +195,26 @@ fn an_empty_table_parameter_names_the_parameter_not_the_server() {
         );
     }
 }
+
+#[test]
+fn a_connection_whose_id_holds_a_delimiter_still_edits() {
+    // A SQLite connection's id is the database path, so it holds whatever the path holds. The
+    // designer commands reach it as a parameter, and this is the value that a `&`/`=`-delimited
+    // hand-off would have cut in half (`no such connection named '/Users/ann/R'`).
+    let mut f = Fixture::new("R&D=1");
+    assert!(
+        f.conn.contains('&') && f.conn.contains('='),
+        "the fixture has to exercise both delimiters, id was {}",
+        f.conn
+    );
+    f.create_users();
+    f.run(
+        "schema.addColumn",
+        json!({"table": "users", "name": "note", "type": "TEXT"}),
+    );
+    f.run(
+        "schema.renameColumn",
+        json!({"table": "users", "column": "note", "new_name": "memo"}),
+    );
+    assert!(f.columns("users").contains(&"memo".to_string()));
+}
