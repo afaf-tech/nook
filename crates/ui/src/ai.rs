@@ -646,7 +646,6 @@ fn model_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width: f
     // would widen the column past the pane — the text elides in the button instead.
     egui::ComboBox::from_id_salt("ai-model")
         .width(width)
-        .height(design::INPUT_H)
         .selected_text(RichText::new(form.effective_model()).font(tokens.mono(design::T_XS)))
         .show_ui(ui, |ui| {
             for model in models {
@@ -714,7 +713,6 @@ fn step_label(ui: &mut egui::Ui, tokens: &Tokens, number: &str, name: &str) {
 fn provider_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width: f32) {
     egui::ComboBox::from_id_salt("ai-provider")
         .width(width)
-        .height(design::INPUT_H)
         .selected_text(RichText::new(form.provider.label()).font(tokens.mono(design::T_XS)))
         .show_ui(ui, |ui| {
             for provider in Provider::ALL.iter().copied() {
