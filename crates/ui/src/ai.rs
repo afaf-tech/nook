@@ -550,58 +550,58 @@ fn mentions(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
     );
 }
 
-/// The three numbered columns: provider, base URL, key.
+/// The four numbered fields, as the design's 2x2 table: provider + base URL on the first row, key +
+/// model on the second.
 ///
-/// Wrapped, and one numbered step per child: a pane too narrow for all three puts the last step on a
-/// row of its own. Laid out unwrapped, the third step lands past the band — the vertical scroll area's
-/// clip then hides the key field and widens the band's own content, which drags the footer's
-/// right-aligned buttons off the pane with it.
+/// A fixed grid, not a wrap: the wrap left the second row's steps ragged — the user's own screenshot —
+/// and the four columns at their design widths fit the shell's default band twice over. The grid
+/// absorbs a narrow pane by shrinking every column to the [`COL_MIN_W`] floor and scrolling, the same
+/// answer [`band`]'s own `ScrollArea` gives the band's taller content; laid out unwrapped past the
+/// pane, the scroll area's clip would hide the key field and widen the band's own content, dragging
+/// the footer's right-aligned buttons off with it.
 fn steps(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
     // The design's own widths, or what the pane can actually give a column once the step's label and
     // the gap are paid for. A fixed column would paint past a pane a dragged panel left narrow — the
     // scroll area does not clip horizontally, so the band's content would widen with it and drag the
     // footer's right-aligned buttons off the pane.
     let room = ui.available_width();
-    // What a control column can have once its label and the gap are paid for. [`COL_MIN_W`] is the
-    // floor only while the pane can afford it: a pane narrower than label + gap + floor would leave
-    // the step overflowing the band's own edge, which drags the footer's buttons with it.
-    let fit = (room - STEP_LABEL_W - f32::from(design::S5)).max(0.0);
-    let column = |wanted: f32| wanted.min(fit).max(fit.min(COL_MIN_W));
-    // Top-aligned (`Align::Min`): `horizontal_wrapped`'s own cross align is Center, which centers a
-    // short step against a tall neighbour — provider, a combo alone, against base URL, an input with a
-    // caption under it — and the numbered labels stop sharing a top edge. Steps are as tall as their
-    // caption needs, so Min puts every label and every control on the same baseline instead.
-    ui.allocate_ui_with_layout(
-        ui.available_size_before_wrap(),
-        egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = f32::from(design::S6);
-            ui.spacing_mut().item_spacing.y = f32::from(design::S5);
-            step(ui, tokens, "01", "Provider", column(PROVIDER_W), |ui| {
-                provider_control(ui, tokens, form, column(PROVIDER_W));
-            });
-            let base_w = column(BASE_URL_W);
-            step(ui, tokens, "02", "Base URL", base_w, |ui| {
-                base_url_control(ui, tokens, form, base_w);
-            });
-            let key_w = column(KEY_W);
-            step(ui, tokens, "03", "API key", key_w, |ui| {
-                if form.provider.needs_key() {
-                    key_control(ui, tokens, form, key_w);
-                } else {
-                    ui.label(
-                        RichText::new("not needed")
-                            .font(tokens.mono(design::T_XS))
-                            .color(tokens.text_faint),
-                    );
-                }
-            });
-            let model_w = column(MODEL_W);
-            step(ui, tokens, "04", "Model", model_w, |ui| {
-                model_control(ui, tokens, form, model_w);
-            });
-        },
-    );
+    // The grid's own arithmetic: two rows of label + gap + control, and one gap between the two
+    // columns of a row. What the pane cannot afford is taken off every column equally, to the
+    // [`COL_MIN_W`] floor — below it the grid scrolls, never paints past the band.
+    let columns = 2.0;
+    let gaps = columns - 1.0;
+    let spend = columns * (STEP_LABEL_W + f32::from(design::S5)) + gaps * f32::from(design::S6);
+    let share = ((room - spend) / columns).max(COL_MIN_W);
+    let column = |wanted: f32| wanted.min(share);
+    let grid = egui::Grid::new("ai-steps")
+        .num_columns(2)
+        .spacing([f32::from(design::S6), f32::from(design::S5)]);
+    grid.show(ui, |ui| {
+        let (one, two) = (column(PROVIDER_W), column(BASE_URL_W));
+        step(ui, tokens, "01", "Provider", one, |ui| {
+            provider_control(ui, tokens, form, one);
+        });
+        step(ui, tokens, "02", "Base URL", two, |ui| {
+            base_url_control(ui, tokens, form, two);
+        });
+        ui.end_row();
+        let (three, four) = (column(KEY_W), column(MODEL_W));
+        step(ui, tokens, "03", "API key", three, |ui| {
+            if form.provider.needs_key() {
+                key_control(ui, tokens, form, three);
+            } else {
+                ui.label(
+                    RichText::new("not needed")
+                        .font(tokens.mono(design::T_XS))
+                        .color(tokens.text_faint),
+                );
+            }
+        });
+        step(ui, tokens, "04", "Model", four, |ui| {
+            model_control(ui, tokens, form, four);
+        });
+        ui.end_row();
+    });
 }
 
 /// The model: a dropdown of the provider's own list, with a free-text field only where the provider
@@ -1370,17 +1370,17 @@ mod tests {
         texts
     }
 
-    /// The band's four numbered steps must share a top edge: the wrap's own cross align is Center,
-    /// which centers provider — a combo alone — against base URL — an input with a caption under it —
-    /// and the numbered labels stop lining up, which is exactly the mess the screenshot showed.
+    /// The band's four numbered fields sit as the design's 2x2 table, and every field's number and
+    /// label start at its row's top edge. The grid fixed the wrap's ragged second row — the user's own
+    /// screenshot — so the assertion is now per row: 01/02 at one y, 03/04 at one y, and 02's row
+    /// below 01's by whatever 02's caption needs.
     ///
-    /// The pane is the width one row needs (four steps at label + gap + control, plus the band's own
-    /// margins), so every step is on the one row and the top edge is a single number. A narrower pane
-    /// wraps a step to the next row, which is correct on its own terms — the wrap is there so the row
-    /// can break — and out of this assertion's reach.
+    /// The pane is the shell's own plausible band: the two-column spend at the design widths
+    /// (2*(label + gap) + 236 + 260 + one column gap) plus the band's margins fits with room to
+    /// spare, and a narrower pane shrinks the columns rather than breaking the table.
     #[test]
     fn the_numbered_steps_share_a_top_edge() {
-        let (texts, pane) = band_pane("tops", egui::vec2(1440.0, 600.0));
+        let (texts, pane) = band_pane("tops", egui::vec2(900.0, 600.0));
         let tops = |needle: &str| {
             texts
                 .iter()
@@ -1388,14 +1388,26 @@ mod tests {
                 .map(|(_, rect)| rect.top())
                 .unwrap_or_else(|| panic!("{needle} was not painted on the pane"))
         };
-        for number in ["01", "02", "03", "04"] {
+        let one = tops("01");
+        let three = tops("03");
+        for number in ["01", "02"] {
             let top = tops(number);
             assert!(
-                (top - tops("01")).abs() < 0.5,
-                "{number} sits at {top}, not at {} where 01 sits",
-                tops("01")
+                (top - one).abs() < 0.5,
+                "{number} sits at {top}, not at {one} where 01 sits"
             );
         }
+        for number in ["03", "04"] {
+            let top = tops(number);
+            assert!(
+                (top - three).abs() < 0.5,
+                "{number} sits at {top}, not at {three} where 03 sits"
+            );
+        }
+        assert!(
+            three > one,
+            "the second row sits at {three}, above the first row at {one}"
+        );
         // And the controls themselves are top-aligned with their own labels: the provider combo's box
         // starts where its `01` does, on a pane that gives the row its full width.
         for label in ["PROVIDER", "BASE URL", "API KEY", "MODEL"] {
