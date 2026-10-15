@@ -342,6 +342,12 @@ pub struct PendingEdit {
     /// table as it is when the apply runs, rather than run a statement planned against a table that
     /// has since changed.
     pub insert: Vec<(String, Value)>,
+    /// The primary-key values of the record this edit was made on, read when the edit was made and in
+    /// the key columns' order. The apply pairs them with the key columns the table has *then*: the
+    /// page under the tab can be sorted, filtered or paged between the two, and re-reading the row by
+    /// index would key the statement to whichever record moved into that row. Keeping values rather
+    /// than names is what lets a key column renamed in the meantime still resolve.
+    pub key: Vec<Value>,
     /// The statement this edit planned to. The grid shows it; the apply re-plans it.
     pub sql: String,
 }
@@ -1319,6 +1325,7 @@ mod tests {
             column: String::new(),
             value: Value::Null,
             insert: Vec::new(),
+            key: vec![Value::Int(1)],
             sql: String::new(),
         }
     }

@@ -344,14 +344,17 @@ fn record_edit(
     value: Option<Value>,
     insert_values: Vec<(String, Value)>,
 ) -> Result<serde_json::Value> {
-    let sql = plan_edit(
+    let (sql, key) = plan_edit(
         session,
         tab_index,
-        kind,
-        row,
-        column.as_deref(),
-        value.as_ref(),
-        &insert_values,
+        &EditRequest {
+            kind,
+            row,
+            column: column.as_deref(),
+            value: value.as_ref(),
+            insert: &insert_values,
+            key: None,
+        },
     )?;
     let tab = session
         .tabs
@@ -363,6 +366,7 @@ fn record_edit(
         column: column.unwrap_or_default(),
         value: value.unwrap_or(Value::Null),
         insert: insert_values,
+        key,
         sql: sql.clone(),
     });
     Ok(json!({
@@ -374,15 +378,36 @@ fn record_edit(
 
 /// The statement one grid edit becomes, planned against the table and the page as they are now: the
 /// primary key values come from the page, the names and the dialect from the binding.
+/// An edit waiting to be turned into a statement: what the grid recorded, and the key values it was
+/// made with. Six loose parameters became a struct here because the key is the one that must not be
+/// left out of a call.
+struct EditRequest<'a> {
+    kind: EditKind,
+    /// Where the edit sits in the page the grid is showing *now* — what the pending drawer and the
+    /// status bar count by. The statement is keyed by `key`, not by this.
+    row: usize,
+    column: Option<&'a str>,
+    value: Option<&'a Value>,
+    /// The columns an insert writes.
+    insert: &'a [(String, Value)],
+    /// The key values the edit was made with, in the key columns' order, or `None` to read them from
+    /// `row` as the page stands now.
+    key: Option<&'a [Value]>,
+}
+
 fn plan_edit(
     session: &Session,
     tab_index: usize,
-    kind: EditKind,
-    row: usize,
-    column: Option<&str>,
-    value: Option<&Value>,
-    insert_values: &[(String, Value)],
-) -> Result<String> {
+    request: &EditRequest<'_>,
+) -> Result<(String, Vec<Value>)> {
+    let EditRequest {
+        kind,
+        row,
+        column,
+        value,
+        insert: insert_values,
+        key,
+    } = *request;
     let dialect = session.tabs[tab_index]
         .payload
         .get("dialect")
@@ -398,9 +423,26 @@ fn plan_edit(
         .table
         .clone()
         .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
-    let pk = match kind {
-        EditKind::InsertRow => Vec::new(),
-        _ => pk_values(tab, row)?,
+    // The values the edit captured win over the row index, which the page may have moved under: the
+    // edit belongs to the record it was made on. Their *names* come from the table as it is now, so a
+    // key column renamed since the edit was made still resolves.
+    let pk = match (key, kind) {
+        (_, EditKind::InsertRow) => Vec::new(),
+        (Some(values), _) => {
+            if values.len() != tab.grid.primary_key.len() {
+                return Err(Error::config(
+                    "the primary key of this table changed since the edit was made — \
+                     reload the tab and edit again",
+                ));
+            }
+            tab.grid
+                .primary_key
+                .iter()
+                .cloned()
+                .zip(values.iter().cloned())
+                .collect()
+        }
+        (None, _) => pk_values(tab, row)?,
     };
     let changes = match kind {
         EditKind::InsertRow => insert_values.to_vec(),
@@ -417,13 +459,14 @@ fn plan_edit(
         row_index: row,
         schema: table_ref.schema.clone(),
         table: table_ref.table.clone(),
-        pk,
+        pk: pk.clone(),
         changes,
     };
-    Ok(plan_edits(std::slice::from_ref(&edit), dialect)?
+    let sql = plan_edits(std::slice::from_ref(&edit), dialect)?
         .first()
         .cloned()
-        .unwrap_or_default())
+        .unwrap_or_default();
+    Ok((sql, pk.into_iter().map(|(_, value)| value).collect()))
 }
 
 /// A value that satisfies a NOT NULL column the server would otherwise reject.
@@ -593,23 +636,28 @@ fn revert(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
 
 fn apply(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
-    // Plan every pending edit again, against the table and the page as they are now. A statement
-    // planned before the table changed cannot be trusted: the columns it names may be gone, and a
-    // stale `WHERE` matches no row while reporting the edit applied — the SQL that runs here is the
-    // SQL the grid shows afterwards, and an edit that cannot be planned fails before anything runs.
+    // Plan every pending edit again, against the table as it is now. A statement planned before the
+    // table changed cannot be trusted: the columns it names may be gone, and a stale `WHERE` matches
+    // no row while reporting the edit applied — the SQL that runs here is the SQL the grid shows
+    // afterwards, and an edit that cannot be planned fails before anything runs. The *row* is not
+    // re-read: it comes from the key the edit captured, so a page sorted, filtered or paged since the
+    // edit was made cannot move the statement onto another record.
     sync_grid_table(session, index)?;
     let pending = session.tabs[index].grid.pending.clone();
     let mut statements: Vec<String> = Vec::with_capacity(pending.len());
     for edit in &pending {
         let column = (!edit.column.is_empty()).then_some(edit.column.as_str());
-        let sql = plan_edit(
+        let (sql, _) = plan_edit(
             session,
             index,
-            edit.kind,
-            edit.row,
-            column,
-            Some(&edit.value),
-            &edit.insert,
+            &EditRequest {
+                kind: edit.kind,
+                row: edit.row,
+                column,
+                value: Some(&edit.value),
+                insert: &edit.insert,
+                key: Some(&edit.key),
+            },
         )?;
         if let Some(slot) = session.tabs[index].grid.pending.get_mut(statements.len()) {
             slot.sql = sql.clone();

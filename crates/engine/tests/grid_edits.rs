@@ -328,3 +328,28 @@ fn an_insert_lands_after_a_column_was_added() {
         ]
     );
 }
+
+/// A pending edit belongs to the record it was made on. The page under the tab can be sorted,
+/// filtered or paged between the edit and the apply, and a statement re-planned from the row *index*
+/// then points at whichever record moved into that row — changing it while reporting the edit
+/// applied, which is the failure the row-count guard cannot see because the wrong row does change.
+#[test]
+fn an_edit_applied_after_a_sort_lands_on_the_record_it_was_made_on() {
+    let mut f = Fixture::new("sort-then-apply");
+    f.open_users();
+
+    f.run(
+        "grid.editCell",
+        json!({"row": 0, "column": "email", "value": "z@z.z"}),
+    );
+    // `a@b.c` sorts below `d@e.f`, so row 0 of the page is now the record with id 2.
+    f.run("grid.sort", json!({"column": "email", "desc": true}));
+
+    let applied = f.run("grid.apply", json!({}));
+    assert_eq!(applied["applied"], 1);
+    assert_eq!(
+        f.emails(),
+        vec!["z@z.z".to_string(), "d@e.f".to_string()],
+        "the edit belongs to the row it was made on, wherever the page put it"
+    );
+}
