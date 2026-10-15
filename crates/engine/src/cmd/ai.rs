@@ -190,6 +190,7 @@ fn providers(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
             "label": provider.label(),
             "default_base_url": provider.default_base(),
             "default_model": provider.default_model(),
+            "models": provider.models(),
             "needs_key": provider.needs_key(),
             "key_set": key_set,
             "active": provider == cfg.provider,
@@ -615,6 +616,15 @@ mod tests {
         std::env::remove_var("NOOK_AI_KEY");
         let mut session = Session::new();
         session.settings.ai.provider = nook_ai::Provider::OpenAi;
+        // Write a configuration to the database first, so "no secret in that file" is a statement
+        // about a file that exists and holds the settings.
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_model", "value": "gpt-4o-mini"}),
+            )
+            .expect("save a setting");
+        assert!(crate::profiles::ai_db_path().exists());
 
         if !crate::profiles::keychain_available() {
             let error = session
@@ -638,6 +648,13 @@ mod tests {
         // The store file the app owns holds no secret.
         let profile = std::fs::read_to_string(crate::profiles::profiles_path()).unwrap_or_default();
         assert!(!profile.contains("sk-secret-value"), "{profile}");
+        // Neither does the database, which is why the key stayed in the keychain. It is read as
+        // bytes: a SQLite file is not text, and `read_to_string` gives up on a page that is not valid
+        // UTF-8 — which would make the assertion below pass by accident.
+        let db = std::fs::read(crate::profiles::ai_db_path()).unwrap_or_default();
+        let holds = |needle: &str| db.windows(needle.len()).any(|w| w == needle.as_bytes());
+        assert!(holds("gpt-4o-mini"), "the same file holds the settings");
+        assert!(!holds("sk-secret-value"), "the key is not in the database");
     }
 
     #[test]

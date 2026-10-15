@@ -106,11 +106,21 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
                 .ok_or_else(|| Error::config("keyword_case must be upper, lower or preserve"))?;
         }
         "ai_provider" => {
-            session.settings.ai.provider = nook_ai::Provider::parse(&value).ok_or_else(|| {
+            let provider = nook_ai::Provider::parse(&value).ok_or_else(|| {
                 Error::config(
                     "ai_provider must be openai, anthropic, deepseek, kimi, glm, ollama or vllm",
                 )
             })?;
+            // The model and the address belong to the provider that was chosen: a name that belongs
+            // to another vendor is a request the server refuses, and a stale endpoint is a request to
+            // the wrong host. Both fall back to the new provider's own defaults, which is the rule
+            // `AiConfig` documents. Every surface reaches the switch through this arm, so the rule
+            // cannot be left to each caller to remember.
+            if session.settings.ai.provider != provider {
+                session.settings.ai.model.clear();
+                session.settings.ai.base_url.clear();
+            }
+            session.settings.ai.provider = provider;
             save_ai(session)?;
         }
         "ai_model" => {
@@ -152,13 +162,10 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
     get_settings(session, p)
 }
 
-/// The AI settings are stored as one nested object and written as a unit, so a preference change
-/// cannot leave the file disagreeing with the running session.
+/// The AI settings are one row in the app's own database (`store.rs`), written as a unit so a
+/// preference change cannot leave the store disagreeing with the running session.
 fn save_ai(session: &mut Session) -> Result<()> {
-    let value = serde_json::to_value(&session.settings.ai)
-        .map_err(|e| Error::internal(format!("serialise ai settings: {e}")))?;
-    session.profiles.set_setting("ai", value);
-    session.profiles.save()
+    session.save_ai_configuration()
 }
 
 fn clamp_usize(value: &str, min: usize, max: usize) -> Result<usize> {
@@ -232,6 +239,7 @@ fn platform(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Va
         "config_dir": crate::profiles::config_dir().to_string_lossy(),
         "profiles_file": crate::profiles::profiles_path().to_string_lossy(),
         "jobs_file": crate::profiles::jobs_path().to_string_lossy(),
+        "ai_db_file": crate::profiles::ai_db_path().to_string_lossy(),
         "keychain": crate::profiles::keychain_available(),
         "version": env!("CARGO_PKG_VERSION"),
     }))

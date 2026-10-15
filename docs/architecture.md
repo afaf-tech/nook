@@ -1,13 +1,13 @@
 # Nook architecture
 
-> **Last reviewed:** 2026-10-13 · **Target:** Navicat Premium 17 workflows
+> **Last reviewed:** 2026-10-14 · **Target:** Navicat Premium 17 workflows
 
 How Nook is built today. The conventions for working in the code are in
 [`conventions.md`](conventions.md).
 
 ## Layers
 
-~42,400 lines of Rust in 7 crates, 2 apps and `xtask` (counted with `wc -l` over every `.rs` under
+~44,400 lines of Rust in 7 crates, 2 apps and `xtask` (counted with `wc -l` over every `.rs` under
 each tree, tests included). `cargo xtask layers` enforces the ordering: a crate may only depend on
 crates below it, and nothing below L5 depends on egui.
 
@@ -15,11 +15,11 @@ crates below it, and nothing below L5 depends on egui.
 |---|---|---|---|
 | L0 | `nook-core` | 1.1k | `Error`/`Result`, `Value` (the one cell type), `ConnectionConfig` with SSH and SSL settings, dialect quoting and literals, `returns_rows` |
 | L1 | `nook-model` | 1.8k | `Catalog`, `Schema`, `Table`, `Column`, `Index`, `ForeignKey`, `DbProcess`, `DbUser`, `ServerInfo`, `ResultSet`; grid edit plans; DDL for all three dialects; structure diff; ER layout |
-| L2 | `nook-ai` | 1.1k | chat client for the 7 providers over two wire formats, endpoint normalisation, API keys, and the `@table` prompt context |
+| L2 | `nook-ai` | 1.3k | chat client for the 7 providers over two wire formats, endpoint normalisation, API keys, and the `@table` prompt context |
 | L2 | `nook-drivers` | 3.8k | `Driver` trait + `sqlite`, `pg`, `mysql`; statement splitter; data transfer; row-level sync; `.sql` dump; backup and restore through the vendor tools |
-| L3 | `nook-engine` | 12.6k | `Session` (connections, tabs, grid buffer, history, messages), 146 commands in `cmd/*.rs`, the Navicat feature catalog, parity measurement, jobs and the scheduler, data generation, reports, profiles and the keychain, the SSH tunnel |
+| L3 | `nook-engine` | 13.2k | `Session` (connections, tabs, grid buffer, history, messages), 146 commands in `cmd/*.rs`, the Navicat feature catalog, parity measurement, jobs and the scheduler, data generation, reports, profiles, the keychain, the app's own SQLite store, the SSH tunnel |
 | L4 | `nook-mcp` | 0.3k | MCP server over stdio: every command is a tool, connections open on demand |
-| L5 | `nook-ui` | 20.0k | egui front end: design tokens, table widget, app shell, sidebar, grid, editor, designer, diagram, charts, monitor, jobs, dialogs, control channel, `--shot` |
+| L5 | `nook-ui` | 21.3k | egui front end: design tokens, table widget, app shell, sidebar, grid, editor, designer, diagram, charts, monitor, jobs, dialogs, control channel, `--shot` |
 | apps | `nook`, `nook-cli` | 1.6k | desktop binary and the command line |
 
 ## Data flow
@@ -69,6 +69,24 @@ The front end is one design system, not a set of screens that each look after th
   palette field), a tab strip (painted, accent underline, middle-click to close), the view's own
   toolbar, the sidebar, and a status bar of chips (connection, tab, pending edits, messages,
   coverage, control channel) with the log as a collapsible drawer behind the messages chip.
+- **The AI band is a band, not a dialog** (`crates/ui/src/ai.rs`). The Query tab's toolbar opens it,
+  and it sits between the toolbar and the script because the script is what it drafts into — a modal
+  would cover the thing the form exists to fill. Every field is an existing command: the provider,
+  the model and the base URL are `app.setSetting ai_*`, the key is `ai.setKey` (keychain), and the
+  draft is `ai.generate` with `open_tab`, so the band adds no engine surface. The model is a text
+  field with the provider's own list (`Provider::models`) as a picker beside it: a field because the
+  vendors ship ids faster than this app can follow, and the list because typing a known one is
+  busywork — `vLLM` publishes none and the field is the only way to name one, which is also the one
+  case `Generate` stays disabled for (`AiForm::has_model`). It measures itself with a `Frame` plus a
+  capped `ScrollArea` rather than a guessed height, so a provider that needs no key leaves no gap and
+  a short window scrolls the band instead of squeezing the editor away. The scroll area does not clip
+  horizontally, so every row measures itself against the pane and gives up its least-important part in
+  turn — the head's subtitle, then its hint, then the footer's sentence — rather than widening the
+  band and dragging the right-aligned buttons off the pane; `the_band_holds_at_the_narrowest_pane_the_app_permits`
+  holds that at the 236px the shell's minimum window leaves. The base
+  URL sits with the provider and not with the key, because it is an address rather than a secret:
+  that is why `ai.setKey` never saved one. Preferences ▸ AI reads `ai.providers`, so the table it
+  paints cannot disagree with what a request would use.
 
 ## Driver model
 
@@ -103,6 +121,20 @@ adds none. The request body arrives on `stdin` and the headers, including the ke
 file written mode `0600` and removed once the child exits, so no secret reaches `argv`. The ceiling
 and the measurements behind that choice are recorded on `crates/ai/src/client.rs`.
 
+The six AI settings are stored in a row of `<config dir>/nook.db`, a SQLite file the app owns
+(`crates/engine/src/store.rs`), rather than in the `settings` blob of `profiles.json`. The table is a
+singleton by constraint — `CHECK (id = 1)`, so a second row is impossible rather than unlikely — and
+the file is mode `0600`. A start reads it and never writes it, so opening the app cannot rewrite the
+user's files: an install that predates the database still carries the old blob, which is read as the
+fallback and moved across — database write first, then the key removed from `profiles.json` — the
+first time a setting changes. The API key is deliberately not part of this: it stays in the login
+keychain, which is one place this file cannot be read from.
+
+**Ceiling: the store is plaintext, and the app owns one more file.** `nook.db` is not encrypted; mode
+`0600` is the same treatment `profiles.json` gets, and what it holds is six non-secrets. It carries no
+version column, because the migration for a one-row table is rewriting the row — recorded as a
+`ponytail:` note on the module. `app.platform` reports the path (`ai_db_file`).
+
 **Ceiling: a stored key is the `security` child's own argument.** `keychain_store` hands the secret to
 `security add-generic-password -w <secret>`; while that child lives, the same user can read it from the
 process table. This is the pre-existing path for SSH and database passwords too, and the door out (a
@@ -110,7 +142,7 @@ process table. This is the pre-existing path for SSH and database passwords too,
 
 ## Testing
 
-- 331 `#[test]` functions across the workspace, 104 of them in the UI crate: quoting and literals,
+- 359 `#[test]` functions across the workspace, 113 of them in the UI crate: quoting and literals,
   catalog types, DDL per dialect, structure diff, ER layout, statement splitting, edit planning, data
   generation determinism, report shaping, schedules, profiles, MCP JSON-RPC, the AI wire formats and
   prompt building, and every command against junk parameters
@@ -359,3 +391,14 @@ process table. This is the pre-existing path for SSH and database passwords too,
   **Ceiling**: the tab's content is unreviewed by the design, and the delete sits one click deeper
   than a design that had drawn it. **Upgrade path**: when the design draws the tab (pooling, session
   settings), the action moves to wherever that names.
+- **The AI band's fields write as they change.** Choosing a provider, or typing in the base-URL
+  field, runs `app.setSetting` at the end of the frame it changed in — one store write plus one
+  `profiles.json` rewrite per keystroke in the address field, and `dirty` coalesces the fields so it
+  is never more than one write per frame. **Ceiling**: on a slow disk a long address stutters. At
+  ~2 KB the write is under a millisecond, which is why it is not debounced today. **Upgrade path**:
+  flush on focus loss, which needs the value compared against the session's own before the write so a
+  click straight from the field to Generate cannot lose it.
+- **The AI band's `Generate` blocks the frame.** `ai.generate` shells out to `curl` and waits for the
+  model, on the UI thread — the same ceiling `sql.run` has, recorded under §7 of `docs/gaps.md`. The
+  band closes when the draft lands, so the wait is visible as a still window rather than a spinner.
+  **Upgrade path**: the job path the same gap note names, which would hand the band a job id to poll.

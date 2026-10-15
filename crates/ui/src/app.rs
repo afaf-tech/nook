@@ -16,7 +16,7 @@ use crate::{dialogs, grid, tree, views, Options};
 const MENUS: &[(&str, &[&str])] = &[
     ("File", &["Connection", "App"]),
     ("Data", &["Data", "Design", "Modeler", "Tools"]),
-    ("Query", &["Query", "Report"]),
+    ("Query", &["Query", "AI", "Report"]),
     (
         "Server",
         &["Monitor", "Privileges", "Backup", "Sync", "Transfer"],
@@ -310,6 +310,58 @@ impl Default for DatagenForm {
     }
 }
 
+/// The AI band's working copy, seeded from the session when the band opens and written back through
+/// the command registry when a field changes. It is the *only* place a half-typed address lives, so a
+/// frame that is merely painted never touches the engine.
+#[derive(Debug, Clone, Default)]
+pub struct AiForm {
+    pub prompt: String,
+    pub provider: nook_ai::Provider,
+    /// Empty means the provider's own default, the engine's rule.
+    pub model: String,
+    pub base_url: String,
+    /// The key the field holds. Never written to the store; the moment it is committed it is handed
+    /// to `ai.setKey` and the keychain owns it.
+    pub key: String,
+    /// Whether the keychain already holds a key for the chosen provider.
+    pub key_set: bool,
+    /// The key field holds something the keychain has not been given yet. Committed when the field
+    /// loses focus or when a command is about to run — never per keystroke, which would store six
+    /// half-keys, each one a `security` process.
+    pub key_dirty: bool,
+    /// Set when the key field loses focus, so the key is committed on the way out.
+    pub commit_key: bool,
+    pub forget_key: bool,
+    /// Set by any control that changed a saved setting, so the band writes it once.
+    pub dirty: bool,
+    /// What `ai.tables` offered for the active connection: name and column count, only as many as
+    /// the column paints.
+    pub mentions: Vec<(String, usize)>,
+    /// How many the engine holds in total, so `+N more` counts the catalog and not this window of it.
+    pub mentions_total: usize,
+    /// The query the current `mentions` window was fetched with. `Some` — including `Some("")` for a
+    /// bare `@`, which lists the catalog — is the live-filter mode; `None` is the fallback top-N.
+    pub mention_filter: Option<String>,
+}
+
+impl AiForm {
+    /// The model a request would be sent with: the typed one, or the provider's own default. Empty for
+    /// a provider that has neither (vLLM), which is the one case a form must refuse to generate.
+    pub fn effective_model(&self) -> String {
+        if self.model.trim().is_empty() {
+            self.provider.default_model().to_string()
+        } else {
+            self.model.trim().to_string()
+        }
+    }
+
+    /// Whether a request can name a model at all. The engine sends `model()` verbatim, so an empty
+    /// answer is a provider the user must name a model for before Generate means anything.
+    pub fn has_model(&self) -> bool {
+        !self.effective_model().is_empty()
+    }
+}
+
 /// One top-bar menu: the design keeps six of them, each opening the command groups the registry
 /// already publishes. Returns the id of the spec that was picked — the click is answered by the
 /// caller, after this function's `&mut UiState` is gone, because running the command needs
@@ -428,6 +480,19 @@ pub struct UiState {
     shot_quit: bool,
     pub toast: Option<(String, f64)>,
     pub quit: bool,
+    /// The AI band inside the query tab: open or closed, and the form it is holding.
+    pub ai_band: bool,
+    pub ai_form: AiForm,
+    /// The in-flight `ai.generate` draft: one request at a time, and the tab index the draft
+    /// opened when it landed, so the caller can switch to it.
+    pub ai_request: Option<crate::ai::AiRequest>,
+    /// The `ai.providers` answer the Preferences dialog paints, cached because resolving it costs one
+    /// `security` process per provider. `None` means "read it again": set when the dialog opens and
+    /// after a provider is picked.
+    pub ai_providers: Option<serde_json::Value>,
+    /// Form view on the data tab: the selected record as a vertical form. A flag on the UI state,
+    /// not the engine's — the engine command is stateless and reads whatever row it is handed.
+    pub form_view: bool,
 }
 
 impl Default for UiState {
@@ -474,6 +539,11 @@ impl Default for UiState {
             shot_quit: false,
             toast: None,
             quit: false,
+            ai_band: false,
+            ai_form: AiForm::default(),
+            ai_providers: None,
+            ai_request: None,
+            form_view: false,
         }
     }
 }
@@ -524,6 +594,8 @@ impl UiState {
         // (the design does not), so its one entry in the File menu opens the dialog.
         if id == "app.settings" {
             self.settings_open = true;
+            // The dialog's AI card reads the provider table once per open rather than once per frame.
+            self.ai_providers = None;
             return;
         }
         self.command_id = id.clone();
@@ -936,6 +1008,26 @@ impl NookApp {
                         }
                         Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
                     }
+                }
+                "ui.setAiBand" => {
+                    let open = request
+                        .params
+                        .get("open")
+                        .and_then(|o| o.as_bool())
+                        .unwrap_or(true);
+                    self.state.ai_band = open;
+                    if open {
+                        crate::ai::seed(&mut self.session, &mut self.state.ai_form);
+                    }
+                    ctx.request_repaint();
+                    serde_json::json!({
+                        "ok": true,
+                        "open": self.state.ai_band,
+                        "provider": self.state.ai_form.provider.as_str(),
+                        "base_url": self.state.ai_form.base_url,
+                        "key_set": self.state.ai_form.key_set,
+                        "mentions": self.state.ai_form.mentions.len(),
+                    })
                 }
                 "ui.messages" => serde_json::json!({
                     "messages": self.session.messages.iter().rev().take(50).map(|m| serde_json::json!({
@@ -2459,6 +2551,18 @@ impl NookApp {
             }
         }
     }
+    /// Reap finished `ai.generate` background requests; see [`crate::ai::drain_ai_outcome`] for the
+    /// outcome rules. The thread did only the `curl` round-trip; everything session-mutating happens
+    /// on the UI thread.
+    fn drain_ai_outcomes(&mut self, ctx: &egui::Context) {
+        crate::ai::drain_ai_outcome(&mut self.session, &mut self.state);
+        // While a draft is in flight the spinner and the footer repaint need a new frame; without
+        // this the one `request_repaint_after` the spawn asked for is the last one and the window
+        // goes still even though the thread is still running.
+        if self.state.ai_request.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 impl eframe::App for NookApp {
@@ -2474,6 +2578,7 @@ impl eframe::App for NookApp {
         if self.state.control.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
+        self.drain_ai_outcomes(&ctx);
         self.shortcuts(&ctx);
         self.tick_jobs();
 

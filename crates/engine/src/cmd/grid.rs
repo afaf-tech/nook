@@ -62,6 +62,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.find", "Find in the grid", "Data", find).params(r#"{"text":"a@b"}"#),
         CommandSpec::new("grid.cellValue", "Read one cell", "Data", cell_value)
             .params(r#"{"row":0,"column":"id"}"#),
+        CommandSpec::new("grid.formView", "Form view of one record", "Data", form_view)
+            .params(r#"{"row":0}"#)
+            .help("The record at `row` as a vertical form: one field per column with its type, value and whether it is a key. Read-only over the page the grid already holds."),
         CommandSpec::new("grid.copyAsSql", "Copy rows as INSERT", "Data", copy_as_sql),
     ]
 }
@@ -745,6 +748,61 @@ fn cell_value(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         .ok_or_else(|| Error::not_found(format!("no cell at row {row}, column {column}")))?;
     Ok(json!({ "value": value.to_json(), "display": value.display(), "type": value.type_name() }))
 }
+/// One record as a vertical form: every column with its declared type, its value and whether it is
+/// a key. Read-only over the page the grid already holds, so it asks the server nothing — the same
+/// row the grid painted, arranged for a table too wide to read across.
+fn form_view(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let tab = &session.tabs[index];
+    let grid = &tab.grid;
+    // `row` is explicit. The engine's cursor is not kept in step with the grid's selection, so
+    // guessing here would show a different record than the one the user clicked — the UI passes
+    // the selected row instead.
+    let row = p.int_opt("row", 0).max(0) as usize;
+    let row_count = grid.result.rows.len();
+    if row >= row_count {
+        return Err(Error::not_found(format!(
+            "no row {row} on this page (it holds {row_count} rows)"
+        )));
+    }
+    // The form shows what `grid.apply` will send, not the page as it was fetched: a pending edit
+    // to this row overlays the cell the form paints. Pending edits apply in order, so the last
+    // one to a cell wins — the same rule the apply loop follows.
+    let overlaid: std::collections::BTreeMap<&str, &Value> = grid
+        .pending
+        .iter()
+        .filter(|e| e.row == row)
+        .filter_map(|e| match e.kind {
+            nook_model::EditKind::SetCell => Some((e.column.as_str(), &e.value)),
+            _ => None,
+        })
+        .collect();
+    let fields: Vec<serde_json::Value> = grid
+        .columns
+        .iter()
+        .map(|column| {
+            let value = overlaid
+                .get(column.name.as_str())
+                .copied()
+                .or_else(|| grid.result.value_at(row, &column.name));
+            json!({
+                "name": column.name,
+                "type": column.type_name,
+                "value": value.map(|v| v.to_json()),
+                "display": value.map(|v| v.display()).unwrap_or_default(),
+                "primary_key": grid.primary_key.iter().any(|key| *key == column.name),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "row": row,
+        "rows": row_count,
+        // The grid's own gate, so the form never offers a field the engine would refuse.
+        "editable": grid.editable(),
+        "fields": fields,
+    }))
+}
+
 
 fn copy_as_sql(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
@@ -903,6 +961,48 @@ mod tests {
         let e = export(&mut session, &p).expect_err("a query tab has no data grid to export");
         assert_eq!(e.message(), no_grid_reason());
     }
+    /// The form must show what `grid.apply` will send, not the page as it was fetched: an edit
+    /// recorded through `grid.editCell` overlays the cell the form paints, or the edit looks lost
+    /// until the apply and the refetch.
+    #[test]
+    fn the_form_view_shows_pending_edits_over_the_page() {
+        let (mut session, _) = grid_tab();
+        session
+            .run(
+                "grid.editCell",
+                json!({"row": 1, "column": "email", "value": "new@e.f"}),
+            )
+            .expect("edit");
+        let out = session
+            .run("grid.formView", json!({"row": 1}))
+            .expect("form view");
+        assert_eq!(out["fields"][1]["value"], "new@e.f", "{:#?}", out);
+        assert_eq!(out["fields"][1]["display"], "new@e.f");
+        // A row the edit does not touch still shows the page value.
+        let other = session
+            .run("grid.formView", json!({"row": 0}))
+            .expect("form view");
+        assert_eq!(other["fields"][1]["value"], "a@b.c");
+    }
+
+    /// The last edit to a cell wins, matching what `grid.apply` sends: the pending list is applied
+    /// in order, so a second edit to the same cell must not be hidden by the first.
+    #[test]
+    fn the_form_view_prefers_the_last_pending_edit_to_a_cell() {
+        let (mut session, _) = grid_tab();
+        for email in ["one@e.f", "two@e.f"] {
+            session
+                .run(
+                    "grid.editCell",
+                    json!({"row": 0, "column": "email", "value": email}),
+                )
+                .expect("edit");
+        }
+        let out = session
+            .run("grid.formView", json!({"row": 0}))
+            .expect("form view");
+        assert_eq!(out["fields"][1]["value"], "two@e.f");
+    }
 
     #[test]
     fn find_scans_visible_cells() {
@@ -944,6 +1044,34 @@ mod tests {
         session.tabs[tab].grid.total_rows = Some(12_481);
         clear_filter(&mut session, &Params::none()).expect("clear");
         assert!(session.tabs[tab].grid.total_rows.is_none());
+    }
+    /// The form view is one record as a vertical form: every column with its type, its value and
+    /// whether it is a key. It reads the page the grid already holds, so it asks the server nothing.
+    #[test]
+    fn the_form_view_reports_one_record_as_fields() {
+        let (mut session, _) = grid_tab();
+        let out = session
+            .run("grid.formView", json!({"row": 1}))
+            .expect("form view");
+        assert_eq!(out["row"], 1);
+        assert_eq!(out["editable"], true);
+        let fields = out["fields"].as_array().expect("a field per column");
+        assert_eq!(fields.len(), 2, "{:#?}", fields);
+        assert_eq!(fields[0]["name"], "id");
+        assert_eq!(fields[0]["type"], "INTEGER");
+        assert_eq!(fields[0]["value"], 2);
+        assert_eq!(fields[0]["primary_key"], true);
+        assert_eq!(fields[1]["name"], "email");
+        assert_eq!(fields[1]["value"], "d@e.f");
+        assert_eq!(fields[1]["primary_key"], false);
+    }
+
+    /// A row the page does not hold is an error, never a panic and never a silent empty form: the
+    /// grid would then edit a record that is not there.
+    #[test]
+    fn the_form_view_rejects_a_row_the_page_does_not_hold() {
+        let (mut session, _) = grid_tab();
+        assert!(session.run("grid.formView", json!({"row": 99})).is_err());
     }
 
     #[test]

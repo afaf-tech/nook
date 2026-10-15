@@ -1296,6 +1296,11 @@ pub fn state_chip(
 }
 
 /// Measure one line of `text`, so a band can reserve room before it paints.
+/// The width a string takes in a token's own font, for a caller sizing a control around it.
+pub fn measured_width(ui: &Ui, tokens: &Tokens, text: &str) -> f32 {
+    measured(ui, tokens.mono(T_XS), text)
+}
+
 fn measured(ui: &Ui, font: FontId, text: &str) -> f32 {
     ui.painter()
         .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER)
@@ -2427,7 +2432,38 @@ pub fn input(
     enabled: bool,
     add: impl FnOnce(&mut Ui) -> Response,
 ) -> Response {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, INPUT_H), Sense::hover());
+    input_sized(ui, tokens, width, INPUT_H, error, enabled, add)
+}
+
+/// The same box at a given height, for a field that holds more than one line — the AI band's prompt is
+/// three rows at the design's 74px, where every other field is the 28px [`INPUT_H`]. Its content is
+/// laid out top-down so a multi-line `TextEdit` starts at the box's first line rather than being
+/// centred in it; a one-line field is centred, which at 28px is the same place.
+pub fn input_tall(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    width: f32,
+    height: f32,
+    error: bool,
+    enabled: bool,
+    add: impl FnOnce(&mut Ui) -> Response,
+) -> Response {
+    input_sized(ui, tokens, width, height, error, enabled, add)
+}
+
+/// The one box both entry points draw, so a change to the border or the focus ring cannot land in one
+/// and miss the other. A box taller than the one-line field aligns its content to the top, so a
+/// multi-line `TextEdit` starts at the box's first line instead of being centred in it.
+fn input_sized(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    width: f32,
+    height: f32,
+    error: bool,
+    enabled: bool,
+    add: impl FnOnce(&mut Ui) -> Response,
+) -> Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let radius = CornerRadius::same(R_CTL);
     let painter = ui.painter();
     painter.rect_filled(rect, radius, tokens.panel_alt);
@@ -2438,10 +2474,15 @@ pub fn input(
         StrokeKind::Inside,
     );
 
+    let align = if height > INPUT_H {
+        egui::Align::Min
+    } else {
+        egui::Align::Center
+    };
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect.shrink2(Vec2::new(f32::from(S4), 0.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            .layout(egui::Layout::left_to_right(align)),
     );
     let response = child.add_enabled_ui(enabled, |ui| add(ui)).inner;
     if response.has_focus() {

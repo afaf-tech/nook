@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 nook-core = { workspace = true }
+nook-ai = { workspace = true }
 nook-model = { workspace = true }
 nook-drivers = { workspace = true }
 nook-engine = { workspace = true }

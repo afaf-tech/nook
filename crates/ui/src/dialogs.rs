@@ -1727,6 +1727,12 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
             });
             ui.add_space(8.0);
             design::card_frame(tokens).show(ui, |ui| {
+                ui.label(RichText::new("AI").size(11.5).color(tokens.text_dim));
+                ui.add_space(f32::from(design::S2));
+                crate::ai::preferences(ui, session, state, tokens);
+            });
+            ui.add_space(8.0);
+            design::card_frame(tokens).show(ui, |ui| {
                 ui.label(RichText::new("Files").size(11.5).color(tokens.text_dim));
                 for (label, path) in [
                     (

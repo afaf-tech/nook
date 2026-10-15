@@ -9,6 +9,7 @@
 //! L6: the desktop front end. Thin on purpose — it reads `Session` state, paints it, and dispatches
 //! every action through the command registry, exactly like the CLI and MCP do.
 
+pub mod ai;
 pub mod app;
 pub mod control;
 pub mod dialogs;

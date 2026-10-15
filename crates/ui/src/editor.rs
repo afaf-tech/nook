@@ -196,6 +196,9 @@ pub fn show(
     let caret = caret_in(&text, state.caret.map_or(0, |caret| caret.index));
 
     layout.toolbar = Some(toolbar(ui, caret, &text, tokens, &mut actions));
+    // The band sits between the toolbar and the script: it drafts *into* this tab, so a modal would
+    // cover the editor it exists to fill.
+    crate::ai::band(ui, session, state, tokens);
     layout.popup = sql_area(ui, session, tab_index, state, tokens, &mut layout);
     // The toolbar's and the editor's own controls have recorded what they want by now. Running them
     // before the outcome surfaces are measured is what makes a click on Run paint its own result —
@@ -294,6 +297,8 @@ struct Actions {
     copy: Option<String>,
     /// Empty the script.
     clear: bool,
+    /// Open the AI band, or close it if it is already open.
+    toggle_ai: bool,
 }
 
 /// The strip's contents: the script's statements, the one the caret is in, and the one that failed.
@@ -414,6 +419,22 @@ fn toolbar(ui: &mut Ui, caret: Caret, text: &str, tokens: &Tokens, actions: &mut
             .clicked()
             {
                 actions.clear = true;
+            }
+            vdiv(ui, tokens);
+            if design::toolbar_button(
+                ui,
+                tokens,
+                "Generate SQL",
+                None,
+                tokens.panel_high,
+                Emphasis::Plain,
+                true,
+                |_| {},
+            )
+            .on_hover_text("Draft SQL from a sentence, with @table context (Cmd+Shift+G)")
+            .clicked()
+            {
+                actions.toggle_ai = true;
             }
             // The design's right cluster: the caret read-out, a divider, then the trailing fact.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -834,6 +855,16 @@ fn dispatch(
         actions.clear = false;
         session.tabs[tab_index].sql.text.clear();
         state.editor_dirty = true;
+        acted = true;
+    }
+    if actions.toggle_ai {
+        actions.toggle_ai = false;
+        state.ai_band = !state.ai_band;
+        if state.ai_band {
+            // Seed once, on open: the form's own copy is the working one from here, so a frame's
+            // typing is never overwritten by the session's stored values.
+            crate::ai::seed(session, &mut state.ai_form);
+        }
         acted = true;
     }
     if let Some(text) = actions.copy.take() {
@@ -1755,7 +1786,15 @@ mod tests {
         let mut world = world("fit", "select 1;\nselect 2;\nselect 3;\n");
         let f = frame(&ctx, &mut world, Vec::new(), 1.0);
         let toolbar = f.layout.toolbar.unwrap();
-        let kept = ["Run", "Run statement", "Stop", "Explain", "Format", "Clear"];
+        let kept = [
+            "Run",
+            "Run statement",
+            "Stop",
+            "Explain",
+            "Format",
+            "Clear",
+            "Generate SQL",
+        ];
         let buttons = kept
             .iter()
             .map(|label| f.label(label))
@@ -1792,6 +1831,7 @@ mod tests {
                     ("Explain", None),
                     ("Format", None),
                     ("Clear", None),
+                    ("Generate SQL", None),
                 ]
                 .iter()
                 .map(|(label, mark)| design::toolbar_button_width(ui, &world.2, label, *mark))
@@ -1801,7 +1841,8 @@ mod tests {
                     .map(|label| design::toolbar_button_width(ui, &world.2, label, None))
                     .sum();
                 let chip = design::chip_width(ui, &world.2, "nook-demo.db");
-                let gaps = 12.0 * f32::from(design::S4);
+                // Two `.vdiv`s: one before Explain, one before Generate SQL.
+                let gaps = 13.0 * f32::from(design::S4);
                 measured = (kept + gaps, kept + chip + cut + gaps);
             },
         );
@@ -2196,6 +2237,244 @@ mod tests {
         assert_eq!(
             world.1.registers[&index].active, 0,
             "a rerun of the same script keeps the tab the user was reading"
+        );
+    }
+
+    #[test]
+    fn probe_band_narrow() {
+        let ctx = egui::Context::default();
+        for width in [776.0, 236.0] {
+            for band in [false, true] {
+                let mut world = world(&format!("probe{width}"), "select 1;\n");
+                world.1.ai_band = band;
+                let pane = pane_of_width(width);
+                let f = frame_in(&ctx, &mut world, Vec::new(), 1.0, pane);
+                let mut worst = 0.0f32;
+                let mut who = String::new();
+                for (rect, text) in &f.texts {
+                    if rect.top() > 120.0 && rect.top() < 560.0 && text.len() > 1 {
+                        let over = rect.right() - pane.right();
+                        if over > worst {
+                            worst = over;
+                            who = text.clone();
+                        }
+                    }
+                }
+                eprintln!(
+                    "width {width} band {band}: worst overflow {worst:.1} on {who:?}; sql={:?}",
+                    f.layout.sql
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn probe_overflow() {
+        let ctx = egui::Context::default();
+        for width in [776.0, 236.0, 420.0] {
+            let mut world = world(&format!("ov{width}"), "select 1;\n");
+            world.1.ai_band = false;
+            let pane = pane_of_width(width);
+            let f = frame_in(&ctx, &mut world, Vec::new(), 1.0, pane);
+            let mut worst = (0.0f32, String::new());
+            for (rect, text) in &f.texts {
+                if text.len() > 1 {
+                    let over = rect.right() - pane.right();
+                    if over > worst.0 { worst = (over, text.clone()); }
+                }
+            }
+            eprintln!("pane {width}: worst {:.1} on {:?}", worst.0, worst.1);
+        }
+    }
+
+    /// The whole mention loop, as the user runs it: focus the prompt, type a partial `@cus`, the
+    /// candidate list filters, a click on the chip replaces the live token in the prompt.
+    #[test]
+    fn typing_a_mention_filters_the_list_and_clicking_replaces_the_token() {
+        let ctx = egui::Context::default();
+        let mut world = world("mention-smoke", "select 1;\n");
+        let open = click_hit(&ctx, &mut world, "Generate SQL", 1.05);
+        let _ = frame(&ctx, &mut world, open, 1.2);
+        let f = settle(&ctx, &mut world, 1.3);
+        assert!(
+            f.shows("@customers"),
+            "the seeded catalog offers the table: {:#?}",
+            f.strings
+        );
+
+        // Click into the prompt (the painted sample text marks its rect), then type the token.
+        let prompt = f.texts.iter().find(|(_, text)| text.contains("@users"))
+            .map(|(rect, _)| *rect)
+            .expect("the prompt is painted");
+        let _ = frame(&ctx, &mut world, click(prompt.center()), 1.35);
+        let mut focus_and_type = Vec::new();
+        focus_and_type.push(egui::Event::Text("@cus".into()));
+        let _ = frame(&ctx, &mut world, focus_and_type, 1.4);
+        let f = settle(&ctx, &mut world, 1.5);
+        assert!(
+            world.1.ai_form.prompt.contains("@cus"),
+            "the prompt holds the typed token: {:?}",
+            world.1.ai_form.prompt
+        );
+        assert_eq!(
+            world.1.ai_form.mention_filter.as_deref(),
+            Some("cus"),
+            "the live filter reached the form"
+        );
+        assert_eq!(
+            world.1.ai_form.mentions.len(),
+            1,
+            "the catalog filtered to @customers: {:?}",
+            world.1.ai_form.mentions
+        );
+
+        // The chip is painted; clicking it rewrites the prompt in place.
+        let chip = f
+            .texts
+            .iter()
+            .find(|(_, text)| text.starts_with("@customers"))
+            .map(|(rect, _)| *rect)
+            .expect("the filtered chip is painted");
+        let _ = frame(&ctx, &mut world, click(chip.center()), 1.6);
+        settle(&ctx, &mut world, 1.7);
+        assert!(
+            world.1.ai_form.prompt.contains("@customers "),
+            "the live token was replaced: {:?}",
+            world.1.ai_form.prompt
+        );
+        assert!(
+            !world.1.ai_form.prompt.contains("@cuscustomers"),
+            "the replacement did not concatenate: {:?}",
+            world.1.ai_form.prompt
+        );
+    }
+
+    #[test]
+    fn the_generate_button_opens_the_band_and_closes_it_again() {
+        let ctx = egui::Context::default();
+        let mut world = world("ai-band", "select 1;\n");
+        assert!(!world.1.ai_band, "the band starts closed");
+        let open = click_hit(&ctx, &mut world, "Generate SQL", 1.05);
+        // The click is answered by the dispatch that runs after the band has been painted, so the
+        // band itself appears on the frame after — the repaint the dispatch asks for.
+        let _ = frame(&ctx, &mut world, open, 1.2);
+        let f = frame(&ctx, &mut world, Vec::new(), 1.3);
+        assert!(world.1.ai_band, "the toolbar opens the band");
+        assert!(
+            f.shows("Generate SQL") && f.shows("tables"),
+            "the band's own bands are painted: {:#?}",
+            f.strings
+        );
+        // The mention list is the engine's own answer for the open connection.
+        assert!(
+            f.shows("@customers"),
+            "the catalog's table is offered as a mention: {:#?}",
+            f.strings
+        );
+        // The band is a band, not a takeover: the editor is still painted, below the toolbar and
+        // with room of its own.
+        let sql = f.layout.sql.expect("the editor is still painted");
+        let toolbar = f.layout.toolbar.expect("the toolbar is still painted");
+        assert!(
+            sql.top() > toolbar.bottom(),
+            "the editor starts below the toolbar: sql {sql:?}, toolbar {toolbar:?}"
+        );
+        assert!(
+            sql.height() > 100.0,
+            "the band leaves the editor room to be an editor: {sql:?}"
+        );
+        // The whole form is painted, footer included — the band measures itself, so nothing is
+        // clipped by a guessed height.
+        for needle in [
+            "01", "PROVIDER", "02", "BASE URL", "03", "API KEY", "Generate", "Cancel",
+        ] {
+            assert!(
+                f.shows(needle),
+                "the band paints {needle:?}: {:#?}",
+                f.strings
+            );
+        }
+        assert!(
+            f.label("Generate").bottom() <= sql.top(),
+            "the footer sits above the editor, not on it"
+        );
+        let close = click_hit(&ctx, &mut world, "Close", 1.4);
+        let _ = frame(&ctx, &mut world, close, 1.5);
+        assert!(!world.1.ai_band, "Close puts it away");
+    }
+
+    #[test]
+    fn a_provider_that_needs_no_key_shows_no_key_field() {
+        // Ollama and vLLM take no key, so the column says so instead of offering a field whose value
+        // would be sent to a local server as an `Authorization` header.
+        let ctx = egui::Context::default();
+        let mut world = world("ai-keyless", "select 1;\n");
+        world.1.ai_band = true;
+        world.1.ai_form = crate::app::AiForm {
+            provider: nook_ai::Provider::Ollama,
+            ..crate::app::AiForm::default()
+        };
+        let f = frame(&ctx, &mut world, Vec::new(), 1.0);
+        assert!(
+            f.shows("not needed"),
+            "the key column says the provider takes none: {:#?}",
+            f.strings
+        );
+        assert!(
+            !f.shows("paste a key"),
+            "and offers no field to type one into: {:#?}",
+            f.strings
+        );
+    }
+
+    #[test]
+    fn a_provider_with_a_model_list_picks_from_a_dropdown() {
+        // The model step is a picker whenever the provider ships ids: the combo's button shows the
+        // effective model (the provider's own default while the field is empty), and no free-text
+        // field sits beside it to hold a second, disagreeing value.
+        let ctx = egui::Context::default();
+        let mut world = world("ai-model-picker", "select 1;\n");
+        world.1.ai_band = true;
+        world.1.ai_form = crate::app::AiForm {
+            provider: nook_ai::Provider::OpenAi,
+            ..crate::app::AiForm::default()
+        };
+        let f = frame(&ctx, &mut world, Vec::new(), 1.0);
+        assert!(
+            f.shows("MODEL"),
+            "the model step is painted: {:#?}",
+            f.strings
+        );
+        // The closed combo shows the provider's default, because the field is empty and that is
+        // what a request would send.
+        assert!(
+            f.shows("gpt-4o-mini"),
+            "the combo shows the effective model: {:#?}",
+            f.strings
+        );
+        assert!(
+            !f.shows("this server serves what it was started with"),
+            "the text-field note belongs to list-less providers only: {:#?}",
+            f.strings
+        );
+    }
+
+    #[test]
+    fn a_provider_without_a_model_list_keeps_the_free_text_field() {
+        // vLLM ships no ids — it serves what it was started with — so the picker would be an empty
+        // dropdown and the field is the only way to name a model.
+        let ctx = egui::Context::default();
+        let mut world = world("ai-model-fallback", "select 1;\n");
+        world.1.ai_band = true;
+        world.1.ai_form = crate::app::AiForm {
+            provider: nook_ai::Provider::Vllm,
+            ..crate::app::AiForm::default()
+        };
+        let f = frame(&ctx, &mut world, Vec::new(), 1.0);
+        assert!(
+            f.shows("this server serves what it was started with"),
+            "the list-less note is painted: {:#?}",
+            f.strings
         );
     }
 }

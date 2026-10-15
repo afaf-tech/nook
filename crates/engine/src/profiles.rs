@@ -41,6 +41,12 @@ pub fn jobs_path() -> PathBuf {
     config_dir().join("jobs.json")
 }
 
+/// The app's own SQLite database — the AI configuration today. Beside the profile store, and never
+/// one of the user's connections.
+pub fn ai_db_path() -> PathBuf {
+    config_dir().join("nook.db")
+}
+
 pub fn log_dir() -> PathBuf {
     config_dir().join("logs")
 }
@@ -102,6 +108,15 @@ impl ProfileStore {
         }
     }
 
+    /// Forget one preference, and say whether there was one. The key goes away rather than becoming
+    /// `null`, so the file does not collect keys nothing reads any more.
+    pub fn remove_setting(&mut self, key: &str) -> bool {
+        match self.settings.as_object_mut() {
+            Some(map) => map.remove(key).is_some(),
+            None => false,
+        }
+    }
+
     pub fn list(&self) -> &[ConnectionConfig] {
         &self.profiles
     }
@@ -146,8 +161,9 @@ impl ProfileStore {
     }
 }
 
-/// Only the owner may read the profile file: it can hold passwords when the keychain is not used.
-fn restrict_permissions(path: &std::path::Path) {
+/// Only the owner may read the file: it can hold passwords when the keychain is not used, and the
+/// app's database is treated the same way even though it holds none.
+pub(crate) fn restrict_permissions(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

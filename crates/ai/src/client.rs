@@ -250,13 +250,28 @@ pub fn parse_response(cfg: &AiConfig, body: &str) -> Result<String> {
             cfg.provider.label()
         )));
     }
-    let value: serde_json::Value = serde_json::from_str(body).map_err(|e| {
-        Error::config(format!(
-            "{}: the response is not JSON ({e}): {}",
-            cfg.provider.label(),
-            truncate(body, 200)
-        ))
-    })?;
+    // The first JSON value in the body, not the whole body as one: some OpenAI-compatible servers
+    // (vLLM among them) append bytes after the object — a second object, a keep-alive frame — and a
+    // strict parse would throw away an answer that is there. Whitespace is always allowed; only a
+    // body with no JSON at all is refused.
+    let mut stream = serde_json::Deserializer::from_str(body).into_iter::<serde_json::Value>();
+    let value = match stream.next() {
+        Some(Ok(value)) => value,
+        Some(Err(e)) => {
+            return Err(Error::config(format!(
+                "{}: the response is not JSON ({e}): {}",
+                cfg.provider.label(),
+                truncate(body, 200)
+            )));
+        }
+        None => {
+            return Err(Error::config(format!(
+                "{}: the response is not JSON: {}",
+                cfg.provider.label(),
+                truncate(body, 200)
+            )));
+        }
+    };
     let text = match cfg.provider.wire() {
         Wire::OpenAi => value.pointer("/choices/0/message/content"),
         Wire::Anthropic => value.pointer("/content/0/text"),
@@ -422,6 +437,10 @@ mod tests {
 
         let html = parse_response(&openai, "<html>502 Bad Gateway</html>").expect_err("not json");
         assert!(html.to_string().contains("not JSON"), "{html}");
+
+        // A server that appends bytes after the object: the answer inside the first value stands.
+        let trailing = r#"{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"SELECT 3;"}}]}{extra}"#;
+        assert_eq!(parse_response(&openai, trailing).expect("sql"), "SELECT 3;");
 
         let empty = parse_response(&openai, "{}").expect_err("no text");
         assert!(empty.to_string().contains("no text"), "{empty}");

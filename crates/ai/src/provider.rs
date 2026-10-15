@@ -153,10 +153,45 @@ impl Provider {
         }
     }
 
+    /// The models a form offers for this provider, the default first. A starting point rather than a
+    /// catalogue: every vendor ships new ids faster than an app can follow, which is why the model
+    /// field also takes free text. Empty means the provider names its own model (vLLM serves whatever
+    /// it was started with), so a form must ask for one instead of offering a list.
+    pub fn models(self) -> &'static [&'static str] {
+        match self {
+            Provider::OpenAi => &[
+                "gpt-4o-mini",
+                "gpt-4o",
+                "gpt-4.1-mini",
+                "gpt-4.1",
+                "o4-mini",
+            ],
+            Provider::Anthropic => &[
+                "claude-3-5-sonnet-latest",
+                "claude-3-5-haiku-latest",
+                "claude-3-7-sonnet-latest",
+                "claude-sonnet-4-0",
+            ],
+            Provider::DeepSeek => &["deepseek-chat", "deepseek-reasoner"],
+            Provider::Kimi => &["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+            Provider::Glm => &["glm-4-flash", "glm-4-air", "glm-4-plus"],
+            Provider::Ollama => &["llama3.1", "qwen2.5-coder", "mistral", "deepseek-r1"],
+            Provider::Vllm => &[],
+        }
+    }
+
     /// Whether a key is required. A local server takes none, and sending an empty
     /// `Authorization` header is worse than sending none at all.
     pub fn needs_key(self) -> bool {
         !matches!(self, Provider::Ollama | Provider::Vllm)
+    }
+}
+
+/// The provider a fresh install starts on, the same one `AiConfig::default` names: OpenAI. Kept here
+/// so a form can hold a provider before any configuration has been read.
+impl Default for Provider {
+    fn default() -> Self {
+        Provider::OpenAi
     }
 }
 
@@ -186,6 +221,43 @@ mod tests {
             assert_eq!(Provider::parse(provider.as_str()), Some(provider));
             assert!(!provider.label().trim().is_empty());
             assert!(provider.default_base().starts_with("http"));
+        }
+    }
+
+    /// The offered list starts with the default the engine would use, and a provider that cannot
+    /// name its own model offers none — the two facts a form's model control is built on.
+    #[test]
+    fn the_offered_models_start_with_the_default_and_vllm_offers_none() {
+        for provider in Provider::ALL {
+            let models = provider.models();
+            if provider == Provider::Vllm {
+                assert!(
+                    models.is_empty(),
+                    "vLLM serves whatever it was started with"
+                );
+                assert!(provider.default_model().is_empty());
+                continue;
+            }
+            assert!(
+                !models.is_empty(),
+                "{} offers no model to pick",
+                provider.label()
+            );
+            assert_eq!(
+                models[0],
+                provider.default_model(),
+                "{} offers a list that does not start with the default the engine would send",
+                provider.label()
+            );
+            let mut seen = models.to_vec();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(
+                seen.len(),
+                models.len(),
+                "{} lists a model twice",
+                provider.label()
+            );
         }
     }
 

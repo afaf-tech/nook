@@ -2108,6 +2108,7 @@ dependencies = [
  "nook-core",
  "nook-drivers",
  "nook-model",
+ "rusqlite",
  "serde",
  "serde_json",
 ]
@@ -2136,6 +2137,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "nook-ai",
  "nook-core",
  "nook-drivers",
  "nook-engine",

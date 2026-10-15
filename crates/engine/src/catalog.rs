@@ -248,7 +248,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Data",
         "grid.formView",
         "Form view",
-        "not implemented; the record panel is in the roadmap",
+        "",
     ),
     (
         "Data",

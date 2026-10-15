@@ -6,7 +6,7 @@
     clippy::todo,
     clippy::unreachable
 )]
-//! L4: the session — every user-visible action is a command with an id, and the session owns
+//! L3: the session — every user-visible action is a command with an id, and the session owns
 //! connections, tabs, the grid buffer, query history and the job store.
 
 pub mod catalog;
@@ -17,6 +17,7 @@ pub mod parity;
 pub mod profiles;
 pub mod report;
 pub mod sqltext;
+pub mod store;
 pub mod tunnel;
 
 use std::collections::BTreeMap;
@@ -621,23 +622,60 @@ impl Session {
             next_tab_id: 1,
             home,
         };
-        // The AI settings are one nested object, so a field added in a later version does not
-        // invalidate a blob an older run wrote — `serde` defaults fill the gaps. A blob that cannot
-        // be read at all is said out loud: the settings in it are the user's, and silently running on
-        // the defaults would look like the app forgetting them.
-        if let Some(ai) = session.profiles.settings().get("ai").cloned() {
-            match serde_json::from_value::<nook_ai::AiConfig>(ai) {
-                Ok(cfg) => session.settings.ai = cfg,
-                Err(e) => session.log(
-                    Level::Warn,
-                    format!(
-                        "the saved AI settings could not be read, so the defaults are in use: {e}"
-                    ),
-                ),
-            }
-        }
+        // The AI configuration lives in the app's own database, not in the profile file. See
+        // `load_ai_configuration` for how an install that predates it is carried over.
+        session.load_ai_configuration();
         session.log(Level::Info, "Nook ready");
         session
+    }
+
+    /// Put the AI configuration in place at start-up.
+    ///
+    /// The database is where it is written (`store.rs`). An install that predates it still has the
+    /// blob this feature used to write into `profiles.json`, so that is read here as a fallback — a
+    /// start reads and never writes, so opening the app cannot rewrite the user's files. The first
+    /// settings change is what moves the value across and drops the blob (`save_ai_configuration`).
+    /// Anything that fails leaves the defaults and says so: a settings file is not worth refusing to
+    /// start over.
+    fn load_ai_configuration(&mut self) {
+        match store::load_ai() {
+            Ok(Some(cfg)) => self.settings.ai = cfg,
+            Ok(None) => self.adopt_legacy_ai_blob(),
+            Err(e) => self.log(
+                Level::Warn,
+                format!("the AI settings could not be read, so the defaults are in use: {e}"),
+            ),
+        }
+    }
+
+    /// Read the blob an earlier version wrote into the profile file, leaving the file alone.
+    fn adopt_legacy_ai_blob(&mut self) {
+        let Some(blob) = self.profiles.settings().get("ai") else {
+            return;
+        };
+        match serde_json::from_value::<nook_ai::AiConfig>(blob.clone()) {
+            Ok(cfg) => self.settings.ai = cfg,
+            Err(e) => self.log(
+                Level::Warn,
+                format!("the saved AI settings could not be read, so the defaults are in use: {e}"),
+            ),
+        }
+    }
+
+    /// Write the AI configuration to the database, and — for an install that still carries the blob
+    /// an earlier version wrote — drop that blob, so afterwards there is one place the settings can
+    /// be. The database write happens first: a failure here must not cost the user the value.
+    pub fn save_ai_configuration(&mut self) -> Result<()> {
+        store::save_ai(&self.settings.ai)?;
+        if self.profiles.remove_setting("ai") {
+            if let Err(e) = self.profiles.save() {
+                self.log(
+                    Level::Warn,
+                    format!("the old AI settings could not be removed from the profile file: {e}"),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Session with the saved profiles preloaded as connections.
@@ -896,9 +934,9 @@ pub(crate) mod test_support {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join("nook-test-config");
         let _ = std::fs::create_dir_all(&dir);
-        // Start from an empty store every time: a leftover jobs.json from a previous run would
-        // change what the test sees.
-        for file in ["jobs.json", "profiles.json"] {
+        // Start from an empty store every time: a leftover jobs.json or nook.db from a previous run
+        // would change what the test sees.
+        for file in ["jobs.json", "profiles.json", "nook.db"] {
             let _ = std::fs::remove_file(dir.join(file));
         }
         std::env::set_var("NOOK_CONFIG_DIR", dir);
@@ -973,23 +1011,62 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_file_that_names_a_provider_the_way_a_person_would_still_loads() {
+    fn a_legacy_blob_is_read_at_start_and_moved_on_the_first_change() {
         let _guard = test_support::scratch_config();
         let file = profiles::config_dir().join("profiles.json");
         let written = json!({
             "version": 1,
             "profiles": [],
-            "settings": {"ai": {"provider": "moonshot", "model": "moonshot-v1-8k"}}
+            "settings": {
+                "ai": {"provider": "moonshot", "model": "moonshot-v1-8k"},
+                "density": "compact"
+            }
         });
         std::fs::write(&file, written.to_string()).expect("write the settings file");
 
-        let session = Session::new();
+        // A start reads it — the alias is read the way the rest of the surface reads a provider
+        // name — and writes nothing: opening the app does not rewrite the user's files.
+        let mut session = Session::new();
         assert_eq!(session.settings.ai.provider, nook_ai::Provider::Kimi);
         assert_eq!(session.settings.ai.model, "moonshot-v1-8k");
+        assert_eq!(
+            store::load_ai().expect("the database"),
+            None,
+            "nothing written yet"
+        );
+        let untouched = profiles::ProfileStore::load().expect("reload the store");
+        assert!(
+            untouched.settings().get("ai").is_some(),
+            "the blob was not touched"
+        );
+
+        // The first settings change is what moves it, and the old key goes with it.
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_model", "value": "moonshot-v1-128k"}),
+            )
+            .expect("set the model");
+        assert_eq!(
+            store::load_ai().expect("the database").map(|c| c.model),
+            Some("moonshot-v1-128k".to_string()),
+            "the value reached the database"
+        );
+        let after = profiles::ProfileStore::load().expect("reload the store");
+        assert!(after.settings().get("ai").is_none(), "{}", after.settings());
+        assert_eq!(
+            after.settings().get("density"),
+            Some(&json!("compact")),
+            "everything beside it is still there"
+        );
+
+        // A later start reads the database, not the file.
+        let again = Session::new();
+        assert_eq!(again.settings.ai.model, "moonshot-v1-128k");
     }
 
     #[test]
-    fn an_ai_blob_that_cannot_be_read_is_said_out_loud() {
+    fn a_legacy_blob_that_cannot_be_read_is_said_out_loud_and_left_alone() {
         let _guard = test_support::scratch_config();
         let file = profiles::config_dir().join("profiles.json");
         let written = json!({
@@ -1009,6 +1086,170 @@ mod tests {
                 .iter()
                 .any(|m| m.level == Level::Warn && m.text.contains("AI settings")),
             "the file named a provider that does not exist, and nothing was said: {:?}",
+            session.messages
+        );
+        // Nothing was written, so nothing may be deleted: a bad read must not cost the user the blob.
+        let after = profiles::ProfileStore::load().expect("reload the store");
+        assert!(after.settings().get("ai").is_some(), "{}", after.settings());
+        assert_eq!(store::load_ai().expect("the database"), None);
+    }
+
+    #[test]
+    fn a_preference_change_outlives_the_session() {
+        let _guard = test_support::scratch_config();
+        let mut session = Session::new();
+        // The provider first, then the model: a switch clears what belonged to the old provider, so
+        // the other order would test the clearing rule rather than persistence.
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_provider", "value": "ollama"}),
+            )
+            .expect("set the provider");
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_model", "value": "llama3.1"}),
+            )
+            .expect("set the model");
+
+        let stored = std::fs::read_to_string(profiles::config_dir().join("profiles.json"))
+            .unwrap_or_default();
+        assert!(
+            !stored.contains("\"ai\""),
+            "the profile file kept the AI settings: {stored}"
+        );
+
+        let restart = Session::new();
+        assert_eq!(restart.settings.ai.provider, nook_ai::Provider::Ollama);
+        assert_eq!(restart.settings.ai.model, "llama3.1");
+    }
+
+    #[test]
+    fn switching_provider_drops_the_model_and_the_address_that_belonged_to_the_old_one() {
+        let _guard = test_support::scratch_config();
+        let mut session = Session::new();
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_model", "value": "gpt-4o"}),
+            )
+            .expect("set the model");
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_base_url", "value": "https://gateway.example/v1"}),
+            )
+            .expect("set the address");
+
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_provider", "value": "anthropic"}),
+            )
+            .expect("switch provider");
+        // A model id that belongs to another vendor is a request the server refuses, and the endpoint
+        // is another vendor's host: both fall back to the new provider's own.
+        assert_eq!(session.settings.ai.model, "");
+        assert_eq!(session.settings.ai.base_url, "");
+        assert_eq!(session.settings.ai.provider, nook_ai::Provider::Anthropic);
+
+        // A restart agrees, so the rule reached the store and not only the running session.
+        let restart = Session::new();
+        assert_eq!(restart.settings.ai.model, "");
+        assert_eq!(restart.settings.ai.base_url, "");
+
+        // Re-picking the provider already chosen is not a switch, so it clears nothing.
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_model", "value": "claude-3-5-sonnet-latest"}),
+            )
+            .expect("set the model");
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_provider", "value": "anthropic"}),
+            )
+            .expect("re-pick the same provider");
+        assert_eq!(session.settings.ai.model, "claude-3-5-sonnet-latest");
+    }
+
+    #[test]
+    fn the_database_wins_over_a_blob_left_behind() {
+        let _guard = test_support::scratch_config();
+        let mut session = Session::new();
+        session
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_model", "value": "stored-model"}),
+            )
+            .expect("set the model");
+
+        // A hand-edited file that disagrees with the database.
+        let mut store = profiles::ProfileStore::load().expect("load");
+        store.set_setting("ai", json!({"provider": "openai", "model": "hand-written"}));
+        store.save().expect("save");
+
+        let mut restart = Session::new();
+        assert_eq!(
+            restart.settings.ai.model, "stored-model",
+            "the database is the source"
+        );
+
+        // The blob is not touched by a start, and the next write is what clears it, so the two
+        // cannot disagree from then on.
+        assert!(profiles::ProfileStore::load()
+            .expect("reload")
+            .settings()
+            .get("ai")
+            .is_some());
+        restart
+            .run(
+                "app.setSetting",
+                json!({"key": "ai_model", "value": "next"}),
+            )
+            .expect("set the model again");
+        let after = profiles::ProfileStore::load().expect("reload");
+        assert!(after.settings().get("ai").is_none(), "{}", after.settings());
+    }
+
+    #[test]
+    fn an_unreadable_row_warns_and_leaves_the_defaults() {
+        let _guard = test_support::scratch_config();
+        store::save_ai(&nook_ai::AiConfig {
+            model: "stored".into(),
+            ..nook_ai::AiConfig::default()
+        })
+        .expect("save");
+        // A row the app did not write: the right shape, a provider this build does not know.
+        let conn = rusqlite::Connection::open(profiles::ai_db_path()).expect("open the database");
+        conn.execute("UPDATE ai_config SET provider = 'opemai' WHERE id = 1", [])
+            .expect("break the row");
+        drop(conn);
+
+        let session = Session::new();
+        assert_eq!(session.settings.ai.provider, nook_ai::Provider::OpenAi);
+        assert!(
+            session
+                .messages
+                .iter()
+                .any(|m| m.level == Level::Warn && m.text.contains("AI settings")),
+            "{:?}",
+            session.messages
+        );
+    }
+
+    #[test]
+    fn a_normal_start_says_nothing_about_the_ai_configuration() {
+        let _guard = test_support::scratch_config();
+        let session = Session::new();
+        assert!(
+            !session
+                .messages
+                .iter()
+                .any(|m| m.level == Level::Warn && m.text.contains("AI settings")),
+            "a first run is not a problem: {:?}",
             session.messages
         );
     }

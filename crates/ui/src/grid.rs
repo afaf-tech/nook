@@ -200,6 +200,16 @@ pub fn show(
                 }
             }
 
+            // Form view: one record as a vertical form. A flag on the UI state, not the engine's:
+            // the engine command is stateless and reads whatever row it is handed.
+            if design::ghost_button(ui, tokens, "Form", true)
+                .on_hover_text("Show the selected record as a form")
+                .clicked()
+            {
+                state.form_view = !state.form_view;
+            }
+            design::divider(ui, tokens);
+
             // Right cluster: the `.pend` cluster pinned to the edge, then Export. With nothing
             // staged there is no cluster — `pending_cluster` returns `None` for an empty buffer.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -448,6 +458,92 @@ pub fn show(
             ));
         }
         TableEvent::None => {}
+    }
+
+    // Form view: the selected record as a vertical form. The engine command overlays the pending
+    // `SetCell` edits for the row, so the form shows what `grid.apply` will send — the UI merges
+    // nothing. The row is passed explicitly: the engine's cursor is never written, so a default
+    // there would silently show the first record.
+    if state.form_view {
+        let selected_row = state.table(tab_index).selected.map(|(r, _)| r).unwrap_or(0);
+        match session.run("grid.formView", serde_json::json!({"row": selected_row})) {
+            Ok(out) => {
+                let row = out["row"].as_u64().unwrap_or(0) as usize;
+                let editable_form = out["editable"].as_bool().unwrap_or(false);
+                design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Record {row}"))
+                            .size(design::T_MD)
+                            .color(tokens.text),
+                    );
+                    if !editable_form {
+                        design::tag_lite(ui, tokens, "read-only");
+                    }
+                });
+                if let Some(fields) = out["fields"].as_array() {
+                    egui::Grid::new(("form_view", tab_index))
+                        .num_columns(3)
+                        .show(ui, |ui| {
+                            for f in fields {
+                                let name = f["name"].as_str().unwrap_or_default().to_owned();
+
+                                ui.label(RichText::new(&name).color(tokens.text_dim));
+                                if f["primary_key"].as_bool().unwrap_or(false) {
+                                    design::pk_badge(ui, tokens, "PK");
+                                } else {
+                                    ui.label("");
+                                }
+                                // A fresh buffer per frame would drop every keystroke at frame
+                                // end: the edit text lives in the widget state instead, keyed by
+                                // tab+row+column, so another record never wears this one's text.
+                                // The widget renders OUTSIDE `data_mut` — that closure holds the
+                                // context's write lock, and TextEdit takes it again for its own
+                                // state: recursive write lock = a hang in release, a deadlock
+                                // panic in debug.
+                                let field_id =
+                                    egui::Id::new(("form_field", tab_index, row, &name));
+                                let shown = f["display"].as_str().unwrap_or_default().to_owned();
+                                let mut text = ui.ctx().data_mut(|d| {
+                                    d.get_temp(field_id).unwrap_or_else(|| shown.clone())
+                                });
+                                let edited = ui.add_enabled(
+                                    editable_form,
+                                    egui::TextEdit::singleline(&mut text).desired_width(320.0),
+                                );
+                                ui.ctx().data_mut(|d| d.insert_temp(field_id, text.clone()));
+                                if editable_form && edited.lost_focus() && text != shown {
+                                    command = Some((
+                                        "grid.editCell",
+                                        serde_json::json!({"row": row, "column": name, "value": text}),
+                                    ));
+                                }
+                                if editable_form
+                                    && !f["value"].is_null()
+                                    && design::ghost_button(ui, tokens, "NULL", true)
+                                        .on_hover_text("Set this field to NULL")
+                                        .clicked()
+                                {
+                                    command = Some((
+                                        "grid.setNull",
+                                        serde_json::json!({"row": row, "column": name}),
+                                    ));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                }
+            }
+            // A row outside the page is an honest error band, never an empty form.
+            Err(e) => {
+                design::error_band(ui, tokens, "Form view failed", &e.to_string(), |ui| {
+                    if design::ghost_button(ui, tokens, "Close form", true).clicked() {
+                        state.form_view = false;
+                    }
+                });
+            }
+        }
     }
 
     // `.empty`, painted after the widget so the head stays on screen. The widget's own fallback copy
