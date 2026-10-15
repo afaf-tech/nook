@@ -301,9 +301,14 @@ pub fn load_grid(session: &mut Session, tab_index: usize) -> Result<()> {
 ///
 /// The binding is taken when the tab opens — `GridState::columns`, `GridState::primary_key` and
 /// the page beside them describe the table as it was then. A schema edit made since, in the designer,
-/// the SQL editor or another client altogether, leaves the tab planning against columns that are
-/// gone, and a stale `WHERE` is worse than an error: SQLite reads a double-quoted name that matches
-/// no column as a string literal, so the statement matched no row while the grid reported it applied.
+/// the SQL editor or the CLI, leaves the tab planning against columns that are gone, and a stale
+/// `WHERE` is worse than an error: SQLite reads a double-quoted name that matches no column as a
+/// string literal, so the statement matched no row while the grid reported it applied.
+///
+/// Every schema path in this process refreshes the catalog after it writes — `schema.*` here, and
+/// `sql.run` for a script that may have changed the shape — so the catalog is what this reads. A
+/// change made by another process is not seen until the next refresh, which is what `grid.apply`'s
+/// own check covers: it refuses an instruction that changed no row rather than report a no-op.
 ///
 /// ponytail: the page is fetched again only when it no longer describes the table, so a schema change
 /// costs one round trip and a stable schema costs a catalog lookup. Reloading smartly (keeping the

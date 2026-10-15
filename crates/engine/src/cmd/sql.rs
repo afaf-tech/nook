@@ -162,6 +162,13 @@ fn run_and_record(
         Ok(result) => {
             let elapsed_ms = result.elapsed_ms;
             let summary = statement_summary(index, statement, Some(&result), elapsed_ms, None);
+            // A statement can change the shape of the database — `ALTER TABLE … RENAME COLUMN` typed
+            // in the editor is the one users type — and every reader of the catalog (an open data tab
+            // planning an edit, the tree, the inspector) would otherwise describe the old shape until
+            // someone refreshed by hand.
+            if may_change_the_shape(statement) {
+                let _ = super::refresh_catalog(session, conn);
+            }
             record_run(
                 session,
                 StatementRun {
@@ -188,6 +195,39 @@ fn run_and_record(
             Err(e)
         }
     }
+}
+
+/// Whether a statement may have changed the shape of the database, in which case the connection's
+/// catalog is read again after it runs.
+///
+/// ponytail: the leading keyword decides, so a statement that merely starts with one of these words
+/// (a comment-free `CREATE TEMP VIEW` nobody looks at) costs one catalog read it did not need. Being
+/// wrong the other way is what leaves an open data tab planning edits against columns that are gone.
+fn may_change_the_shape(statement: &str) -> bool {
+    let first = sqltext::tokenize(statement)
+        .into_iter()
+        .find(|token| {
+            matches!(
+                token.kind,
+                sqltext::TokenKind::Word | sqltext::TokenKind::Keyword
+            )
+        })
+        .map(|token| token.text.to_ascii_uppercase());
+    matches!(
+        first.as_deref(),
+        Some(
+            "ALTER"
+                | "CREATE"
+                | "DROP"
+                | "RENAME"
+                | "TRUNCATE"
+                | "COMMENT"
+                | "GRANT"
+                | "REVOKE"
+                | "VACUUM"
+                | "REINDEX"
+        )
+    )
 }
 
 fn summarize(
@@ -979,5 +1019,72 @@ mod tests {
         let p = Params::from_json(json!({"prefix": "sel"})).expect("params");
         let out = complete(&mut session, &p).expect("complete");
         assert!(out["candidates"].as_array().map(Vec::len).unwrap_or(0) > 0);
+    }
+
+    /// The column names one connection's catalog holds for a table.
+    fn catalog_columns(session: &Session, conn: &str, table: &str) -> Vec<String> {
+        let index = session
+            .conn_index(conn)
+            .expect("the connection is registered");
+        session.conns[index]
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.find_table(None, table))
+            .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_shape_changing_keyword_is_read_past_a_comment() {
+        assert!(may_change_the_shape(
+            "ALTER TABLE users RENAME COLUMN id TO uid"
+        ));
+        assert!(may_change_the_shape(
+            "  -- renamed later\ncreate index ix on users (email)"
+        ));
+        assert!(may_change_the_shape("drop table users;"));
+        assert!(!may_change_the_shape("select * from users"));
+        assert!(!may_change_the_shape(
+            "with t as (select 1) select * from t"
+        ));
+        assert!(!may_change_the_shape("insert into users values (1, 'a')"));
+        assert!(!may_change_the_shape(""));
+    }
+
+    #[test]
+    fn a_run_that_changes_the_shape_refreshes_the_catalog() {
+        let (_guard, mut session, _tab) = live_session();
+        session
+            .run(
+                "sql.run",
+                json!({"sql": "create table t (id integer primary key, note text)"}),
+            )
+            .expect("create");
+        assert_eq!(
+            catalog_columns(&session, "local", "t"),
+            vec!["id".to_string(), "note".to_string()],
+            "a table the editor just created is in the catalog"
+        );
+
+        session
+            .run(
+                "sql.run",
+                json!({"sql": "alter table t rename column note to memo"}),
+            )
+            .expect("rename");
+        assert_eq!(
+            catalog_columns(&session, "local", "t"),
+            vec!["id".to_string(), "memo".to_string()],
+            "and a rename reads the new name"
+        );
+
+        // A statement that only reads leaves the catalog where it was.
+        session
+            .run("sql.run", json!({"sql": "select * from t"}))
+            .expect("select");
+        assert_eq!(
+            catalog_columns(&session, "local", "t"),
+            vec!["id".to_string(), "memo".to_string()]
+        );
     }
 }

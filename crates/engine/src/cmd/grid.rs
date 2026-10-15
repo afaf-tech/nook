@@ -627,20 +627,33 @@ fn apply(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
         session.driver_for(conn)?.begin()?;
     }
     let mut applied = 0usize;
-    for sql in &statements {
-        match run_sql(session, conn, sql, Some(1)) {
-            Ok(_) => applied += 1,
-            Err(e) => {
-                if in_transaction {
-                    let _ = session.driver_for(conn).and_then(|d| d.rollback());
-                }
-                session.log(
-                    Level::Error,
-                    format!("edit {applied} of {} failed; rolled back", statements.len()),
-                );
-                return Err(e);
+    for (edit, sql) in pending.iter().zip(&statements) {
+        // An `UPDATE` or a `DELETE` keyed by a primary key changes exactly one row, so a driver that
+        // reports none changed nothing, and saying "applied" would be a lie the data disagrees with.
+        // Without this, a key that moved under the tab makes the edit a silent no-op: SQLite reads a
+        // double-quoted name that matches no column as a string literal, and the statement then
+        // matches no row at all. A row that is gone (deleted elsewhere) lands here too, and the user
+        // should hear about it rather than be told their edit landed.
+        let one_row = matches!(edit.kind, EditKind::SetCell | EditKind::DeleteRow);
+        let failure = match run_sql(session, conn, sql, Some(1)) {
+            Ok(result) if one_row && result.affected == 0 => Some(Error::config(format!(
+                "the edit changed no row, so nothing was applied: {sql}\n\
+                 The row or the table may have moved under this tab — reload it and edit again."
+            ))),
+            Ok(_) => None,
+            Err(e) => Some(e),
+        };
+        if let Some(e) = failure {
+            if in_transaction {
+                let _ = session.driver_for(conn).and_then(|d| d.rollback());
             }
+            session.log(
+                Level::Error,
+                format!("edit {applied} of {} failed; rolled back", statements.len()),
+            );
+            return Err(e);
         }
+        applied += 1;
     }
     if in_transaction {
         session.driver_for(conn)?.commit()?;
@@ -798,6 +811,10 @@ fn cell_value(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 /// row the grid painted, arranged for a table too wide to read across.
 fn form_view(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    // The form offers a field per column, so it reads the same binding an edit plans against: without
+    // this it lists the names and types the tab was opened with, and an edit made from a field the
+    // table no longer has dies on the server instead of being refused here.
+    sync_grid_table(session, index)?;
     let tab = &session.tabs[index];
     let grid = &tab.grid;
     // `row` is explicit. The engine's cursor is not kept in step with the grid's selection, so

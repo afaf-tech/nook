@@ -46,6 +46,16 @@ impl Fixture {
             .unwrap_or_else(|e| panic!("{id} failed: {e}"))
     }
 
+    /// The same, for the cases that assert on the error a command answers.
+    fn try_run(
+        &mut self,
+        id: &str,
+        mut params: serde_json::Value,
+    ) -> nook_core::Result<serde_json::Value> {
+        params["conn"] = json!(self.conn);
+        self.session.run(id, params)
+    }
+
     /// `SELECT email FROM users` in insertion order — the data, not the grid's account of it.
     fn emails(&mut self) -> Vec<String> {
         let value = self.run(
@@ -153,6 +163,87 @@ fn an_edit_planned_before_a_schema_change_still_lands() {
         vec!["a@b.c".to_string(), "after@edit".to_string()],
         "the pending edit has to land on the row it was made against"
     );
+}
+
+#[test]
+fn a_rename_run_in_the_editor_is_seen_by_the_next_edit() {
+    let mut f = Fixture::new("editor-ddl");
+    f.open_users();
+
+    // The user's own door: a statement typed in the editor, not a designer command.
+    f.run(
+        "sql.run",
+        json!({"sql": "ALTER TABLE users RENAME COLUMN id TO uid"}),
+    );
+
+    let planned = f.run(
+        "grid.editCell",
+        json!({"row": 0, "column": "email", "value": "e@d.it"}),
+    );
+    assert!(
+        planned["sql"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("\"uid\" = 1"),
+        "the edit has to be keyed on the column the table has now: {}",
+        planned["sql"]
+    );
+    f.run("grid.apply", json!({}));
+    assert_eq!(f.emails(), vec!["e@d.it".to_string(), "d@e.f".to_string()]);
+}
+
+#[test]
+fn an_edit_of_a_row_that_is_gone_is_refused_not_reported() {
+    let mut f = Fixture::new("row-gone");
+    f.open_users();
+    f.run(
+        "grid.editCell",
+        json!({"row": 1, "column": "email", "value": "x@y.z"}),
+    );
+
+    // Another client deletes the row the edit was made against.
+    f.run("sql.run", json!({"sql": "DELETE FROM users WHERE id = 2"}));
+
+    let err = f
+        .try_run("grid.apply", json!({}))
+        .expect_err("an edit of a row that is gone has to be refused");
+    assert!(
+        err.to_string().contains("changed no row"),
+        "the refusal has to say what happened: {err}"
+    );
+    assert_eq!(
+        f.emails(),
+        vec!["a@b.c".to_string()],
+        "and it must not have changed anything else"
+    );
+}
+
+#[test]
+fn the_form_lists_the_columns_the_table_has_now() {
+    let mut f = Fixture::new("form");
+    f.open_users();
+    f.run(
+        "schema.renameColumn",
+        json!({"table": "users", "column": "id", "new_name": "uid"}),
+    );
+
+    let form = f.run("grid.formView", json!({"row": 0}));
+    let names: Vec<&str> = form["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .map(|field| field["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["uid", "email"],
+        "the form offers the fields the table has"
+    );
+    assert_eq!(
+        form["fields"][0]["primary_key"], true,
+        "and the key it reports is the key the edit will be planned with"
+    );
+    assert_eq!(form["fields"][0]["value"], 1);
 }
 
 #[test]
