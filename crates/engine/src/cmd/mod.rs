@@ -386,7 +386,6 @@ pub(crate) fn dialect_name(d: nook_core::Dialect) -> &'static str {
     }
 }
 
-/// Primary-key values for a grid row, used when planning an edit.
 /// The row a key belongs to on this page, or `None` when the page does not hold that record.
 ///
 /// A page moves under a pending edit — a sort, a filter, a page turn — so the row an edit was made on
@@ -417,6 +416,7 @@ pub fn row_of_key(
     })
 }
 
+/// Primary-key values for a grid row, used when planning an edit.
 pub(crate) fn pk_values(tab: &Tab, row: usize) -> Result<Vec<(String, nook_core::Value)>> {
     let mut out = Vec::new();
     for column in &tab.grid.primary_key {

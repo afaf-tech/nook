@@ -350,9 +350,11 @@ pub struct PendingEdit {
     ///
     /// The pairing is positional, so a key *set* replaced by another one of the same arity between the
     /// edit and the apply would pair an old value with a new name. Carrying the names instead would
-    /// refuse the renamed key column above, which is the common case; SQLite cannot replace a key at
-    /// all, and on MySQL and Postgres it takes a deliberate pair of statements while the tab is open,
-    /// so the tradeoff is the one worth making.
+    /// refuse the renamed key column above, which is the common case. The one door into the bad case is
+    /// a key replacement typed straight into the SQL editor (`ALTER TABLE t DROP PRIMARY KEY, ADD
+    /// PRIMARY KEY (other)` on MySQL) while a tab holds a pending edit; no Nook editor replaces a key,
+    /// and SQLite cannot. The tradeoff is still the one worth making, and it is named here rather than
+    /// left to be discovered.
     pub key: Vec<Value>,
     /// The statement this edit planned to. The grid shows it; the apply re-plans it.
     pub sql: String,
