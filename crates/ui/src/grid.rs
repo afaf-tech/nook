@@ -7,6 +7,18 @@ use crate::app::UiState;
 use crate::table::{TableColumn, TableEvent, TableView};
 use crate::theme::{self as design, Tokens};
 
+/// The form band's columns: the name box, the `PK` badge, the value field, the `NULL` button. Fixed
+/// so the fields of every row start at the same x, whatever the record holds.
+const FORM_NAME_W: f32 = 132.0;
+const FORM_BADGE_W: f32 = 36.0;
+const FORM_FIELD_W: f32 = 320.0;
+const FORM_NULL_W: f32 = 56.0;
+/// One form row, and the header the band spends before its first field.
+const FORM_ROW_H: f32 = 30.0;
+const FORM_HEAD_H: f32 = 40.0;
+/// The band's floor: a one-column record still shows its header and a row of context.
+const FORM_MIN_H: f32 = 112.0;
+
 pub fn show(
     ui: &mut egui::Ui,
     session: &mut Session,
@@ -380,8 +392,18 @@ pub fn show(
     // rather than clipped. The widget floors its own viewport at `HEAD_H`, so the block lands 28px
     // under the hairline as the design has it.
     let empty = empty_state(rows.len(), filter_count);
+    // The form band shares the pane with the table, so its height is reserved *before* the table asks
+    // for its own. A table that claims the pane leaves the form the 96px under it: the header and one
+    // row, cut off mid-row at the bottom of the window. The record is read here, once, because the
+    // reservation needs the field count and the band must not run the command a second time.
+    let form = state
+        .form_view
+        .then(|| form_record(session, tab_index, state));
+    let form_h = form
+        .as_ref()
+        .map_or(0.0, |record| form_height(record, ui.available_height()));
     let available = match empty {
-        EmptyState::None => (ui.available_height() - 96.0).max(140.0),
+        EmptyState::None => (ui.available_height() - 96.0 - form_h).max(140.0),
         _ => 0.0,
     };
     let (title, body) = empty_copy(&empty, &table_name);
@@ -460,89 +482,10 @@ pub fn show(
         TableEvent::None => {}
     }
 
-    // Form view: the selected record as a vertical form. The engine command overlays the pending
-    // `SetCell` edits for the row, so the form shows what `grid.apply` will send — the UI merges
-    // nothing. The row is passed explicitly: the engine's cursor is never written, so a default
-    // there would silently show the first record.
-    if state.form_view {
-        let selected_row = state.table(tab_index).selected.map(|(r, _)| r).unwrap_or(0);
-        match session.run("grid.formView", serde_json::json!({"row": selected_row})) {
-            Ok(out) => {
-                let row = out["row"].as_u64().unwrap_or(0) as usize;
-                let editable_form = out["editable"].as_bool().unwrap_or(false);
-                design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("Record {row}"))
-                            .size(design::T_MD)
-                            .color(tokens.text),
-                    );
-                    if !editable_form {
-                        design::tag_lite(ui, tokens, "read-only");
-                    }
-                });
-                if let Some(fields) = out["fields"].as_array() {
-                    egui::Grid::new(("form_view", tab_index))
-                        .num_columns(3)
-                        .show(ui, |ui| {
-                            for f in fields {
-                                let name = f["name"].as_str().unwrap_or_default().to_owned();
-
-                                ui.label(RichText::new(&name).color(tokens.text_dim));
-                                if f["primary_key"].as_bool().unwrap_or(false) {
-                                    design::pk_badge(ui, tokens, "PK");
-                                } else {
-                                    ui.label("");
-                                }
-                                // A fresh buffer per frame would drop every keystroke at frame
-                                // end: the edit text lives in the widget state instead, keyed by
-                                // tab+row+column, so another record never wears this one's text.
-                                // The widget renders OUTSIDE `data_mut` — that closure holds the
-                                // context's write lock, and TextEdit takes it again for its own
-                                // state: recursive write lock = a hang in release, a deadlock
-                                // panic in debug.
-                                let field_id =
-                                    egui::Id::new(("form_field", tab_index, row, &name));
-                                let shown = f["display"].as_str().unwrap_or_default().to_owned();
-                                let mut text = ui.ctx().data_mut(|d| {
-                                    d.get_temp(field_id).unwrap_or_else(|| shown.clone())
-                                });
-                                let edited = ui.add_enabled(
-                                    editable_form,
-                                    egui::TextEdit::singleline(&mut text).desired_width(320.0),
-                                );
-                                ui.ctx().data_mut(|d| d.insert_temp(field_id, text.clone()));
-                                if editable_form && edited.lost_focus() && text != shown {
-                                    command = Some((
-                                        "grid.editCell",
-                                        serde_json::json!({"row": row, "column": name, "value": text}),
-                                    ));
-                                }
-                                if editable_form
-                                    && !f["value"].is_null()
-                                    && design::ghost_button(ui, tokens, "NULL", true)
-                                        .on_hover_text("Set this field to NULL")
-                                        .clicked()
-                                {
-                                    command = Some((
-                                        "grid.setNull",
-                                        serde_json::json!({"row": row, "column": name}),
-                                    ));
-                                }
-                                ui.end_row();
-                            }
-                        });
-                }
-            }
-            // A row outside the page is an honest error band, never an empty form.
-            Err(e) => {
-                design::error_band(ui, tokens, "Form view failed", &e.to_string(), |ui| {
-                    if design::ghost_button(ui, tokens, "Close form", true).clicked() {
-                        state.form_view = false;
-                    }
-                });
-            }
+    // Form view: the selected record as a vertical form, under the table it belongs to.
+    if let Some(record) = &form {
+        if let Some(edit) = form_band(ui, tokens, record, tab_index, state) {
+            command = Some(edit);
         }
     }
 
@@ -745,6 +688,157 @@ pub fn show(
             session.log(Level::Error, e.to_string());
         }
     }
+}
+
+/// The record the form is showing, read once per frame: the table's `available` height needs the
+/// field count before the table is laid out, and the band then paints this same answer.
+fn form_record(
+    session: &mut Session,
+    tab_index: usize,
+    state: &mut UiState,
+) -> Result<serde_json::Value, String> {
+    let selected_row = state.table(tab_index).selected.map(|(r, _)| r).unwrap_or(0);
+    session
+        .run("grid.formView", serde_json::json!({"row": selected_row}))
+        .map_err(|e| e.to_string())
+}
+
+/// Height the form band takes from the pane: the header, one row per field, and room to see that
+/// there is more — floored so a two-column record still reads as a form, and capped at half the pane
+/// so a wide record cannot leave the table it belongs to a strip. The band scrolls for the rest.
+fn form_height(record: &Result<serde_json::Value, String>, pane: f32) -> f32 {
+    let fields = record
+        .as_ref()
+        .ok()
+        .and_then(|out| out["fields"].as_array().map(Vec::len))
+        .unwrap_or(0);
+    let wanted = FORM_HEAD_H + (fields.max(1) + 1) as f32 * FORM_ROW_H;
+    wanted.clamp(FORM_MIN_H, (pane * 0.5).max(FORM_MIN_H))
+}
+
+/// One cell of a form row. The width is reserved before the cell paints, so no row's columns depend on
+/// what the frames before it measured: egui's grid learns a column's width a frame late, which moves
+/// the fields of a record whose badge or `NULL` button is missing and jitters the rest by a pixel.
+fn form_cell<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, FORM_ROW_H),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            add(ui)
+        },
+    )
+    .inner
+}
+
+/// The selected record as a vertical form, painted under the table it belongs to.
+///
+/// The engine command overlays the pending `SetCell` edits for the row, so the form shows what
+/// `grid.apply` will send — the UI merges nothing. The row is passed explicitly: the engine's cursor
+/// is never written, so a default there would silently show the first record.
+///
+/// Returns the edit the user made, if any; the caller runs it, the way the table's own events are run.
+fn form_band(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    record: &Result<serde_json::Value, String>,
+    tab_index: usize,
+    state: &mut UiState,
+) -> Option<(&'static str, serde_json::Value)> {
+    let mut command = None;
+    let out = match record {
+        Ok(out) => out,
+        // A row outside the page is an honest error band, never an empty form.
+        Err(e) => {
+            design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
+            design::error_band(ui, tokens, "Form view failed", e, |ui| {
+                if design::ghost_button(ui, tokens, "Close form", true).clicked() {
+                    state.form_view = false;
+                }
+            });
+            return None;
+        }
+    };
+    let row = out["row"].as_u64().unwrap_or(0) as usize;
+    let editable_form = out["editable"].as_bool().unwrap_or(false);
+    design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("Record {row}"))
+                .size(design::T_MD)
+                .color(tokens.text),
+        );
+        if !editable_form {
+            design::tag_lite(ui, tokens, "read-only");
+        }
+    });
+    if let Some(fields) = out["fields"].as_array() {
+        egui::ScrollArea::vertical()
+            .id_salt(("form_scroll", tab_index))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for f in fields {
+                    let name = f["name"].as_str().unwrap_or_default().to_owned();
+                    ui.horizontal(|ui| {
+                        form_cell(ui, FORM_NAME_W, |ui| {
+                            ui.label(
+                                RichText::new(&name)
+                                    .size(design::T_SM)
+                                    .color(tokens.text_dim),
+                            );
+                        });
+                        form_cell(ui, FORM_BADGE_W, |ui| {
+                            if f["primary_key"].as_bool().unwrap_or(false) {
+                                design::pk_badge(ui, tokens, "PK");
+                            }
+                        });
+                        form_cell(ui, FORM_FIELD_W, |ui| {
+                            // A fresh buffer per frame would drop every keystroke at frame
+                            // end: the edit text lives in the widget state instead, keyed by
+                            // tab+row+column, so another record never wears this one's text.
+                            // The widget renders OUTSIDE `data_mut` — that closure holds the
+                            // context's write lock, and TextEdit takes it again for its own
+                            // state: recursive write lock = a hang in release, a deadlock
+                            // panic in debug.
+                            let field_id = egui::Id::new(("form_field", tab_index, row, &name));
+                            let shown = f["display"].as_str().unwrap_or_default().to_owned();
+                            let mut text = ui.ctx().data_mut(|d| {
+                                d.get_temp(field_id).unwrap_or_else(|| shown.clone())
+                            });
+                            let edited = ui.add_enabled(
+                                editable_form,
+                                egui::TextEdit::singleline(&mut text).desired_width(FORM_FIELD_W),
+                            );
+                            ui.ctx().data_mut(|d| d.insert_temp(field_id, text.clone()));
+                            if editable_form && edited.lost_focus() && text != shown {
+                                command = Some((
+                                    "grid.editCell",
+                                    serde_json::json!({"row": row, "column": name, "value": text}),
+                                ));
+                            }
+                        });
+                        form_cell(ui, FORM_NULL_W, |ui| {
+                            // Only a field with a value can be set to NULL, but the cell stays: a
+                            // row that dropped it would move the field that follows it.
+                            if editable_form
+                                && !f["value"].is_null()
+                                && design::ghost_button(ui, tokens, "NULL", true)
+                                    .on_hover_text("Set this field to NULL")
+                                    .clicked()
+                            {
+                                command = Some((
+                                    "grid.setNull",
+                                    serde_json::json!({"row": row, "column": name}),
+                                ));
+                            }
+                        });
+                    });
+                }
+            });
+    }
+    command
 }
 
 /// Which `.empty` block the grid paints under its head, if either.
@@ -1071,6 +1165,322 @@ mod tests {
                 "{name}: measured {got}, the design wants {want}"
             );
         }
+    }
+
+    /// Every stroked box the frame painted with the form's field width, with the clip rect it was
+    /// painted under: a band that scrolls paints the rows below its viewport too, and those are not
+    /// fields the user can see.
+    fn form_field_boxes(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, egui::Rect)> {
+        fn walk(shape: &egui::Shape, clip: egui::Rect, out: &mut Vec<(egui::Rect, egui::Rect)>) {
+            match shape {
+                egui::Shape::Rect(r) if r.stroke.width > 0.0 => out.push((r.rect, clip)),
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, clip, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut rects = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, clipped.clip_rect, &mut rects);
+        }
+        let mut fields: Vec<(egui::Rect, egui::Rect)> = rects
+            .into_iter()
+            .filter(|(r, _)| (r.width() - FORM_FIELD_W).abs() < 0.5)
+            .collect();
+        fields.sort_by(|a, b| a.0.top().total_cmp(&b.0.top()));
+        fields
+    }
+
+    /// Every text run the frame painted *whole* under its clip rect, with that rect: a row the pane cuts
+    /// off is not evidence that the row is on screen.
+    fn painted_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, clip: egui::Rect, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    let rect = text.visual_bounding_rect();
+                    if rect.top() >= clip.top() - 0.5 && rect.bottom() <= clip.bottom() + 0.5 {
+                        out.push((text.galley.text().to_owned(), rect));
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, clip, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        texts
+    }
+
+    /// A live SQLite connection holding `users`, one data tab open on it, and the tokens: what the grid
+    /// paints from. `name` keeps each test's database its own — one file per process would be shared by
+    /// the tests the harness runs in parallel. `selected` is the record the form shows.
+    fn form_pane(name: &str, selected: usize, extra: usize) -> (Session, UiState, Tokens, usize) {
+        let path = std::env::temp_dir().join(format!("nook-form-{}-{name}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut session = Session::new();
+        session
+            .conns
+            .push(nook_engine::Conn::new(nook_core::ConnectionConfig::sqlite(
+                path.to_string_lossy(),
+            )));
+        session.active_conn = Some(0);
+        nook_engine::cmd::open_now(&mut session, 0).expect("the fixture database opens");
+        // `extra` more text columns, for the record too wide to show in one band.
+        let filler: String = (1..=extra).map(|i| format!(", c{i} TEXT")).collect();
+        let names: String = (1..=extra).map(|i| format!(", c{i}")).collect();
+        let values: String = (1..=extra).map(|i| format!(", 'v{i}'")).collect();
+        nook_engine::cmd::run_sql(
+            &mut session,
+            0,
+            &format!(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, note TEXT, city TEXT{filler});\
+                 INSERT INTO users (id, email, note, city{names}) VALUES (1, 'a@b.c', 'hi', 'London'{values}), (2, 'd@e.f', NULL, 'Lima'{values});"
+            ),
+            Some(10),
+        )
+        .expect("the fixture schema is valid");
+        nook_engine::cmd::refresh_catalog(&mut session, 0).expect("the catalog refreshes");
+        let conn = session.conns[0].cfg.id.clone();
+        session
+            .run(
+                "grid.open",
+                serde_json::json!({"conn": conn, "table": "users"}),
+            )
+            .expect("the data tab opens");
+        let index = session.active_tab.expect("a data tab is active");
+        let mut state = UiState::default();
+        state.form_view = true;
+        state.table(index).selected = Some((selected, 0));
+        (session, state, Tokens::of("dark"), index)
+    }
+
+    /// What one frame of the grid, with the form open, painted: the form's field boxes and every text
+    /// run, with the pane they were painted in.
+    type Painted = (
+        Vec<(egui::Rect, egui::Rect)>,
+        Vec<(String, egui::Rect)>,
+        egui::Rect,
+    );
+
+    /// Two frames of the grid with the form open, in the pane the app's own window leaves. Two, because
+    /// egui carries a grid's column widths into the next frame: a form whose columns move between the
+    /// frame the form opens on and the one after it is exactly what the user sees as unaligned.
+    fn form_frames(name: &str, size: egui::Vec2, selected: usize, extra: usize) -> Vec<Painted> {
+        let (mut session, mut state, tokens, index) = form_pane(name, selected, extra);
+        let ctx = egui::Context::default();
+        tokens.apply(&ctx);
+        let pane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size);
+        let input = egui::RawInput {
+            screen_rect: Some(pane),
+            ..Default::default()
+        };
+        let mut frames = Vec::new();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(input.clone(), |ui| {
+                egui::CentralPanel::default_margins()
+                    .frame(egui::Frame::new().fill(tokens.panel))
+                    .show(ui, |ui| {
+                        show(ui, &mut session, index, &mut state, &tokens);
+                    });
+            });
+            out.textures_delta.clear();
+            frames.push((
+                form_field_boxes(&out.shapes),
+                painted_text(&out.shapes),
+                pane,
+            ));
+        }
+        frames
+    }
+
+    /// The form band: the table's own height is cut by the band's before the table is laid out, so a
+    /// record's fields are on screen rather than the 96px strip a table that claims the pane leaves
+    /// under itself. The table keeps its floor, so the fix cannot starve the rows it shows.
+    #[test]
+    fn the_form_band_is_carved_out_of_the_pane_not_the_tables_leftovers() -> Result<(), String> {
+        for (width, height) in [(1568.0, 543.0), (819.0, 900.0), (1000.0, 600.0)] {
+            let (fields, texts, pane) = form_frames("carve", egui::vec2(width, height), 1, 0)
+                .pop()
+                .expect("two frames are painted");
+            if fields.len() != 4 {
+                return Err(format!(
+                    "{width}x{height}: the form painted {} of its 4 fields",
+                    fields.len()
+                ));
+            }
+            for (field, clip) in &fields {
+                if field.bottom() > pane.bottom() || field.top() < pane.top() {
+                    return Err(format!(
+                        "{width}x{height}: a field runs {}..{} in a pane that ends at {}",
+                        field.top(),
+                        field.bottom(),
+                        pane.bottom()
+                    ));
+                }
+                if !clip.contains_rect(*field) {
+                    return Err(format!(
+                        "{width}x{height}: a field at {}..{} is cut off at {}",
+                        field.top(),
+                        field.bottom(),
+                        clip.bottom()
+                    ));
+                }
+            }
+            // The table's own rows are still painted above the form: the band takes its share, it does
+            // not empty the table.
+            if !texts.iter().any(|(text, _)| text == "a@b.c") {
+                return Err(format!(
+                    "{width}x{height}: the table painted no row above the form"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The form's columns are fixed: every field starts at the same x, the name of each field shares a
+    /// left edge, and a row whose `NULL` button is missing — the field already holds NULL — moves no
+    /// other row. A record read through egui's own grid shifts these by the width of whatever the frame
+    /// before it measured, which is the misalignment the user sees the moment the form opens.
+    #[test]
+    fn every_form_field_starts_at_the_same_x() -> Result<(), String> {
+        for (frame, (fields, texts, _)) in form_frames("align", egui::vec2(819.0, 900.0), 1, 0)
+            .into_iter()
+            .enumerate()
+        {
+            let left = fields[0].0.left();
+            for field in fields.iter().map(|(field, _)| field) {
+                if (field.left() - left).abs() > 0.5 {
+                    return Err(format!(
+                        "frame {frame}: a field starts at {} where the first starts at {left}",
+                        field.left()
+                    ));
+                }
+            }
+            // The name of each field is the leftmost ink on its own row, left of the field's box; the
+            // `NULL` button is the last ink on the right of it. The `note` field holds NULL, so that
+            // row paints no button where the other three do.
+            let mut names = Vec::new();
+            let mut buttons = Vec::new();
+            for (field, _) in &fields {
+                let row = |rect: &egui::Rect| {
+                    (rect.center().y - field.center().y).abs() < FORM_ROW_H / 2.0
+                };
+                names.push(
+                    texts
+                        .iter()
+                        .filter(|(_, rect)| rect.right() <= field.left() && row(rect))
+                        .min_by(|a, b| a.1.left().total_cmp(&b.1.left()))
+                        .map(|(text, rect)| (text.clone(), rect.left()))
+                        .ok_or_else(|| {
+                            format!("frame {frame}: the row at {} painted no name", field.top())
+                        })?,
+                );
+                // The `NULL` button of the row, told apart from a field whose own display is the word
+                // NULL by where it lands: a button comes after its field. Painted over the field, the
+                // row counts as having no button at all — which is what an unaligned column looks like.
+                buttons.extend(
+                    texts
+                        .iter()
+                        .filter(|(text, rect)| {
+                            text == "NULL" && row(rect) && rect.left() >= field.right()
+                        })
+                        .map(|(_, rect)| rect.left()),
+                );
+            }
+            // A glyph's ink starts a pixel inside its box depending on the letter, so the labels are
+            // compared with room for that bearing: a column that moved is tens of pixels out.
+            const INK: f32 = 2.0;
+            let head = names[0].1;
+            for (name, left) in &names {
+                if (left - head).abs() > INK {
+                    return Err(format!(
+                        "frame {frame}: the {name} label starts at {left}, the first at {head}"
+                    ));
+                }
+            }
+            if buttons.len() != 3 {
+                return Err(format!(
+                    "frame {frame}: the rows holding a value painted {} NULL buttons, not 3",
+                    buttons.len()
+                ));
+            }
+            for left in &buttons {
+                if (left - buttons[0]).abs() > INK {
+                    return Err(format!(
+                        "frame {frame}: a NULL button starts at {left} where the first starts at {}",
+                        buttons[0]
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A record with more fields than the band can hold: the band scrolls inside its own share of the
+    /// pane, so the table above it is not pushed off the top of the window and the fields still to come
+    /// are clipped by the band's viewport rather than painted over the pane's edge.
+    #[test]
+    fn a_wide_record_scrolls_inside_its_band() -> Result<(), String> {
+        const FIELDS: usize = 28;
+        let (fields, texts, pane) = form_frames("wide", egui::vec2(1000.0, 600.0), 1, FIELDS - 4)
+            .pop()
+            .expect("two frames are painted");
+        let (_, clip) = fields.first().ok_or("the wide record painted no field")?;
+        // Half the pane is the band's ceiling: past it the table it belongs to would be a strip.
+        if clip.height() > pane.height() / 2.0 + FORM_HEAD_H + FORM_ROW_H {
+            return Err(format!(
+                "the band holds {} of a {} pane, past its half",
+                clip.height(),
+                pane.height()
+            ));
+        }
+        if clip.bottom() > pane.bottom() + 0.5 {
+            return Err(format!(
+                "the band's viewport ends at {} in a pane that ends at {}",
+                clip.bottom(),
+                pane.bottom()
+            ));
+        }
+        // A field the user can see is one the viewport holds whole; the band paints the rest into the
+        // viewport's clip rect, which is how a scroll area shows part of what it holds. Those are the
+        // fields that must be inside the pane.
+        let visible: Vec<egui::Rect> = fields
+            .iter()
+            .filter(|(field, clip)| clip.contains_rect(*field))
+            .map(|(field, _)| *field)
+            .collect();
+        for field in &visible {
+            if field.bottom() > pane.bottom() || field.top() < pane.top() {
+                return Err(format!(
+                    "a visible field runs {}..{} in a pane that ends at {}",
+                    field.top(),
+                    field.bottom(),
+                    pane.bottom()
+                ));
+            }
+        }
+        if visible.len() < 2 {
+            return Err(format!("the band shows {} fields", visible.len()));
+        }
+        if visible.len() == FIELDS {
+            return Err(format!(
+                "the band shows all {FIELDS} fields, so the table lost its share of the pane"
+            ));
+        }
+        // The table keeps its own row above the band.
+        if !texts.iter().any(|(text, _)| text == "d@e.f") {
+            return Err("the table painted no row above the wide form".to_owned());
+        }
+        Ok(())
     }
 
     #[test]
