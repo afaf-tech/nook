@@ -163,12 +163,9 @@ fn run_and_record(
             let elapsed_ms = result.elapsed_ms;
             let summary = statement_summary(index, statement, Some(&result), elapsed_ms, None);
             // A statement can change the shape of the database — `ALTER TABLE … RENAME COLUMN` typed
-            // in the editor is the one users type — and every reader of the catalog (an open data tab
-            // planning an edit, the tree, the inspector) would otherwise describe the old shape until
-            // someone refreshed by hand.
-            if may_change_the_shape(statement) {
-                let _ = super::refresh_catalog(session, conn);
-            }
+            // in the editor is the one users type — and everything that reads the catalog has to see
+            // it, whichever of the run paths issued it.
+            refresh_if_the_shape_changed(session, conn, statement);
             record_run(
                 session,
                 StatementRun {
@@ -194,6 +191,18 @@ fn run_and_record(
             );
             Err(e)
         }
+    }
+}
+
+/// Read the connection's catalog again when a statement may have changed the shape of the database.
+///
+/// `ALTER TABLE … RENAME COLUMN` typed in the editor is the one users type, and every reader of the
+/// catalog — an open data tab planning an edit, the tree, the inspector — would otherwise describe
+/// the old shape until someone refreshed by hand. One helper so no run path can forget it: the
+/// statement funnel `run_and_record` and the atomic run both call it.
+fn refresh_if_the_shape_changed(session: &mut Session, conn: usize, statement: &str) {
+    if may_change_the_shape(statement) {
+        let _ = super::refresh_catalog(session, conn);
     }
 }
 
@@ -508,6 +517,12 @@ fn run_in_transaction(session: &mut Session, p: &Params) -> Result<serde_json::V
         }
     }
     session.driver_for(conn)?.commit()?;
+    // Committed, so the shape readers have to see is the one this transaction just made. Nothing is
+    // read mid-transaction on purpose: a rollback (the early return above) leaves the catalog holding
+    // the shape from before the transaction, which is what the database then has.
+    for statement in &statements {
+        refresh_if_the_shape_changed(session, conn, statement);
+    }
     session.log(
         Level::Success,
         format!("{} statements committed", applied.len()),
@@ -1086,5 +1101,52 @@ mod tests {
             catalog_columns(&session, "local", "t"),
             vec!["id".to_string(), "memo".to_string()]
         );
+    }
+
+    #[test]
+    fn every_run_path_refreshes_after_a_rename() {
+        // The editor has more than one way to run a statement, and the shape the readers see must not
+        // depend on which one the user picked.
+        for (command, params) in [
+            (
+                "sql.run",
+                json!({"sql": "alter table t rename column note to memo"}),
+            ),
+            ("sql.runStatement", json!({"index": 0})),
+            ("sql.runSelection", json!({"start": 0, "end": 40})),
+            (
+                "sql.runInTransaction",
+                json!({"sql": "alter table t rename column note to memo"}),
+            ),
+        ] {
+            let (_guard, mut session, tab) = live_session();
+            session
+                .run(
+                    "sql.run",
+                    json!({"sql": "create table t (id integer primary key, note text)"}),
+                )
+                .expect("create");
+
+            if command == "sql.runStatement" || command == "sql.runSelection" {
+                // Both cut a statement out of the tab's text, so the text is where it comes from, and
+                // the caret has to sit inside the statement the selection starts at.
+                session.tabs[tab].sql.text =
+                    "select 1;\nalter table t rename column note to memo;\n".to_owned();
+                let params = if command == "sql.runStatement" {
+                    json!({"index": 1})
+                } else {
+                    json!({"start": 11, "end": 50})
+                };
+                session.run(command, params).expect(command);
+            } else {
+                session.run(command, params).expect(command);
+            }
+
+            assert_eq!(
+                catalog_columns(&session, "local", "t"),
+                vec!["id".to_string(), "memo".to_string()],
+                "{command} left the catalog on the old shape"
+            );
+        }
     }
 }
