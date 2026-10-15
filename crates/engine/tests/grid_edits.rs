@@ -219,6 +219,21 @@ fn an_edit_of_a_row_that_is_gone_is_refused_not_reported() {
 }
 
 #[test]
+fn an_edit_that_writes_the_value_a_row_already_holds_still_applies() {
+    // The guard refuses an instruction that changed no row. A write of the value the row already has
+    // is not that: the row is there and the statement ran against it, so a driver that counts matched
+    // rows reports one — and the guard must not turn a legitimate edit into an error.
+    let mut f = Fixture::new("same-value");
+    f.open_users();
+    f.run(
+        "grid.editCell",
+        json!({"row": 0, "column": "email", "value": "a@b.c"}),
+    );
+    assert_eq!(f.run("grid.apply", json!({}))["applied"], 1);
+    assert_eq!(f.emails(), vec!["a@b.c".to_string(), "d@e.f".to_string()]);
+}
+
+#[test]
 fn the_form_lists_the_columns_the_table_has_now() {
     let mut f = Fixture::new("form");
     f.open_users();
