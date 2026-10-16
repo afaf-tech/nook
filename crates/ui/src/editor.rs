@@ -2307,8 +2307,7 @@ mod tests {
             .map(|(rect, _)| *rect)
             .expect("the prompt is painted");
         let _ = frame(&ctx, &mut world, click(prompt.center()), 1.35);
-        let mut focus_and_type = Vec::new();
-        focus_and_type.push(egui::Event::Text("@cus".into()));
+        let focus_and_type = vec![egui::Event::Text("@cus".into())];
         let _ = frame(&ctx, &mut world, focus_and_type, 1.4);
         let f = settle(&ctx, &mut world, 1.5);
         assert!(

@@ -911,7 +911,7 @@ fn form_view(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
                 "type": column.type_name,
                 "value": value.map(|v| v.to_json()),
                 "display": value.map(|v| v.display()).unwrap_or_default(),
-                "primary_key": grid.primary_key.iter().any(|key| *key == column.name),
+                "primary_key": grid.primary_key.contains(&column.name),
             })
         })
         .collect();
