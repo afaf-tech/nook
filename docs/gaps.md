@@ -28,15 +28,17 @@ nook-cli sync-data --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage --a
 nook-cli diff-structure --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage
 ```
 
-## 2. Form view for one record
+## 2. ~~Form view for one record~~ — done
 
-Navicat's form view edits a single row as a vertical form, which is the sane way to work with wide
-tables. The data grid covers everything else. (`grid.formView`)
+Shipped: the engine command (`grid.formView`) and the UI form band, including editable fields that
+go through the same `grid.editCell` / pending-changes path as the grid.
 
-## 3. Column mapping in the import wizard and the transfer
+## 3. ~~Column mapping in the import wizard and the transfer~~ — done
 
-Both map columns by position. Real files have headers in a different order and tables get renamed
-columns. (`tools.importWizard`, `transfer.columnMapping`)
+Shipped: name mapping via `columnMapping` (`src=target` pairs) for CSV/JSON imports in
+`tools.importCsv`/`tools.importJson` and for `transfer.data`, validated against the destination
+catalog; mapping refuses `tables: ["*"]`. Still open: the import wizard UI does not surface a
+mapping editor — it is parameter-level today. (`tools.importWizard`, `transfer.columnMapping`)
 
 ## 4. Trigger, function and sequence editors
 

@@ -31,7 +31,7 @@ against a live server on this machine (see the gaps).
 | Object design | 85% | tables, columns, indexes, foreign keys and views; no trigger, function or sequence editors |
 | Query work | 76% | run, format, complete, explain, history, snippets; no debugger, profiler or visual plan |
 | AI query generation | 100% | 7 providers over 2 wire formats, a custom base URL each, `@table` context, keys in the keychain, the settings in the app's own SQLite store; no chat, streaming or embeddings |
-| Transfer and sync | 50% | cross-engine transfer, row sync, structure diff and sync; no column mapping or bi-directional sync |
+| Transfer and sync | 55% | cross-engine transfer, row sync, structure diff and sync; name-based column mapping (`columnMapping`); no bi-directional sync |
 | Backup and restore | 50% | SQLite scripts, `pg_dump`/`mysqldump`, restore, listing; no compression or encryption |
 | Automation | 64% | jobs, schedules, run log, in-app tick and `job serve`; no notifications, chaining or remote agent |
 | Monitoring | 56% | process list, status, variables, dashboard; no locks, replication or alerts |
@@ -49,7 +49,7 @@ against a live server on this machine (see the gaps).
 | M3 Engine | done | `Session`, 146 commands, the Navicat catalog, parity measurement, jobs, data generation, reports, profiles, keychain, SSH tunnel |
 | M4 Surfaces | done | desktop app, CLI, MCP server, JSON control channel |
 | M5 Verification | in progress | 359 tests; live runs against SQLite and PostgreSQL; MySQL pending a working server on this machine |
-| M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): MySQL verification, form view, column mapping, Excel import, trigger editors, notification hooks |
+| M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): MySQL verification, Excel import, trigger editors, notification hooks |
 
 ## Progress log
 

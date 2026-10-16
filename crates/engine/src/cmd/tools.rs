@@ -184,6 +184,29 @@ pub fn infer_value(text: &str, target_type: Option<&str>) -> Value {
     Value::text(raw)
 }
 
+/// `["src=target", ...]` pairs from the `columnMapping` parameter; empty input means no mapping.
+pub(crate) fn parse_mapping(entries: &[String]) -> Result<Option<Vec<(String, String)>>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut map = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let (source, target) = entry.split_once('=').ok_or_else(|| {
+            Error::config(format!(
+                "columnMapping entries are 'source=target', got '{entry}'"
+            ))
+        })?;
+        let (source, target) = (source.trim(), target.trim());
+        if source.is_empty() || target.is_empty() {
+            return Err(Error::config(format!(
+                "columnMapping entries are 'source=target', got '{entry}'"
+            )));
+        }
+        map.push((source.to_string(), target.to_string()));
+    }
+    Ok(Some(map))
+}
+
 fn target_columns(
     session: &Session,
     index: usize,
@@ -234,18 +257,66 @@ fn load_rows(
         .min(p.int_opt("max_rows", 500_000).max(1) as usize);
     let data: Vec<&Vec<String>> = data.iter().take(max).collect();
 
-    let existing = target_columns(session, index, reference, &columns);
-    let use_existing = existing.len() == columns.len()
-        && !session
+    let mapping = parse_mapping(&p.list("columnMapping"))?;
+    // When a mapping is present it speaks for itself: every target must be a real table column,
+    // every source a file column. The count-based alignment gate below no longer applies, and a
+    // partial mapping must not fall back to the file's header names or create a table from them.
+    let reordered: Vec<Vec<String>>;
+    let (target_columns, data): (Vec<String>, Vec<&Vec<String>>) = if let Some(map) = &mapping {
+        let table = session
             .conns
             .get(index)
             .and_then(|c| c.catalog.as_ref())
             .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
-            .is_none();
-    let target_columns = if use_existing {
-        existing
+            .ok_or_else(|| {
+                Error::config(format!(
+                    "columnMapping needs an existing table; {} was not found in the catalog",
+                    reference.key()
+                ))
+            })?;
+        let mut targets = Vec::with_capacity(map.len());
+        let mut order = Vec::with_capacity(map.len());
+        for (source, target) in map {
+            if table.column(target).is_none() {
+                return Err(Error::config(format!(
+                    "the table {} has no column '{target}'",
+                    reference.key()
+                )));
+            }
+            let position = columns
+                .iter()
+                .position(|c| c == source)
+                .ok_or_else(|| Error::config(format!("the file has no column '{source}'")))?;
+            targets.push(target.clone());
+            order.push(position);
+        }
+        // Reorder every row into the mapped column order once, so the insert loop keeps its
+        // positional walk.
+        reordered = data
+            .iter()
+            .map(|row| {
+                order
+                    .iter()
+                    .map(|i| row.get(*i).cloned().unwrap_or_default())
+                    .collect::<Vec<String>>()
+            })
+            .collect();
+        (targets, reordered.iter().collect())
     } else {
-        columns.clone()
+        let existing = target_columns(session, index, reference, &columns);
+        let use_existing = existing.len() == columns.len()
+            && !session
+                .conns
+                .get(index)
+                .and_then(|c| c.catalog.as_ref())
+                .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
+                .is_none();
+        let targets = if use_existing {
+            existing
+        } else {
+            columns.clone()
+        };
+        (targets, data)
     };
     let types: Vec<Option<String>> = session
         .conns

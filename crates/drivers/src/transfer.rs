@@ -27,6 +27,8 @@ pub struct TransferOptions {
     pub fail_fast: bool,
     /// Upper bound per table, so one huge table cannot run forever.
     pub max_rows: usize,
+    /// `src=target` column pairs applied when copying; empty means positional copy.
+    pub column_mapping: Vec<(String, String)>,
 }
 
 impl Default for TransferOptions {
@@ -40,6 +42,7 @@ impl Default for TransferOptions {
             filter: String::new(),
             fail_fast: false,
             max_rows: 1_000_000,
+            column_mapping: Vec::new(),
         }
     }
 }
@@ -76,6 +79,46 @@ impl TransferReport {
             self.elapsed_ms
         )
     }
+}
+
+/// Rebuild a page in the mapped column order: `src=target` pairs name the page's source columns
+/// and the target table columns they become. The result's columns are the targets, so
+/// `to_sql_inserts` writes `INSERT INTO <table> (targets…)` against the target's own layout.
+fn mapped_page(
+    page: &nook_model::ResultSet,
+    mapping: &[(String, String)],
+    table: &Table,
+) -> Result<nook_model::ResultSet> {
+    let mut order = Vec::with_capacity(mapping.len());
+    let mut columns = Vec::with_capacity(mapping.len());
+    for (source, target) in mapping {
+        let position = page.index_of(source).ok_or_else(|| {
+            nook_core::Error::config(format!("the source table has no column '{source}'"))
+        })?;
+        if !table.columns.iter().any(|c| &c.name == target) {
+            return Err(nook_core::Error::config(format!(
+                "the table {} has no column '{target}'",
+                table.key()
+            )));
+        }
+        order.push(position);
+        columns.push(target.clone());
+    }
+    let rows = page
+        .rows
+        .iter()
+        .map(|row| {
+            order
+                .iter()
+                .map(|i| row.get(*i).cloned().unwrap_or(nook_core::Value::Null))
+                .collect()
+        })
+        .collect();
+    Ok(nook_model::ResultSet {
+        columns,
+        rows,
+        ..nook_model::ResultSet::default()
+    })
 }
 
 /// Read one table from the source into pages, then write them to the target.
@@ -128,6 +171,29 @@ pub fn transfer_table(
         return Ok(report);
     }
 
+    // Validate mapped targets against the DESTINATION's catalog once, above the row loop: the
+    // target table may share the source's name with a different column layout, and a per-page
+    // `dst.catalog()` would repeat a live query for every page. Runs after the create/truncate
+    // DDL above, so the live catalog already sees the created table. A mapping therefore also
+    // refuses a not-yet-existing target: the create DDL comes from the source schema and would
+    // not carry the mapped column names.
+    let dst_table = if opts.column_mapping.is_empty() {
+        None
+    } else {
+        let catalog = dst.catalog()?;
+        Some(
+            catalog
+                .find_table(dst_schema, &table.name)
+                .ok_or_else(|| {
+                    nook_core::Error::config(format!(
+                        "the target table {} was not found in the destination catalog",
+                        table.key()
+                    ))
+                })?
+                .clone(),
+        )
+    };
+
     let mut offset = 0usize;
     let mut done = false;
     while !done {
@@ -146,6 +212,24 @@ pub fn transfer_table(
         if page.rows.is_empty() {
             break;
         }
+        // A mapping renames and reorders: the page's own column names would otherwise become the
+        // INSERT column list. Rebuild the page in target order first; the mapped page MUST be
+        // bound back to `page`, otherwise the mapping is silently discarded.
+        let page = if let Some(dst_table) = &dst_table {
+            match mapped_page(&page, &opts.column_mapping, dst_table) {
+                Ok(p) => p,
+                Err(e) => {
+                    if opts.fail_fast {
+                        return Err(e);
+                    }
+                    report.error = Some(e.to_string());
+                    progress(&format!("  mapping failed: {e}"));
+                    return Ok(report);
+                }
+            }
+        } else {
+            page
+        };
         let fetched = page.rows.len();
         let script = page.to_sql_inserts(
             dst_schema.or(table.schema.as_deref()),

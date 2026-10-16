@@ -508,7 +508,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Import/Export",
         "tools.importWizard",
         "Mapping wizard with preview",
-        "columns map by position, preview is the first rows",
+        "columns map by name via columnMapping (src=target), preview is the first rows",
     ),
     // ---------------------------------------------------------------- Transfer and sync
     (
@@ -527,7 +527,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Transfer",
         "transfer.columnMapping",
         "Column mapping",
-        "positional; renaming is in the roadmap",
+        "name mapping via columnMapping (src=target) for transfer.data and imports",
     ),
     (
         "Transfer",

@@ -81,8 +81,8 @@ fn tables_of(p: &Params) -> Vec<String> {
     }
 }
 
-fn transfer_options(p: &Params) -> TransferOptions {
-    TransferOptions {
+fn transfer_options(p: &Params) -> Result<TransferOptions> {
+    Ok(TransferOptions {
         create_tables: p.bool_opt("create_tables", true),
         drop_target: p.bool_opt("drop_target", false),
         truncate_target: p.bool_opt("truncate_target", false),
@@ -91,15 +91,21 @@ fn transfer_options(p: &Params) -> TransferOptions {
         filter: p.str_opt("filter").unwrap_or_default(),
         fail_fast: p.bool_opt("fail_fast", false),
         max_rows: p.int_opt("max_rows", 1_000_000).clamp(1, 100_000_000) as usize,
-    }
+        column_mapping: super::tools::parse_mapping(&p.list("columnMapping"))?.unwrap_or_default(),
+    })
 }
 
 fn transfer_data(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let (from, to) = pair(session, p)?;
     let catalog = session.catalog_of(from)?.clone();
     let tables = tables_of(p);
+    let options = transfer_options(p)?;
+    if !options.column_mapping.is_empty() && (tables.len() != 1 || tables[0] == "*") {
+        return Err(Error::config(
+            "columnMapping applies to one table; name it in \"tables\" instead of \"*\"",
+        ));
+    }
     let dst_schema = p.str_opt("dst_schema");
-    let options = transfer_options(p);
     let mut log: Vec<String> = Vec::new();
     let report = {
         let (src, dst) = session.two_drivers(from, to)?;

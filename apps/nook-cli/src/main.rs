@@ -896,6 +896,14 @@ fn import(args: &[String]) -> CliResult {
     if let Some(delimiter) = opt(args, "--delimiter") {
         params.insert("delimiter".into(), json!(delimiter));
     }
+    if let Some(mapping) = opt(args, "--column-mapping") {
+        let pairs: Vec<String> = mapping
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        params.insert("columnMapping".into(), json!(pairs));
+    }
     let command = if file.to_ascii_lowercase().ends_with(".json") {
         "tools.importJson"
     } else {
