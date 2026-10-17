@@ -12,17 +12,22 @@ driven by a script.
 
 ## Baseline, measured
 
-Numbers below are from this checkout at `e8c6041`, not from memory. Re-run the commands before
+Numbers below are measured in this checkout at `a66bcd2`, not from memory. Re-run the commands before
 starting a phase; a stale baseline is a plan that lies.
 
 | Fact | Value | Command |
 |---|---|---|
-| Registered commands | 151 | `grep -c 'CommandSpec::new(' crates/engine/src/cmd/*.rs` |
+| Registered commands | 155 | `grep -c 'CommandSpec::new(' crates/engine/src/cmd/*.rs` |
 | Catalog entries | **207** | `cargo xtask parity` (or parse `catalog.rs`; a naive `grep -c '^        "x.y",$'` returns 152 because one-line entries like `("Data", "grid.formView", …)` do not match) |
-| Navicat catalog coverage | 150 / 207 (72.5%) | `cargo xtask parity` |
+| Navicat catalog coverage | 153 / 207 (73.9%) | `cargo xtask parity` |
 | Coverage floor enforced by test | 55.0% | `crates/engine/src/parity.rs::floor_percent` |
-| Tests | 427 | `grep -rn '#\[test\]' --include=*.rs crates apps xtask \| wc -l` |
-| Rust, workspace | ~49,200 lines across 7 crates, 2 apps, xtask | `find crates apps xtask -name '*.rs' \| xargs wc -l \| tail -1` |
+| Tests | 450 | `grep -rn '#\[test\]' --include=*.rs crates apps xtask \| wc -l` |
+| Rust, workspace | ~50,750 lines across 7 crates, 2 apps, xtask | `find crates apps xtask -name '*.rs' \| xargs wc -l \| tail -1` |
+
+Baseline moved while this plan was being written: `origin/main` gained eight commits (trigger, routine and
+sequence editors; the SQLite table rebuild; a splitter that survives `BEGIN IMMEDIATE` and `CASE` inside
+trigger bodies; `schema.setPrimaryKey`). The numbers above are measured **after** rebasing onto `a66bcd2`,
+and phase 7 below is written against what is actually left, not what was missing when the plan started.
 
 > **A note on the catalog count.** `crates/engine/src/catalog.rs` mixes two layouts: most entries are one field
 > per line, a few are collapsed onto a single line (a style change in `b6e1b03`). Any counting script must
@@ -67,11 +72,11 @@ this plan adds (7).
 | [4](phase-4-editing-and-review.md) | Editing and review | `grid.rawMode` | 1 | 3 | B Power |
 | [5](phase-5-import-export-scale.md) | Import, export and sync at scale | `tools.importWizard`, `tools.importXml`, `tools.textImporter`, `transfer.columnMapping`, `transfer.speedTest`, `sync.dataDelete`, `sync.conflictRules`, `sync.bidirectional`, `backup.compression`, `backup.encryption`, `backup.local` | 11 | 4 | B |
 | [6](phase-6-query-editor.md) | The query editor | `sql.parameterised` | 1 | 1 | B |
-| [7](phase-7-schema-and-erd.md) | Schema depth and the diagram | `schema.triggerEditor`, `schema.functionEditor`, `schema.sequenceEditor`, `schema.tableRebuild`, `diagram.reverseEngineer`, `diagram.forwardEngineer`, `diagram.manualLayout`, `diagram.modelFile`, `tools.dataDictionary` | 9 | 3 | C Depth |
+| [7](phase-7-schema-and-erd.md) | Schema depth and the diagram | `schema.tableRebuild`, `diagram.reverseEngineer`, `diagram.forwardEngineer`, `diagram.manualLayout`, `diagram.modelFile`, `tools.dataDictionary` | 6 | 3 | C Depth |
 | [8](phase-8-async-engine.md) | A UI thread that never blocks | `sql.stop`, `sql.profiler`, `sql.planVisualiser`, `monitor.locks`, `monitor.replication`, `monitor.alerts` | 5 | 6 | C |
 | [9](phase-9-metrics-and-platform.md) | Metrics board and platform | `report.designer`, `report.biDashboard`, `report.export`, `monitor.charts`, `priv.roles`, `priv.audit`, `tools.dataProfiling`, `job.agent`, `job.profiles`, `platform.i18n`, `platform.windows`, `platform.linux`, `platform.control`, `platform.cli` | 14 | 8 | C |
 
-**Where the number lands:** 44 of the 57 open catalog ids close → **194 / 207 (93.7%)**. That figure is
+**Where the number lands:** 41 of the 54 open catalog ids close → **194 / 207 (93.7%)**. That figure is
 arithmetic over the current catalog, not a measurement; it becomes a fact only when `cargo xtask parity`
 prints it. The 13 that stay open are named below, on purpose.
 
@@ -117,3 +122,4 @@ Recorded here so nobody re-opens it as an oversight — reasons in [`features.md
 | Date | Change |
 |---|---|
 | 2026-10-17 | Plan written. Inventory harvested from `beekeeperstudio.io/features` (plus the eight feature subpages) and `tableplus.com` + `docs.tableplus.com` (interface, filter, code review/safe mode, open anything, query editor, streaming, split panes, parameters, metrics board). Baseline measured at `e8c6041`. No code changed. |
+| 2026-10-18 | Rebased onto `a66bcd2` after the push was rejected: `origin/main` had gained eight commits, three of which close ids this plan had listed as gaps. Re-measured (155 commands, 153/207, 450 tests) and rewrote phase 7, which had been built on the trigger/routine/sequence editors and the SQLite rebuild — both now shipped. Phases 1–6 and 8–9 were re-checked against the new HEAD and their premises still hold (`table.rs:53` is still one cell; no `hideColumns`, `quickLook`, `rowJson`, `copyTsv`, or partition support anywhere). |

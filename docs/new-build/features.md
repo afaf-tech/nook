@@ -60,7 +60,7 @@ protects while closing the friction.
 | Quick Look — a cell in a bigger popup, JSON and BLOBs pretty-printed | TablePlus | `gap` | 3 |
 | JSON sidebar — a row as nested JSON, FKs expanded in place, search + regex | Beekeeper | `gap` | 3 |
 | Right sidebar — the selected row as a vertical form, editable, column search | TablePlus | `have` | `grid.formView` + the form band. Bulk edit across several rows is `gap` → 4 |
-| Structure view for a table (columns, indexes, relations, triggers, partitions) | Beekeeper | `have` | Design tab: `schema.columns`, `schema.indexes`, `schema.foreignKeys`, `schema.ddl`. Triggers read-only → 7 |
+| Structure view for a table (columns, indexes, relations, triggers, partitions) | Beekeeper | `have` | Design tab: `schema.columns`, `schema.indexes`, `schema.foreignKeys`, `schema.ddl`; triggers via `schema.triggerEditor`. Partitions → 7 |
 | Database objects: functions, procedures, views | TablePlus | `gap` | 7 |
 | Server-wide search | Nook catalog | `gap` | 2 — the quick-open index *is* this |
 
@@ -117,9 +117,9 @@ protects while closing the friction.
 | Auto-increment primary key helper | Beekeeper | `have` | `schema.createTable` `auto_increment` |
 | Copy to SQL — generate DDL into a new editor tab | Beekeeper | `have` | `schema.ddl` |
 | Views | both | `have` | `schema.createView`, `dropView` |
-| **Trigger, function, sequence editors** | TablePlus, Nook catalog | `gap` | **7** — they appear in DDL and cannot be created or edited |
-| **PostgreSQL partitions** | Beekeeper | `gap` | **7** |
-| Rebuild a table in place (SQLite) | Nook catalog | `gap` | 7 |
+| Trigger, function, sequence editors | TablePlus, Nook catalog | `have` | `schema.triggerEditor` / `functionEditor` / `sequenceEditor` (shipped in `014a124`) |
+| PostgreSQL partitions | Beekeeper | `gap` | 7 |
+| Rebuild a table in place (SQLite) | Nook catalog | `gap` | 7 — the driver can (`rebuild_table`, used by `schema.setPrimaryKey`); `schema.tableRebuild` is not exposed |
 | Table rename / copy / truncate / empty database | Nook | `have` | `schema.*` |
 | ER diagram from the live catalog, pan/zoom, SVG export | both | `have` | `diagram.erDiagram` |
 | **ERD export as PNG, copy to clipboard, hand-arranged layout, save/load a model file** | both | `gap` | **7** |

@@ -1,205 +1,176 @@
 # Phase 7 — Schema depth and the diagram
 
-**Arc C · closes `schema.triggerEditor`, `schema.functionEditor`, `schema.sequenceEditor`, `schema.tableRebuild`, `diagram.reverseEngineer`, `diagram.forwardEngineer`, `diagram.manualLayout`, `diagram.modelFile`, `tools.dataDictionary` · depends on phase 3**
+**Arc C · closes `schema.tableRebuild`, `diagram.reverseEngineer`, `diagram.forwardEngineer`, `diagram.manualLayout`, `diagram.modelFile`, `tools.dataDictionary` · depends on phase 3**
+
+> **Rewritten after rebasing onto `a66bcd2`.** The first draft opened this phase with the trigger, routine and
+> sequence editors as its foundation. `origin/main` shipped them while the plan was being written (`014a124` —
+> `schema.triggerEditor` / `functionEditor` / `sequenceEditor` with `action` list/create/drop, plus PostgreSQL and
+> MySQL catalog introspection for all three), together with the SQLite rebuild machinery the draft had listed as
+> missing (`4534c21`, `88c9979`, `476f7e9`, `ffbad6d`, `a66bcd2`, and `schema.setPrimaryKey`). Those three ids
+> are **closed**, so this phase is scoped against what is genuinely left.
 
 ## The problem, measured
 
-`e8c6041` added `Trigger`, `Routine` and `Sequence` to the model and `create_trigger`, `create_routine`,
-`create_sequence` (with their `drop_*`) to `ddl.rs`. What it did **not** do is populate them from the server
-or expose them:
-
 | Fact | Evidence |
 |---|---|
-| Only the SQLite driver reports triggers | `drivers/src/sqlite.rs:239` reads `sqlite_master`; `grep -n "routines\|sequences\|triggers" drivers/src/pg.rs drivers/src/mysql.rs` → nothing |
-| Postgres and MySQL report none of the three | the `Schema { name, tables }` assembly at `pg.rs:387` fills only tables |
-| No command creates or edits any of them | `cmd/schema.rs` has no `trigger`/`routine`/`sequence` command |
-| The DDL helpers are unreachable | `ddl::create_trigger` et al. exist and nothing calls them |
-| No partition awareness beyond a relkind | `pg.rs:332` selects `relkind IN ('r','p','v','m','f')` — a partitioned table is listed, its partitions are not |
-| No table rebuild | `schema.tableRebuild` catalogued as "SQLite DDL that needs it says so instead" |
-| The diagram is one-way and un-editable | `diagram.erDiagram` + `diagram.exportSvg`; `layout_diagram` is deterministic, no positions are stored |
-| No PNG, no model file, no data dictionary | `diagram.*` gap list in `docs/parity-checklist.md` |
+| Triggers, routines and sequences are editable on all three engines | `cmd/schema.rs:59–67`; the catalog notes now read "list/create/drop via `action`" |
+| A SQLite table can be rebuilt, transactionally | `Driver::rebuild_table` (`drivers/src/lib.rs:112`), `SqliteDriver::rebuild_table_plan` (`drivers/src/sqlite.rs:460`) |
+| …but only one command reaches it | `grep -n "rebuild_table" crates/engine/src/cmd/schema.rs` → `set_primary_key`. `schema.tableRebuild` is still catalogued "SQLite DDL that needs it says so instead" |
+| A rebuild that takes a column list loses data by omission | `rebuild_table_plan` rebuilds from `new_columns`. The shipped path is safe only because `set_primary_key` clones the table first; a general command invites a caller to rebuild that list by hand, and the first one that forgets a column drops its data |
+| No partitions anywhere | `grep -rn "partition" crates/drivers/src crates/engine/src/cmd/schema.rs` → nothing. Postgres lists a partitioned table (`pg.rs`, `relkind IN ('r','p','v','m','f')`) but not its children |
+| The diagram is one-way and un-editable | `cmd/diagram.rs` has three commands (`erDiagram`, `exportSvg`, `tableCard`); `layout_diagram` is deterministic, no positions are stored, there is no model file and no forward engineering |
+| No data dictionary | `tools.dataDictionary` catalogued, unimplemented |
+| MySQL routine DDL is empty by choice | `docs/gaps.md` §4: "rather than one `SHOW CREATE` round trip per object" — an inherited ceiling, not a bug |
 
-This is the phase that makes "Object design 85%" true instead of papered over: today a trigger can be *read*
-on SQLite and *nothing* on the other two, and cannot be created anywhere.
+So the remaining gap is three things: **the rebuild as a first-class, safe command**, **partitions**, and **the
+diagram becoming a document you can edit, save and forward-engineer**.
 
 ## Scope
 
 | Command | What it does | Params |
 |---|---|---|
-| `schema.triggers` | **new** — list triggers for a table or schema | `{"table":"users"}` |
-| `schema.createTrigger` / `schema.dropTrigger` | **new** — create and drop, gated on `confirm` for drop | `{"table":"users","name":"audit_ins","timing":"AFTER","events":["INSERT"],"body":"…"}` |
-| `schema.triggerEditor` | **closes the Navicat id** — the editor's read/write surface: the DDL as text, validated, applied | `{"table":"users","name":"audit_ins","ddl":"CREATE TRIGGER …"}` |
-| `schema.routines` | **new** — functions and procedures | `{"schema":"public"}` |
-| `schema.createRoutine` / `schema.dropRoutine` | **new** | `{"name":"fn_total","kind":"function","args":"…","returns":"numeric","body":"…"}` |
-| `schema.functionEditor` | **closes the Navicat id** | `{"name":"fn_total","ddl":"CREATE OR REPLACE FUNCTION …"}` |
-| `schema.sequences` | **new** — list, with `last_value` | `{"schema":"public"}` |
-| `schema.createSequence` / `schema.dropSequence` | **new** | `{"name":"order_no","start":1,"increment":1}` |
-| `schema.sequenceEditor` | **closes the Navicat id** — edit start/increment/min/max/cycle (`ALTER SEQUENCE`) | `{"name":"order_no","increment":5}` |
-| `schema.partitions` | **new** — a partitioned table's partitions, with bounds | `{"table":"events"}` |
-| `schema.createPartition` / `schema.dropPartition` | **new** — Postgres `CREATE TABLE … PARTITION OF … FOR VALUES …`, MySQL `ALTER TABLE … ADD PARTITION` | `{"parent":"events","name":"events_2026_11","from":"2026-11-01","to":"2026-12-01"}` |
-| `schema.tableRebuild` | **closes the Navicat id** — SQLite's 12-step rebuild, in one transaction, with a pre-flight check | `{"table":"users","changes":[…],"confirm":true}` |
-| `diagram.reverseEngineer` | **closes the Navicat id** — the live catalog *is* the reverse-engineered model; this command returns it as a model document | `{"schema":"public"}` |
+| `schema.tableRebuild` | **closes the Navicat id** — SQLite's rebuild driven by a *diff*, not a column list, so nothing is lost by omission | `{"table":"users","changes":{"rename":{"email":"mail"},"retype":{"total":"TEXT"}},"confirm":true}` |
+| `schema.partitions` | **new** — a partitioned table's partitions, with bounds and row estimates | `{"table":"events"}` |
+| `schema.createPartition` / `schema.dropPartition` | **new** — range-by-date only: Postgres `CREATE TABLE … PARTITION OF … FOR VALUES FROM … TO …`, MySQL `ALTER TABLE … ADD PARTITION` | `{"parent":"events","name":"events_2026_11","from":"2026-11-01","to":"2026-12-01"}` |
+| `diagram.reverseEngineer` | **closes the Navicat id** — the live catalog as a model document (tables, columns, keys, positions) | `{"schema":"public"}` |
 | `diagram.forwardEngineer` | **closes the Navicat id** — a model document to DDL, ordered by dependency | `{"model":{…}}` |
 | `diagram.manualLayout` | **closes the Navicat id** — store box positions per `conn + schema` | `{"positions":{"users":[40,80]},"reset":false}` |
-| `diagram.modelFile` | **closes the Navicat id** — save/load the model (positions included) as JSON | `{"path":"~/models/shop.json","action":"save"}` |
-| `diagram.exportPng` | **new** — PNG alongside the SVG, via `nook --shot`'s existing renderer path | `{"path":"~/diagrams/schema.png"}` |
-| `tools.dataDictionary` | **closes the Navicat id** — every table, column, type, key and comment as Markdown or HTML | `{"schema":"public","format":"markdown","path":"~/dict.md"}` |
+| `diagram.modelFile` | **closes the Navicat id** — save/load the model, positions included, as JSON | `{"path":"~/models/shop.json","action":"save"}` |
+| `diagram.exportPng` | **new, conditional** — PNG beside the SVG, *only if* a rasteriser already exists (step 0 decides) | `{"path":"~/diagrams/schema.png"}` |
+| `tools.dataDictionary` | **closes the Navicat id** — every table, column, type, key, default and comment as Markdown or HTML | `{"schema":"public","format":"markdown","path":"~/dict.md"}` |
+
+Already shipped on `origin/main`, listed here so nobody re-plans them: `schema.triggerEditor`,
+`schema.functionEditor`, `schema.sequenceEditor` (list/create/drop, three engines, catalog introspection) and
+`schema.setPrimaryKey` (the first caller of the rebuild).
 
 ## Design
 
-### First, make the catalog tell the truth on all three engines
+### The rebuild takes a diff, because a full column list is how data gets lost
 
-Nothing above works until `pg.rs` and `mysql.rs` populate the fields the model already has.
+The shipped `rebuild_table(schema, table, new_columns)` is correct and already transactional, and
+`set_primary_key` uses it safely: it clones the table, adds the key, and passes the whole column list. A general
+`schema.tableRebuild` that also took "the new columns" would invite every caller to reconstruct that list by
+hand, and the first one that forgets a column silently drops its data.
 
-**PostgreSQL** (`pg_catalog`, one query each, added to the existing `catalog()` batch):
+So the command takes **changes**, and builds the new column list itself from the live catalog:
 
-- triggers — `pg_trigger t JOIN pg_class c JOIN pg_namespace n`, `NOT t.tgisinternal`, with
-  `pg_get_triggerdef(t.oid)` as the DDL and `t.tgenabled <> 'D'` as `enabled`.
-- routines — `pg_proc p JOIN pg_namespace n`, `p.prokind IN ('f','p')`, `pg_get_functiondef(p.oid)` as the
-  DDL, `pg_get_function_result(p.oid)` as `returns`.
-- sequences — `pg_class c WHERE c.relkind = 'S'` with `pg_sequence` for start/increment/min/max/cycle and
-  `pg_sequences.last_value`.
+```json
+{"changes": {"rename":   {"email": "mail"},
+             "retype":   {"total": "TEXT"},
+             "nullable": {"note": true},
+             "default":  {"status": "'new'"},
+             "drop":     ["legacy_id"],
+             "add":      [{"name": "tag", "type": "TEXT"}]}}
+```
 
-**MySQL** (`information_schema`):
+Every key is optional. The command reads the table from the catalog, applies the changes to a clone, and calls
+the existing `rebuild_table` with the resulting columns — so there is exactly one rebuild implementation and the
+command cannot invent a second one. It then **verifies before it commits**: every index, trigger and foreign key
+present on the original table must appear on the rebuilt one, compared by name. The shipped plan already carries
+triggers, session pragmas and foreign keys across (`88c9979`, `4534c21`); this check is the proof, not a second
+implementation.
 
-- triggers — `information_schema.TRIGGERS`, `ACTION_TIMING`, `EVENT_MANIPULATION`, `ACTION_STATEMENT`; the DDL
-  is assembled from those parts because MySQL stores no `CREATE TRIGGER` text.
-- routines — `information_schema.ROUTINES`, `ROUTINE_TYPE`, `DTD_IDENTIFIER`, `ROUTINE_DEFINITION`.
-- sequences — MySQL 8 has none; `AUTO_INCREMENT` metadata already covers the need (the model's own comment
-  says so), so this returns an empty list with a note rather than pretending.
+Three refusals:
 
-**SQLite** already reports triggers; its routines and sequences stay empty by design, and the UI says
-"SQLite has no stored routines" rather than showing an empty panel that looks broken.
+1. **Inside an open transaction** → refuse. `set_primary_key` already does this (`cmd/schema.rs:386–391`); reuse
+   the same message, because the pragma cannot change inside one.
+2. **`foreign_key_check` returns rows** → roll back and list them.
+3. **An index, trigger or FK the plan cannot replay** → refuse and name it. The ones it cannot replay are exactly
+   the ones whose loss would be invisible.
 
-One test per driver, asserting a known trigger/routine/sequence created in the fixture comes back with the
-right name, table and DDL text.
-
-### The editors are DDL text with structure around it, not form builders
-
-A form that builds `CREATE TRIGGER` covers the easy 60% and lies about the rest (MySQL's `FOR EACH ROW`,
-Postgres's `WHEN` clause and `EXECUTE FUNCTION`, SQLite's `WHEN`/`BEGIN … END`). So the editor is:
-
-- **Structured header** — name, table, timing, events (checkboxes), for Postgres a function reference. This is
-  what makes the common case fast.
-- **Body** — a monospace editor holding the statement body, pre-filled from `ddl::create_trigger` so the
-  generated shape is visible and editable.
-- **Preview** — the full statement that will run, always visible.
-- **Apply** — the statement is sent verbatim. `create_trigger`'s structured form is used to *seed* the editor,
-  never to regenerate over the user's edits.
-
-Validation before sending: the statement must start with `CREATE` (or `ALTER`) and must mention the object
-name. That is not a SQL parser and does not pretend to be — a typo still fails at the server, where the error
-message is better than anything a client can produce. What the check catches is the one dangerous case: a
-pasted statement for the wrong object, which would otherwise create something surprising.
-
-`*Editor` commands take the whole DDL, so the same command serves "create" and "edit" — which is exactly what
-`CREATE OR REPLACE` means on Postgres and what MySQL's `DROP`+`CREATE` dance needs behind the scenes. The
-command says which it did in its result (`{"replaced": true}`), because MySQL's answer is destructive and
-must not be silent.
+`schema.changeColumnType` on SQLite should then route through this command instead of refusing — the one
+behaviour change that makes the command earn its place rather than being a second way to do what
+`schema.setPrimaryKey` does.
 
 ### Partitions, narrowly
 
-Read: Postgres `pg_inherits` + `pg_get_expr(relpartbound)` for the bounds; MySQL
-`information_schema.PARTITIONS`. Write: range partitions by date only, which is the case anyone actually
-uses — `CREATE TABLE events_2026_11 PARTITION OF events FOR VALUES FROM ('2026-11-01') TO ('2026-12-01')`.
-List/hash partitions are the ceiling: refused with a message saying the DDL can be run in the query editor.
-Postgres 17's default partition and MySQL's `REORGANIZE` are out of scope.
+Read: Postgres `pg_inherits` joined to `pg_class`, with `pg_get_expr(c.relpartbound, c.oid)` for the bounds;
+MySQL `information_schema.PARTITIONS` (`PARTITION_NAME`, `PARTITION_DESCRIPTION`, `TABLE_ROWS`). Both return
+`{parent, name, from, to, rows}`, painted as children of the parent table in the tree.
 
-### SQLite's table rebuild, honestly gated
-
-SQLite cannot drop or retype a column in place. The documented 12-step procedure is: `PRAGMA foreign_keys=off`,
-begin, create the new table, copy, drop the old, rename, recreate indexes and triggers, `PRAGMA
-foreign_key_check`, commit, `PRAGMA foreign_keys=on`.
-
-`schema.tableRebuild` implements exactly that, with three refusals:
-
-1. **Inside a transaction already** → refuse (the pragma cannot change inside one).
-2. **`foreign_key_check` returns rows** → roll back and report them; a rebuild that breaks a reference is a
-   data-integrity bug, not a warning.
-3. **The table has a trigger or index whose DDL cannot be replayed** → refuse and list them, because silently
-   dropping a trigger changes behaviour forever.
-
-Today's behaviour ("SQLite DDL that needs it says so instead") stays for every other path; this command is the
-one that does the work, and `schema.changeColumnType` on SQLite should call it rather than refusing.
+Write: **range partitions by date only**, which is the case anyone actually uses —
+`CREATE TABLE events_2026_11 PARTITION OF events FOR VALUES FROM ('2026-11-01') TO ('2026-12-01')`. List, hash,
+default partitions and MySQL's `REORGANIZE PARTITION` are refused with a sentence pointing at the query editor.
+Drop is `DROP TABLE` on the partition (Postgres) or `ALTER TABLE … DROP PARTITION` (MySQL), behind `confirm`.
 
 ### The diagram gets positions, a model file and a second export
 
-`nook_model::layout_diagram` is deterministic. Add:
+`nook_model::layout_diagram` is deterministic and stays the default. Add:
 
-- `Diagram.boxes: Vec<(String, [f32; 2])>` — the layout's output, plus any stored override.
+- `Diagram.boxes: Vec<(String, [f32; 2])>` — the layout's own output, so a caller can read positions without
+  re-running the layout.
 - `diagram.manualLayout` stores overrides in the store keyed by `conn + schema`; `reset: true` clears them.
-- `diagram.modelFile` writes `{"version":1,"conn":"local","schema":"public","boxes":[…],"tables":[…]}` — the
-  tables are included so a model file is readable without a live connection, which is what makes it a
-  *document* rather than a bookmark.
+- `diagram.modelFile` writes `{"version":1,"conn":"local","schema":"public","boxes":[…],"tables":[…]}`. The
+  tables are in the file so it is readable without a live connection — that is what makes it a *document* rather
+  than a bookmark.
 - `diagram.forwardEngineer` takes that document and emits `ddl::create_table` per table in dependency order
-  (topological sort over `foreign_keys`, cycles broken by emitting the FK as a separate `ALTER TABLE … ADD
-  CONSTRAINT` after all tables exist — the only correct answer for a cycle).
-- `diagram.exportPng` reuses the existing SVG rasterisation path the `--shot` flag already uses for the app;
-  if that path is `eframe`-only, render the diagram offscreen through the same `egui` painter into a
-  `ColorImage` and encode with the PNG writer already vendored for `--shot`. **Check which exists before
-  writing code** — `grep -rn "png" crates apps` is the first command of this step, and if neither exists the
-  item becomes "SVG only, PNG dropped", recorded as a ceiling rather than a silent failure.
+  (topological sort over `foreign_keys`), with cycles broken by emitting the FK as a separate
+  `ALTER TABLE … ADD CONSTRAINT` after every table exists — the only correct answer for a cycle.
+
+**PNG is conditional, and step 0 is `grep -rn "png" crates apps`.** The `--shot` flag renders a frame, so a
+rasteriser may exist; if it is `eframe`-only, rendering a diagram offscreen needs the `egui` painter into a
+`ColorImage` plus a PNG encoder. If neither is already there, the item is dropped and recorded as a ceiling — SVG
+is the commitment, and adding an image-encoding dependency for a second export format is not worth it.
 
 ### Data dictionary
 
-`schema.ddl` already produces the DDL for every object; the dictionary is a different projection of the same
-catalog: table → columns (name, type, nullability, default, key, comment), indexes, foreign keys, row estimate.
-Markdown for a wiki, HTML for a share. One pass over `Catalog`, no queries beyond what is cached.
+`schema.ddl` already projects the catalog into DDL; the dictionary is a different projection of the same data:
+table → columns (name, type, nullability, default, key, comment), indexes, foreign keys, row estimate. Markdown
+for a wiki, self-contained HTML for a share. One pass over `Catalog`, no new queries.
 
 ## Files
 
 | File | Work |
 |---|---|
-| `crates/drivers/src/pg.rs` | triggers, routines, sequences, partitions |
-| `crates/drivers/src/mysql.rs` | triggers, routines, partitions; sequences empty with a note |
-| `crates/drivers/src/sqlite.rs` | keep triggers; make routines/sequences explicitly empty |
-| `crates/engine/src/cmd/schema.rs` | the twelve schema commands |
-| `crates/engine/src/cmd/diagram.rs` | reverse/forward engineer, PNG |
+| `crates/engine/src/cmd/schema.rs` | `schema.tableRebuild` (the diff), `schema.partitions`, `createPartition`, `dropPartition`; route SQLite `changeColumnType` through the rebuild |
+| `crates/drivers/src/{pg,mysql}.rs` | partition read, and MySQL's `ADD`/`DROP PARTITION` DDL |
+| `crates/model/src/ddl.rs` | `create_partition`, `drop_partition`, dependency-ordered forward engineering |
 | `crates/model/src/diagram.rs` | `boxes`, overrides, the model document (serde) |
-| `crates/model/src/ddl.rs` | `rebuild_plan` (the 12 steps), `create_partition`, dependency-ordered forward engineering |
+| `crates/engine/src/cmd/diagram.rs` | `reverseEngineer`, `forwardEngineer`, `manualLayout`, `modelFile`, `exportPng` (if step 0 allows) |
+| `crates/engine/src/cmd/tools.rs` | `tools.dataDictionary` |
 | `crates/engine/src/store.rs` | diagram positions |
-| `crates/ui/src/views.rs` | the Design tab's Triggers / Routines / Sequences / Partitions sections; the diagram canvas with drag |
-| `crates/ui/src/dialogs.rs` | the object editor (header + body + preview) |
-| `docs/architecture.md` | the rebuild gate, the MySQL replace-is-destructive note, the partition ceiling |
+| `crates/ui/src/views.rs` | partitions under the parent table in the tree; the diagram canvas with drag |
+| `docs/architecture.md` | the rebuild's diff contract, the partition ceiling, the PNG decision |
 
 ## Steps
 
-1. Driver catalog work first, with a fixture per engine. No UI, no commands — this is the foundation and it is
-   where the phase is most likely to be underestimated.
-2. `schema.triggers` / `routines` / `sequences` / `partitions` (read-only) and the Design tab sections.
-3. The object editor dialog + `schema.triggerEditor`, then `functionEditor`, then `sequenceEditor`.
-4. `schema.tableRebuild` with the three refusals; make SQLite's `changeColumnType` route through it.
-5. Partitions write path (range only).
-6. Diagram: positions, drag, `manualLayout`, `modelFile`, `forwardEngineer`, then PNG (or the recorded ceiling).
+0. `grep -rn "png" crates apps` and `grep -rn "ColorImage" crates` — settle the PNG item before writing anything.
+1. `schema.partitions` (read-only, both engines) and the tree children.
+2. `schema.tableRebuild` with the diff, the three refusals, and the post-rebuild index/trigger/FK verification;
+   route SQLite's `changeColumnType` through it.
+3. `createPartition` / `dropPartition`, range only, `confirm` on drop.
+4. `diagram.reverseEngineer` (the catalog as a document) and `boxes` in the model.
+5. `manualLayout` + drag on the canvas + `modelFile`.
+6. `forwardEngineer`, including the cycle path.
 7. `tools.dataDictionary`.
-8. Regenerate parity — this phase should move several areas at once.
+8. `exportPng` if step 0 said yes; otherwise record the ceiling.
+9. Regenerate parity; six ids leave the gap list.
 
 ## Tests
 
-- Per driver: a created trigger/routine/sequence appears in the catalog with the right DDL; `drop` removes it.
-- Editor validation: a statement for a different object is refused; a valid one applies; MySQL's replace reports
-  `replaced: true`.
-- Rebuild: a table with a row, an index and a trigger survives with all three intact and the same row count; a
-  rebuild that would orphan a reference is rolled back and the rows are listed; a rebuild inside a transaction
-  is refused.
-- Partitions: create a range partition, insert into the parent, and the row lands in the child (assert via the
-  child's count); a list partition is refused with the DDL hint.
-- Forward engineering: a model with a cycle emits both tables then one `ALTER TABLE`; the SQL applies cleanly on
-  an empty database (integration test).
+- Rebuild by diff: rename a column and the row count, index and trigger survive; retype a column and the values
+  round-trip; a change that would orphan a reference is rolled back with the offending rows listed; a rebuild
+  inside an open transaction is refused with the shipped message.
+- Rebuild verification: a table with an index the plan cannot replay is refused, and the index is named.
+- Partitions: create a range partition, insert through the parent, and the row is in the child (assert the
+  child's count); a list partition is refused with the query-editor hint; drop needs `confirm`.
+- Forward engineering: a model with a cycle emits both tables then one `ALTER TABLE`; the script applies cleanly
+  on an empty database (integration test).
 - Model file: save, reset the layout, load → positions restored.
 - Dictionary: a table with a comment, an index and an FK appears with all three.
-- Sweep covers the sixteen new ids.
+- Sweep covers the eight new ids.
 
 ## Done when
 
-On all three engines a trigger can be listed, created and dropped from the app; a Postgres sequence can be
-edited; a SQLite table's column type can be changed without losing its indexes; and a saved diagram reopens
-where it was left.
+A SQLite column can be renamed and retyped from the app without losing its indexes or triggers, a Postgres range
+partition can be created from the app, and a saved diagram reopens where it was left and forward-engineers into
+DDL.
 
 ## Ceilings
 
-- **No SQL parser.** Validation is a prefix-and-name check; the server is the authority.
-- **MySQL "edit" is drop-and-create**, reported as such.
 - **Range partitions only**, date-typed. No list, hash, default partition, or `REORGANIZE`.
-- **PNG may not land** if no rasteriser exists; SVG is the commitment.
 - **The rebuild is SQLite-only** — the other engines alter in place and need none of it.
+- **PNG may not land**; SVG is the commitment, and the decision is recorded in `docs/architecture.md`.
+- **The diagram has no physics**; positions are stored, not simulated.
+- **MySQL routine DDL stays empty** (inherited from `docs/gaps.md` §4) — the dictionary shows a MySQL routine's
+  name and kind, not its body.
