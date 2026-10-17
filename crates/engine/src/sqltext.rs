@@ -647,6 +647,7 @@ mod tests {
             schemas: vec![Schema {
                 name: "main".into(),
                 tables: vec![users, orders],
+                ..Default::default()
             }],
             ..Catalog::default()
         }

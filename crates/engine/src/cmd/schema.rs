@@ -56,6 +56,15 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("schema.emptyDatabase", "Empty database", "Design", empty_database)
             .params(r#"{"confirm":true}"#)
             .help("Drop every user table in the connected database. Asks for confirm:true."),
+        CommandSpec::new("schema.triggerEditor", "Trigger editor", "Design", trigger_editor)
+            .params(r#"{"action":"create","table":"users","name":"audit_email","timing":"AFTER","event":"INSERT","body":"UPDATE users SET email = lower(email);"}"#)
+            .help("list/create/drop via \"action\"; create builds the CREATE TRIGGER per dialect."),
+        CommandSpec::new("schema.functionEditor", "Function editor", "Design", function_editor)
+            .params(r#"{"action":"create","name":"add_one","kind":"function","sql":"(n int) RETURNS int AS $$ SELECT n + 1 $$ LANGUAGE sql"}"#)
+            .help("list/create/drop stored routines via \"action\"; the sql body is passed through verbatim; SQLite refuses."),
+        CommandSpec::new("schema.sequenceEditor", "Sequence editor", "Design", sequence_editor)
+            .params(r#"{"action":"create","name":"user_ids","start":1,"increment":1}"#)
+            .help("list/create/drop sequences via \"action\"; PostgreSQL only."),
     ]
 }
 
@@ -638,7 +647,247 @@ fn empty_database(session: &mut Session, p: &Params) -> Result<serde_json::Value
     execute_ddl(session, index, &statements).map(|_| json!({ "dropped": count }))
 }
 
-/// Exposed for the CLI's `nook-cli describe`: dialect name of a connection.
+/// Shared plumbing for the three editors: the connection's dialect or nothing.
+fn editor_dialect(session: &Session, index: usize) -> Result<Dialect> {
+    session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .ok_or_else(|| Error::config("the connection is not open"))
+}
+
+/// Run one statement verbatim, then refresh the catalog. Unlike `execute_ddl` this
+/// avoids `run_script`/`split_script`, which would cut a trigger or routine body on
+/// its inner `;` — the server parses the whole CREATE as one statement.
+fn run_ddl_verbatim(session: &mut Session, index: usize, sql: &str) -> Result<()> {
+    {
+        let driver = session.driver_for(index)?;
+        driver.run(sql, 1)?;
+    }
+    let _ = crate::cmd::refresh_catalog(session, index);
+    Ok(())
+}
+
+fn trigger_editor(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    let action = p.str_opt("action").unwrap_or_else(|| "list".into());
+    match action.as_str() {
+        "list" => trigger_list(session, index, p),
+        "create" => trigger_create(session, index, p),
+        "drop" => trigger_drop(session, index, p),
+        other => Err(Error::config(format!(
+            "unknown action '{other}'; use list, create or drop"
+        ))),
+    }
+}
+
+fn trigger_list(session: &Session, index: usize, p: &Params) -> Result<serde_json::Value> {
+    let (_, reference, _) = table_from_params(session, p)?;
+    let _ = index;
+    let spec = p.str_arg("table")?;
+    let _ = spec;
+    let catalog = session
+        .conns
+        .get(index)
+        .and_then(|c| c.catalog.as_ref())
+        .ok_or_else(|| Error::config("no catalog yet; run conn.refresh first"))?;
+    let items = catalog
+        .schemas
+        .iter()
+        .flat_map(|s| &s.triggers)
+        .filter(|t| {
+            let matches_schema = reference
+                .schema
+                .as_deref()
+                .map(|s| t.schema.as_deref() == Some(s))
+                .unwrap_or(true);
+            matches_schema && (t.table == reference.table || reference.table.is_empty())
+        })
+        .map(|t| {
+            json!({
+                "name": t.name, "table": t.table, "timing": t.timing,
+                "events": t.events, "enabled": t.enabled, "ddl": t.ddl,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "table": reference.key(), "items": items }))
+}
+
+fn trigger_create(session: &mut Session, index: usize, p: &Params) -> Result<serde_json::Value> {
+    let dialect = editor_dialect(session, index)?;
+    let name = p.str_arg("name")?;
+    let spec = p.str_arg("table")?;
+    let timing = p.str_arg("timing")?;
+    let event = p.str_arg("event")?;
+    let body = p.str_arg("body")?;
+    let reference = TableRef::parse(&spec);
+    let sql = ddl::create_trigger(
+        reference.schema.as_deref(),
+        &name,
+        &reference.table,
+        &timing,
+        &event,
+        &body,
+        dialect,
+    );
+    run_ddl_verbatim(session, index, &sql)?;
+    Ok(json!({ "created": name, "sql": sql }))
+}
+
+fn trigger_drop(session: &mut Session, index: usize, p: &Params) -> Result<serde_json::Value> {
+    require_confirm(session, p, "drop a trigger")?;
+    let dialect = editor_dialect(session, index)?;
+    let name = p.str_arg("name")?;
+    let spec = p.str_arg("table")?;
+    let reference = TableRef::parse(&spec);
+    let sql = ddl::drop_trigger(
+        reference.schema.as_deref(),
+        &name,
+        &reference.table,
+        dialect,
+    );
+    run_ddl_verbatim(session, index, &sql)?;
+    Ok(json!({ "dropped": name }))
+}
+
+fn function_editor(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    let action = p.str_opt("action").unwrap_or_else(|| "list".into());
+    match action.as_str() {
+        "list" => function_list(session, index),
+        "create" => function_create(session, index, p),
+        "drop" => function_drop(session, index, p),
+        other => Err(Error::config(format!(
+            "unknown action '{other}'; use list, create or drop"
+        ))),
+    }
+}
+
+fn function_list(session: &Session, index: usize) -> Result<serde_json::Value> {
+    let catalog = session
+        .conns
+        .get(index)
+        .and_then(|c| c.catalog.as_ref())
+        .ok_or_else(|| Error::config("no catalog yet; run conn.refresh first"))?;
+    let items = catalog
+        .schemas
+        .iter()
+        .flat_map(|s| &s.routines)
+        .map(|r| {
+            json!({
+                "name": r.name, "kind": r.kind, "schema": r.schema,
+                "returns": r.returns, "comment": r.comment, "ddl": r.ddl,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "items": items }))
+}
+
+fn function_create(session: &mut Session, index: usize, p: &Params) -> Result<serde_json::Value> {
+    let dialect = editor_dialect(session, index)?;
+    if dialect == Dialect::Sqlite {
+        return Err(Error::config(
+            "SQLite has no stored routines; its app-defined functions are registered at connect time, not created here",
+        ));
+    }
+    let name = p.str_arg("name")?;
+    let kind = p.str_opt("kind").unwrap_or_else(|| "function".into());
+    let sql = p.str_arg("sql")?;
+    let schema = p.str_opt("schema");
+    let statement = ddl::create_routine(schema.as_deref(), &name, &kind, &sql, dialect);
+    run_ddl_verbatim(session, index, &statement)?;
+    Ok(json!({ "created": name, "sql": statement }))
+}
+
+fn function_drop(session: &mut Session, index: usize, p: &Params) -> Result<serde_json::Value> {
+    require_confirm(session, p, "drop a routine")?;
+    let dialect = editor_dialect(session, index)?;
+    if dialect == Dialect::Sqlite {
+        return Err(Error::config("SQLite has no stored routines to drop"));
+    }
+    let name = p.str_arg("name")?;
+    let kind = p.str_opt("kind").unwrap_or_else(|| "function".into());
+    let schema = p.str_opt("schema");
+    let sql = ddl::drop_routine(schema.as_deref(), &name, &kind, dialect);
+    run_ddl_verbatim(session, index, &sql)?;
+    Ok(json!({ "dropped": name }))
+}
+
+fn sequence_editor(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    let action = p.str_opt("action").unwrap_or_else(|| "list".into());
+    match action.as_str() {
+        "list" => sequence_list(session, index),
+        "create" => sequence_create(session, index, p),
+        "drop" => sequence_drop(session, index, p),
+        other => Err(Error::config(format!(
+            "unknown action '{other}'; use list, create or drop"
+        ))),
+    }
+}
+
+fn sequence_list(session: &Session, index: usize) -> Result<serde_json::Value> {
+    let catalog = session
+        .conns
+        .get(index)
+        .and_then(|c| c.catalog.as_ref())
+        .ok_or_else(|| Error::config("no catalog yet; run conn.refresh first"))?;
+    let items = catalog
+        .schemas
+        .iter()
+        .flat_map(|s| &s.sequences)
+        .map(|q| {
+            json!({
+                "name": q.name, "schema": q.schema, "start": q.start,
+                "increment": q.increment, "min": q.min, "max": q.max,
+                "cycle": q.cycle, "last_value": q.last_value,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "items": items }))
+}
+
+fn sequence_create(session: &mut Session, index: usize, p: &Params) -> Result<serde_json::Value> {
+    let dialect = editor_dialect(session, index)?;
+    match dialect {
+        Dialect::Postgres => {}
+        _ => {
+            return Err(Error::config(
+                "sequences are a PostgreSQL feature; SQLite uses AUTOINCREMENT and MySQL uses AUTO_INCREMENT columns",
+            ))
+        }
+    }
+    let name = p.str_arg("name")?;
+    let seq = nook_model::Sequence {
+        schema: p.str_opt("schema"),
+        name: name.clone(),
+        start: p.int_opt("start", 1),
+        increment: p.int_opt("increment", 1),
+        min: p.get("min").and_then(|v| v.as_i64()),
+        max: p.get("max").and_then(|v| v.as_i64()),
+        cycle: p.bool_opt("cycle", false),
+        last_value: None,
+    };
+    let sql = ddl::create_sequence(&seq, dialect);
+    run_ddl_verbatim(session, index, &sql)?;
+    Ok(json!({ "created": name, "sql": sql }))
+}
+
+fn sequence_drop(session: &mut Session, index: usize, p: &Params) -> Result<serde_json::Value> {
+    require_confirm(session, p, "drop a sequence")?;
+    let dialect = editor_dialect(session, index)?;
+    match dialect {
+        Dialect::Postgres => {}
+        _ => return Err(Error::config("sequences are a PostgreSQL feature")),
+    }
+    let name = p.str_arg("name")?;
+    let schema = p.str_opt("schema");
+    let sql = ddl::drop_sequence(schema.as_deref(), &name, dialect);
+    run_ddl_verbatim(session, index, &sql)?;
+    Ok(json!({ "dropped": name }))
+}
+
 pub fn dialect_of(session: &Session, index: usize) -> Option<String> {
     session
         .conns

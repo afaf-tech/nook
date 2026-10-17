@@ -31,11 +31,19 @@ Shipped: name mapping via `columnMapping` (`src=target` pairs) for CSV/JSON impo
 catalog; mapping refuses `tables: ["*"]`. Still open: the import wizard UI does not surface a
 mapping editor — it is parameter-level today. (`tools.importWizard`, `transfer.columnMapping`)
 
-## 4. Trigger, function and sequence editors
+## 4. ~~Trigger, function and sequence editors~~ — done
 
-Object design stops at tables, views and indexes. Triggers and stored routines are read-only today —
-they appear in DDL but cannot be created or edited. (`schema.triggerEditor`, `schema.functionEditor`,
-`schema.sequenceEditor`)
+Shipped: `schema.triggerEditor` / `schema.functionEditor` / `schema.sequenceEditor`, each with
+`action` list/create/drop. Lists read the catalog cache; create builds the `CREATE TRIGGER` /
+routine / `CREATE SEQUENCE` per dialect and runs it as one verbatim statement (so trigger and
+routine bodies containing `;` survive), then refreshes the catalog. Drop asks for `confirm:true`.
+PG `DROP TRIGGER` gets the unqualified name plus `ON <qualified table>`. Guarded at the command
+level: routines refuse on SQLite, sequences only exist on PostgreSQL. Catalog introspection fills
+triggers/routines/sequences for PostgreSQL (`pg_trigger`/`pg_proc`/`pg_sequences`) and triggers/
+routines for MySQL (`information_schema`); MySQL routine DDL stays empty rather than one `SHOW
+CREATE` round trip per object. The design toolbar gains `+ Trigger` / `+ Function` / `+ Sequence`.
+Still open: a visual editor surface — the commands are parameter-level today, like the rest of the
+command palette.
 
 ## 5. ~~Job notifications and chaining~~ — done
 

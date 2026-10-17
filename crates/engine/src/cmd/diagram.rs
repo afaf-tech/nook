@@ -230,6 +230,7 @@ mod tests {
             schemas: vec![Schema {
                 name: "main".into(),
                 tables: vec![users, posts],
+                ..Default::default()
             }],
             ..nook_model::Catalog::default()
         }

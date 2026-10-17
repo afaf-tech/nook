@@ -7,8 +7,8 @@ use mysql::prelude::*;
 use mysql::{Column as MyColumn, Conn, Opts, OptsBuilder, Row, SslOpts, Value as MyValue};
 use nook_core::{ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
 use nook_model::{
-    Catalog, Column, DbProcess, DbUser, ForeignKey, Index, ResultSet, Schema, ServerInfo, Table,
-    TableKind,
+    Catalog, Column, DbProcess, DbUser, ForeignKey, Index, ResultSet, Routine, Schema, ServerInfo,
+    Table, TableKind, Trigger,
 };
 
 use crate::{guard_read_only, Driver, MAX_ROWS};
@@ -255,6 +255,7 @@ impl Driver for MySql {
             schemas: vec![Schema {
                 name: db.clone(),
                 tables: vec![],
+                ..Default::default()
             }],
             fetched_ms: 0,
         };
@@ -395,6 +396,54 @@ impl Driver for MySql {
                     on_update: r[7].clone(),
                 }),
             }
+        }
+
+        let trigger_rows = self.string_rows(&format!(
+            "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, \
+             COALESCE(ACTION_STATEMENT, '') \
+             FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '{db_lit}' \
+             ORDER BY TRIGGER_NAME"
+        ))?;
+        for r in &trigger_rows {
+            if r.len() < 5 {
+                continue;
+            }
+            // The action statement is the body, not the whole definition; the
+            // timing/event columns carry the structured parts.
+            catalog.schemas[0].triggers.push(Trigger {
+                schema: Some(db.clone()),
+                name: r[0].clone(),
+                table: r[1].clone(),
+                timing: r[2].clone(),
+                events: r[3].clone(),
+                ddl: format!(
+                    "CREATE TRIGGER {} {} {} ON {} FOR EACH ROW {}",
+                    r[0], r[2], r[3], r[1], r[4]
+                ),
+                ..Default::default()
+            });
+        }
+
+        let routine_rows = self.string_rows(&format!(
+            "SELECT ROUTINE_NAME, ROUTINE_TYPE, COALESCE(DTD_IDENTIFIER, ''), \
+             COALESCE(ROUTINE_COMMENT, '') \
+             FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '{db_lit}' \
+             ORDER BY ROUTINE_NAME"
+        ))?;
+        for r in &routine_rows {
+            if r.len() < 4 {
+                continue;
+            }
+            catalog.schemas[0].routines.push(Routine {
+                schema: Some(db.clone()),
+                name: r[0].clone(),
+                kind: r[1].to_ascii_lowercase(),
+                returns: r[2].clone(),
+                comment: r[3].clone(),
+                // SHOW CREATE needs one round trip per routine; left empty rather
+                // than fanning out at catalog time.
+                ddl: String::new(),
+            });
         }
 
         catalog.fetched_ms = started.elapsed().as_millis() as u64;

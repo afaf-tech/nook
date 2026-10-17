@@ -166,6 +166,21 @@ pub fn design(
                     er_diagram = true;
                 }
                 design::divider(ui, tokens);
+                let mut trigger_prefill = prefill.clone();
+                trigger_prefill.push(("action", "create"));
+                let mut function_prefill = prefill.clone();
+                function_prefill.push(("action", "create"));
+                let mut sequence_prefill = prefill.clone();
+                sequence_prefill.push(("action", "create"));
+                if design::ghost_button(ui, tokens, "+ Trigger", true).clicked() {
+                    state.open_command_with("schema.triggerEditor", &trigger_prefill);
+                }
+                if design::ghost_button(ui, tokens, "+ Function", true).clicked() {
+                    state.open_command_with("schema.functionEditor", &function_prefill);
+                }
+                if design::ghost_button(ui, tokens, "+ Sequence", true).clicked() {
+                    state.open_command_with("schema.sequenceEditor", &sequence_prefill);
+                }
                 if design::ghost_button(ui, tokens, "+ Foreign key", true).clicked() {
                     state.open_command_with("schema.addForeignKey", &prefill);
                 }

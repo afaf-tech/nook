@@ -349,20 +349,20 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
     (
         "Design",
         "schema.triggerEditor",
-        "Trigger and procedure editors",
-        "not implemented",
+        "Trigger editor",
+        "list/create/drop via \"action\"; SQLite, PostgreSQL and MySQL",
     ),
     (
         "Design",
         "schema.functionEditor",
-        "Function editor with debugger",
-        "not implemented",
+        "Function editor",
+        "list/create/drop stored routines via \"action\"; body passed through verbatim; SQLite refuses",
     ),
     (
         "Design",
         "schema.sequenceEditor",
-        "Sequence and type editors",
-        "not implemented",
+        "Sequence editor",
+        "list/create/drop via \"action\"; PostgreSQL only",
     ),
     (
         "Design",

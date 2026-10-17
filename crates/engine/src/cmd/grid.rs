@@ -969,6 +969,7 @@ mod tests {
             schemas: vec![nook_model::Schema {
                 name: "main".into(),
                 tables: vec![users],
+                ..Default::default()
             }],
             ..nook_model::Catalog::default()
         });

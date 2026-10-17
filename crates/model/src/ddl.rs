@@ -353,25 +353,33 @@ pub fn create_trigger(
     dialect: Dialect,
 ) -> String {
     let quoted = quote_ident(name, dialect);
+    let target = quote_qualified(schema, table, dialect);
     match dialect {
+        // SQLite has no schemas in the PostgreSQL sense: the table alone is right.
         Dialect::Sqlite => format!(
-            "CREATE TRIGGER {quoted} {timing} {events} ON {table}\nBEGIN\n{body}\nEND;"
+            "CREATE TRIGGER {quoted} {timing} {events} ON {target}\nBEGIN\n{body}\nEND;"
         ),
         Dialect::Postgres => format!(
-            "CREATE TRIGGER {quoted} {timing} {events} ON {table} FOR EACH ROW EXECUTE FUNCTION {body};"
+            "CREATE TRIGGER {quoted} {timing} {events} ON {target} FOR EACH ROW EXECUTE FUNCTION {body};"
         ),
         Dialect::MySql => format!(
-            "CREATE TRIGGER {quoted} {timing} {events} ON {table} FOR EACH ROW\nBEGIN\n{body}\nEND;"
+            "CREATE TRIGGER {quoted} {timing} {events} ON {target} FOR EACH ROW\nBEGIN\n{body}\nEND;"
         ),
     }
 }
 
-pub fn drop_trigger(schema: Option<&str>, name: &str, dialect: Dialect) -> String {
-    let target = quote_qualified(schema, name, dialect);
+/// PG requires an unqualified trigger name plus the trigger's table in
+/// `DROP TRIGGER … ON table`; SQLite and MySQL reject `ON`, so it is only
+/// interpolated for Postgres.
+pub fn drop_trigger(schema: Option<&str>, name: &str, table: &str, dialect: Dialect) -> String {
+    let target = quote_ident(name, dialect);
     match dialect {
         // SQLite has no IF EXISTS for triggers.
         Dialect::Sqlite => format!("DROP TRIGGER {target};"),
-        _ => format!("DROP TRIGGER IF EXISTS {target};"),
+        Dialect::Postgres => {
+            format!("DROP TRIGGER IF EXISTS {target} ON {};", quote_qualified(schema, table, dialect))
+        }
+        Dialect::MySql => format!("DROP TRIGGER IF EXISTS {target};"),
     }
 }
 
@@ -548,10 +556,10 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "CREATE TRIGGER \"touch\" BEFORE UPDATE ON users\nBEGIN\nUPDATE users SET touched = 1;\nEND;"
+            "CREATE TRIGGER \"touch\" BEFORE UPDATE ON \"users\"\nBEGIN\nUPDATE users SET touched = 1;\nEND;"
         );
         let sql = create_trigger(
-            None,
+            Some("public"),
             "touch",
             "users",
             "AFTER",
@@ -561,15 +569,15 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "CREATE TRIGGER \"touch\" AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION notify_inserted();"
+            "CREATE TRIGGER \"touch\" AFTER INSERT ON \"public\".\"users\" FOR EACH ROW EXECUTE FUNCTION notify_inserted();"
         );
         assert_eq!(
-            drop_trigger(None, "touch", Dialect::Sqlite),
+            drop_trigger(None, "touch", "users", Dialect::Sqlite),
             "DROP TRIGGER \"touch\";"
         );
         assert_eq!(
-            drop_trigger(Some("public"), "touch", Dialect::Postgres),
-            "DROP TRIGGER IF EXISTS \"public\".\"touch\";"
+            drop_trigger(Some("public"), "touch", "users", Dialect::Postgres),
+            "DROP TRIGGER IF EXISTS \"touch\" ON \"public\".\"users\";"
         );
 
         let sql = create_routine(

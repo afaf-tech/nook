@@ -8,8 +8,8 @@
 
 | Number | Value | Kind |
 |---|---|---|
-| Navicat feature catalog coverage | **150 / 207 (72.5%)** | measured (`cargo xtask parity` → [`docs/parity-checklist.md`](docs/parity-checklist.md)) |
-| Commands | 151 registered ids | measured (`cargo xtask parity`) |
+| Navicat feature catalog coverage | **153 / 207 (73.9%)** | measured (`cargo xtask parity` → [`docs/parity-checklist.md`](docs/parity-checklist.md)) |
+| Commands | 154 registered ids | measured (`cargo xtask parity`) |
 | Engines with a live driver | **3** (SQLite, PostgreSQL, MySQL/MariaDB) | measured: catalogs, queries, edits, transfer, sync and backup run against each |
 | Engines catalogued but not implemented | 4 (SQL Server, Oracle, MongoDB, Redis) | named in the catalog, no driver |
 | Tests | 425 | measured (`cargo test --workspace`) |
@@ -28,7 +28,7 @@ against a live server on this machine (see the gaps).
 |---|---|---|
 | Connections and security | 75% | SSH tunnels and SSL are in; HTTP tunnel, cloud connections and SSH-by-password are not |
 | Data browsing and editing | 89% | the strongest area: paging, sort, filter, typed edits, pending SQL, transactional apply |
-| Object design | 85% | tables, columns, indexes, foreign keys and views; no trigger, function or sequence editors |
+| Object design | 88% | tables, columns, indexes, foreign keys and views; trigger, function and sequence editors via `schema.triggerEditor`/`functionEditor`/`sequenceEditor` |
 | Query work | 76% | run, format, complete, explain, history, snippets; no debugger, profiler or visual plan |
 | AI query generation | 100% | 7 providers over 2 wire formats, a custom base URL each, `@table` context, keys in the keychain, the settings in the app's own SQLite store; no chat, streaming or embeddings |
 | Transfer and sync | 55% | cross-engine transfer, row sync, structure diff and sync; name-based column mapping (`columnMapping`); no bi-directional sync |
@@ -46,10 +46,10 @@ against a live server on this machine (see the gaps).
 |---|---|---|
 | M1 Skeleton | done | layered workspace, error type, cell type, dialect quoting, DDL, edit plans, structure diff, ER layout |
 | M2 Drivers | done | SQLite, PostgreSQL and MySQL: catalog introspection, typed results, server info, monitor, privileges, DDL, table rebuild |
-| M3 Engine | done | `Session`, 151 commands, the Navicat catalog, parity measurement, jobs, data generation, reports, profiles, keychain, SSH tunnel |
+| M3 Engine | done | `Session`, 154 commands, the Navicat catalog, parity measurement, jobs, data generation, reports, profiles, keychain, SSH tunnel |
 | M4 Surfaces | done | desktop app, CLI, MCP server, JSON control channel |
 | M5 Verification | in progress | 425 tests; live runs against SQLite, PostgreSQL and MySQL 8.4 (portable server; the Homebrew binary is ICU-broken and was left alone) |
-| M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): trigger/function/sequence editors, statement cancel, explain plans |
+| M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): statement cancel, explain plans |
 
 ## Progress log
 

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use nook_core::{ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
 use nook_model::{
-    Catalog, Column, DbProcess, DbUser, ForeignKey, Index, ResultSet, Schema, ServerInfo, Table,
-    TableKind,
+    Catalog, Column, DbProcess, DbUser, ForeignKey, Index, ResultSet, Routine, Schema, Sequence,
+    ServerInfo, Table, TableKind, Trigger,
 };
 use postgres::types::Type;
 use postgres::{Client, NoTls, SimpleQueryMessage};
@@ -387,6 +387,7 @@ impl Driver for Postgres {
                 .map(|name| Schema {
                     name: name.clone(),
                     tables: vec![],
+                    ..Default::default()
                 })
                 .collect(),
             fetched_ms: 0,
@@ -514,6 +515,85 @@ impl Driver for Postgres {
             }
         }
 
+        let trigger_rows = self.string_rows(&format!(
+            "SELECT n.nspname, t.tgname, c.relname, pg_get_triggerdef(t.oid) \
+             FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE NOT t.tgisinternal AND n.nspname NOT IN ({EXCLUDE_SCHEMAS}) \
+             AND n.nspname NOT LIKE 'pg_temp%' ORDER BY n.nspname, t.tgname"
+        ))?;
+
+        let routine_rows = self.string_rows(&format!(
+            "SELECT n.nspname, p.proname, p.prokind::text, \
+             COALESCE(pg_get_function_result(p.oid), ''), \
+             COALESCE(obj_description(p.oid, 'pg_proc'), ''), \
+             COALESCE(pg_get_functiondef(p.oid), '') \
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE p.prokind IN ('f', 'p') AND n.nspname NOT IN ({EXCLUDE_SCHEMAS}) \
+             AND n.nspname NOT LIKE 'pg_temp%' ORDER BY n.nspname, p.proname"
+        ))?;
+
+        let sequence_rows = self.string_rows(&format!(
+            "SELECT schemaname, sequencename, start_value::text, increment_by::text, \
+             min_value::text, max_value::text, cycle::text, last_value::text \
+             FROM pg_sequences WHERE schemaname NOT IN ({EXCLUDE_SCHEMAS}) \
+             AND schemaname NOT LIKE 'pg_temp%' ORDER BY schemaname, sequencename"
+        ))?;
+
+        for row in &trigger_rows {
+            if row.len() < 4 {
+                continue;
+            }
+            if let Some(schema) = out.schemas.iter_mut().find(|s| s.name == row[0]) {
+                schema.triggers.push(Trigger {
+                    schema: Some(row[0].clone()),
+                    name: row[1].clone(),
+                    table: row[2].clone(),
+                    // The full definition stays in `ddl`; timing/events stay empty
+                    // rather than hand-parsing the server's own text.
+                    ddl: row[3].clone(),
+                    ..Default::default()
+                });
+            }
+        }
+
+        for row in &routine_rows {
+            if row.len() < 6 {
+                continue;
+            }
+            let kind = match row[2].as_str() {
+                "p" => "procedure",
+                _ => "function",
+            };
+            if let Some(schema) = out.schemas.iter_mut().find(|s| s.name == row[0]) {
+                schema.routines.push(Routine {
+                    schema: Some(row[0].clone()),
+                    name: row[1].clone(),
+                    kind: kind.into(),
+                    returns: row[3].clone(),
+                    comment: row[4].clone(),
+                    ddl: row[5].clone(),
+                });
+            }
+        }
+
+        for row in &sequence_rows {
+            if row.len() < 8 {
+                continue;
+            }
+            if let Some(schema) = out.schemas.iter_mut().find(|s| s.name == row[0]) {
+                schema.sequences.push(Sequence {
+                    schema: Some(row[0].clone()),
+                    name: row[1].clone(),
+                    start: row[2].parse().unwrap_or(1),
+                    increment: row[3].parse().unwrap_or(1),
+                    min: row[4].parse().ok(),
+                    max: row[5].parse().ok(),
+                    cycle: row[6].eq_ignore_ascii_case("true") || row[6] == "t",
+                    last_value: row[7].parse().ok(),
+                });
+            }
+        }
         out.fetched_ms = started.elapsed().as_millis() as u64;
         Ok(out)
     }

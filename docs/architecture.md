@@ -17,7 +17,7 @@ crates below it, and nothing below L5 depends on egui.
 | L1 | `nook-model` | 1.8k | `Catalog`, `Schema`, `Table`, `Column`, `Index`, `ForeignKey`, `DbProcess`, `DbUser`, `ServerInfo`, `ResultSet`; grid edit plans; DDL for all three dialects; structure diff; ER layout |
 | L2 | `nook-ai` | 1.3k | chat client for the 7 providers over two wire formats, endpoint normalisation, API keys, and the `@table` prompt context |
 | L2 | `nook-drivers` | 3.8k | `Driver` trait + `sqlite`, `pg`, `mysql`; statement splitter; data transfer; row-level sync; `.sql` dump; `.xlsx` read (calamine) and write; backup and restore through the vendor tools |
-| L3 | `nook-engine` | 13.2k | `Session` (connections, tabs, grid buffer, history, messages), 151 commands in `cmd/*.rs`, the Navicat feature catalog, parity measurement, jobs and the scheduler, data generation, reports, profiles, the keychain, the app's own SQLite store, the SSH tunnel |
+| L3 | `nook-engine` | 13.2k | `Session` (connections, tabs, grid buffer, history, messages), 154 commands in `cmd/*.rs`, the Navicat feature catalog, parity measurement, jobs and the scheduler, data generation, reports, profiles, the keychain, the app's own SQLite store, the SSH tunnel |
 | L4 | `nook-mcp` | 0.3k | MCP server over stdio: every command is a tool, connections open on demand |
 | L5 | `nook-ui` | 21.3k | egui front end: design tokens, table widget, app shell, sidebar, grid, editor, designer, diagram, charts, monitor, jobs, dialogs, control channel, `--shot` |
 | apps | `nook`, `nook-cli` | 1.6k | desktop binary and the command line |
