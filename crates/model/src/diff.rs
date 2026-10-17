@@ -72,15 +72,13 @@ pub fn diff(source: &Catalog, target: &Catalog, dialect: Dialect) -> Vec<Change>
     let mut out = Vec::new();
     for sc in &source.schemas {
         for table in &sc.tables {
-            let found = target
-                .find_table(Some(&sc.name), &table.name)
-                .or_else(|| {
-                    if loose(target) {
-                        target.find_table(None, &table.name)
-                    } else {
-                        None
-                    }
-                });
+            let found = target.find_table(Some(&sc.name), &table.name).or_else(|| {
+                if loose(target) {
+                    target.find_table(None, &table.name)
+                } else {
+                    None
+                }
+            });
             match found {
                 None if table.kind != crate::TableKind::Table => out.push(Change {
                     kind: ChangeKind::AddTable,

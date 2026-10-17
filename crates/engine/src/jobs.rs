@@ -344,6 +344,11 @@ impl JobStore {
         self.jobs.iter_mut().find(|j| j.id == id || j.name == id)
     }
 
+    /// Ids as owned strings, for callers that need to look at every other job.
+    pub fn ids(&self) -> Vec<String> {
+        self.jobs.iter().map(|j| j.id.clone()).collect()
+    }
+
     pub fn add(&mut self, job: Job) -> Result<()> {
         if job.id.trim().is_empty() || job.name.trim().is_empty() {
             return Err(Error::config("a job needs an id and a name"));

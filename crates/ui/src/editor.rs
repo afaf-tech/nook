@@ -2280,7 +2280,9 @@ mod tests {
             for (rect, text) in &f.texts {
                 if text.len() > 1 {
                     let over = rect.right() - pane.right();
-                    if over > worst.0 { worst = (over, text.clone()); }
+                    if over > worst.0 {
+                        worst = (over, text.clone());
+                    }
                 }
             }
             eprintln!("pane {width}: worst {:.1} on {:?}", worst.0, worst.1);
@@ -2303,7 +2305,10 @@ mod tests {
         );
 
         // Click into the prompt (the painted sample text marks its rect), then type the token.
-        let prompt = f.texts.iter().find(|(_, text)| text.contains("@users"))
+        let prompt = f
+            .texts
+            .iter()
+            .find(|(_, text)| text.contains("@users"))
             .map(|(rect, _)| *rect)
             .expect("the prompt is painted");
         let _ = frame(&ctx, &mut world, click(prompt.center()), 1.35);

@@ -158,7 +158,10 @@ fn an_unknown_mapping_key_is_an_error_and_inserts_nothing() {
             "conn": f.conn,
         }),
     );
-    assert!(result.is_err(), "unknown target must be rejected: {result:?}");
+    assert!(
+        result.is_err(),
+        "unknown target must be rejected: {result:?}"
+    );
     let rows = f.rows("SELECT COUNT(*) FROM people");
     assert_eq!(rows[0][0], json!(0), "{rows:?}");
 }
@@ -190,7 +193,9 @@ fn a_mapped_transfer_copies_across_differently_ordered_columns() {
     // Register a second, independent sqlite database in the same session: `transfer.data`
     // requires two distinct connections, and the destination table carries the same name with a
     // different column layout, so only the mapping can place the values correctly.
-    let dst_path = f.dir.join(format!("mapping-transfer-dst-{}.db", std::process::id()));
+    let dst_path = f
+        .dir
+        .join(format!("mapping-transfer-dst-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&dst_path);
     let dst_cfg = nook_core::ConnectionConfig::parse(&format!("sqlite:{}", dst_path.display()))
         .expect("a sqlite URI parses");

@@ -49,6 +49,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("job.notifications", "Webhook on failure", "Automation", job_notifications)
             .params(r#"{"id":"nightly","webhook":"https://hooks.example.com/nook"}"#)
             .help("List, set or clear a job's failure webhook. An empty webhook clears it. Email is a webhook to a mail relay."),
+        CommandSpec::new("job.chain", "List or set a job's chain", "Automation", job_chain)
+            .params(r#"{"id":"nightly","then":["followup"]}"#)
+            .help("List a job's `then` chain, or set it (an empty array clears). Targets must exist and the chain must stay acyclic; `job.create` accepts the same field."),
     ]
 }
 
@@ -481,15 +484,42 @@ fn job_create(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     job.schedule = Schedule::parse(&p.str_opt("schedule").unwrap_or_else(|| "manual".into()))?;
     job.enabled = p.bool_opt("enabled", true);
     job.webhook = p.str_opt("webhook").unwrap_or_default();
-    job.then = p.list("then");
-    session.jobs.add(job)?;
-    validate_chain(&session.jobs, &id)?;
+    let then = p.list("then");
+    let candidate = crate::jobs::Job { then, ..job };
+    // Validate before `add`: `add` persists, so a rejected chain must not leave the job on disk.
+    // The candidate shadows any same-id job in the view the validator walks.
+    let others: Vec<crate::jobs::Job> = session
+        .jobs
+        .ids()
+        .into_iter()
+        .filter(|other| other != &id)
+        .filter_map(|other| session.jobs.get(&other).cloned())
+        .collect();
+    validate_chain(std::iter::once(&candidate).chain(others.iter()))?;
+    session.jobs.add(candidate)?;
     session.log(Level::Success, format!("job '{id}' created"));
     job_list(session, p)
 }
 
 fn job_delete(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let id = p.str_arg("id")?;
+    // A dangling `then` edge would only explode at run time, so refuse while referenced.
+    if let Some(holder) = session
+        .jobs
+        .ids()
+        .into_iter()
+        .filter(|other| other != &id)
+        .find(|other| {
+            session
+                .jobs
+                .get(other)
+                .is_some_and(|j| j.then.iter().any(|t| t == &id))
+        })
+    {
+        return Err(Error::config(format!(
+            "job '{id}' is chained by '{holder}'; clear that chain first (job.chain)"
+        )));
+    }
     let job = session.jobs.remove(&id)?;
     Ok(json!({ "removed": job.name }))
 }
@@ -506,34 +536,83 @@ fn job_set_enabled(session: &mut Session, p: &Params) -> Result<serde_json::Valu
     Ok(json!({ "id": id, "enabled": enabled }))
 }
 
-/// Every `then` target must exist, and the chain graph must be acyclic — checked from the job
-/// that just gained an edge, so a bad edge is rejected at create time, before it can run.
-fn validate_chain(store: &crate::jobs::JobStore, start: &str) -> Result<()> {
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = vec![start.to_string()];
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id.clone()) {
-            return Err(Error::config(format!(
-                "job '{start}' would chain into itself"
-            )));
+/// Every `then` target must exist, and the chain graph must be acyclic — checked before the job
+/// is stored. `jobs` is the post-save view: the candidate first, then every other job. A revisit
+/// on the current DFS path is a cycle; a node finished via an earlier branch is fine, so legal
+/// diamonds (A→B, A→C, B→D, C→D) pass.
+fn validate_chain<'a>(jobs: impl IntoIterator<Item = &'a crate::jobs::Job>) -> Result<()> {
+    let jobs: Vec<crate::jobs::Job> = jobs.into_iter().cloned().collect();
+    fn walk(
+        id: &str,
+        jobs: &[crate::jobs::Job],
+        path: &mut Vec<String>,
+        done: &mut std::collections::HashSet<String>,
+    ) -> Result<()> {
+        if done.contains(id) {
+            return Ok(());
         }
-        let job = store
-            .get(&id)
+        let job = jobs
+            .iter()
+            .find(|j| j.id == id)
             .ok_or_else(|| Error::not_found(format!("no job named '{id}'")))?;
-        for next in &job.then {
-            stack.push(next.clone());
+        if path.iter().any(|seen| seen == id) {
+            return Err(Error::config(format!("job '{id}' would chain into itself")));
         }
+        path.push(id.to_string());
+        for next in &job.then {
+            walk(next, jobs, path, done)?;
+        }
+        path.pop();
+        done.insert(id.to_string());
+        Ok(())
+    }
+    let mut path = Vec::new();
+    let mut done = std::collections::HashSet::new();
+    for job in &jobs {
+        walk(&job.id, &jobs, &mut path, &mut done)?;
     }
     Ok(())
 }
 
 /// Run one job by dispatching its command with the job's parameters.
 pub fn run_job(session: &mut Session, id: &str) -> Result<String> {
+    run_job_tick(session, id, &mut Vec::new(), &mut None)
+}
+
+fn run_job_on_path(
+    session: &mut Session,
+    id: &str,
+    path: &mut Vec<String>,
+    ran: &mut Option<std::collections::HashSet<String>>,
+) -> Result<String> {
+    // Within one scheduler tick (`job.runDue`), a job runs at most once: the tick passes a
+    // shared set, so a chain cannot re-run a job that already ran, and neither can the due
+    // loop. Manual `job.run` passes None and re-runs freely.
+    if let Some(set) = ran.as_mut() {
+        if !set.insert(id.to_string()) {
+            return Ok("skipped: already ran this tick".into());
+        }
+    }
+    run_job_tick(session, id, path, ran)
+}
+
+fn run_job_tick(
+    session: &mut Session,
+    id: &str,
+    path: &mut Vec<String>,
+    ran: &mut Option<std::collections::HashSet<String>>,
+) -> Result<String> {
     let job = session
         .jobs
         .get(id)
         .cloned()
         .ok_or_else(|| Error::not_found(format!("no job named '{id}'")))?;
+    // Runtime guard: create-time validation is the fast path, but a hand-edited jobs.json can
+    // still hold a cycle — stop here instead of recursing until the stack overflows.
+    if path.iter().any(|seen| seen == id) {
+        return Err(Error::config(format!("job '{id}' would chain into itself")));
+    }
+    path.push(id.to_string());
     let started = std::time::Instant::now();
     let mut map = match job.params.clone() {
         serde_json::Value::Object(m) => m,
@@ -563,10 +642,16 @@ pub fn run_job(session: &mut Session, id: &str) -> Result<String> {
                 });
             session.jobs.record(&job.id, true, message.clone(), ms, at);
             // The chain runs after a success, in order, and a failure stops it. Each chained
-            // run is recorded in its own job's log by the recursive run_job call.
-            for next in &job.then {
-                run_job(session, next)?;
+            // run is recorded in its own job's log by the recursive call. A chained child's
+            // failure propagates as this run's error; the child fires its own webhook.
+            let then = job.then.clone();
+            for next in &then {
+                if let Err(e) = run_job_on_path(session, next, path, ran) {
+                    path.pop();
+                    return Err(e);
+                }
             }
+            path.pop();
             Ok(message)
         }
         Err(e) => {
@@ -574,6 +659,7 @@ pub fn run_job(session: &mut Session, id: &str) -> Result<String> {
             if !job.webhook.is_empty() {
                 notify_webhook(&job, &e, ms, at, session);
             }
+            path.pop();
             Err(e)
         }
     }
@@ -664,6 +750,44 @@ fn job_notifications(session: &mut Session, p: &Params) -> Result<serde_json::Va
     }
 }
 
+fn job_chain(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let id = p.str_arg("id")?;
+    let then = match p.get("then") {
+        Some(_) => p.list("then"),
+        None => {
+            let job = session
+                .jobs
+                .get(&id)
+                .ok_or_else(|| Error::not_found(format!("no job named '{id}'")))?;
+            return Ok(json!({ "id": id, "then": job.then }));
+        }
+    };
+    let candidate = crate::jobs::Job {
+        then,
+        ..session
+            .jobs
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Error::not_found(format!("no job named '{id}'")))?
+    };
+    let others: Vec<crate::jobs::Job> = session
+        .jobs
+        .ids()
+        .into_iter()
+        .filter(|other| other != &id)
+        .filter_map(|other| session.jobs.get(&other).cloned())
+        .collect();
+    validate_chain(std::iter::once(&candidate).chain(others.iter()))?;
+    session
+        .jobs
+        .get_mut(&id)
+        .ok_or_else(|| Error::internal("the job vanished mid-command"))?
+        .then = candidate.then.clone();
+    session.jobs.save()?;
+    session.log(Level::Success, format!("chain for '{id}' updated"));
+    Ok(json!({ "id": id, "then": candidate.then }))
+}
+
 fn job_run(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let id = p.str_arg("id")?;
     let started = std::time::Instant::now();
@@ -680,8 +804,9 @@ fn job_run_due(session: &mut Session, _p: &Params) -> Result<serde_json::Value> 
     let now = crate::jobs::now();
     let due = session.jobs.ids_due(now);
     let mut results = Vec::new();
+    let mut ran: Option<std::collections::HashSet<String>> = Some(Default::default());
     for id in &due {
-        let outcome = run_job(session, id);
+        let outcome = run_job_on_path(session, id, &mut Vec::new(), &mut ran);
         results.push(match outcome {
             Ok(message) => json!({ "job": id, "ok": true, "summary": message }),
             Err(e) => json!({ "job": id, "ok": false, "error": e.to_string() }),
@@ -802,41 +927,140 @@ mod tests {
         assert!(calls.contains("\"ok\":false"), "{calls}");
     }
 
-    #[test]
-    fn a_successful_job_runs_its_chain_and_a_failure_stops_it() {
-        let _guard = crate::test_support::scratch_config();
+    fn live_session() -> (std::sync::MutexGuard<'static, ()>, Session) {
+        let guard = crate::test_support::scratch_config();
         let mut session = Session::new();
-        for (id, sql) in [("first", "select 1"), ("second", "select 2"), ("third", "select 3")] {
+        session
+            .run(
+                "conn.new",
+                json!({"name": "local", "kind": "sqlite", "file": ":memory:"}),
+            )
+            .expect("new connection");
+        session
+            .run("conn.open", json!({"conn": "local"}))
+            .expect("open connection");
+        (guard, session)
+    }
+
+    #[test]
+    fn a_successful_job_runs_its_chain_in_order_and_a_midchain_failure_stops_it() {
+        let (_guard, mut session) = live_session();
+        let mk = |session: &mut Session, id: &str, sql: &str, then: &[&str]| {
             let p = Params::from_json(json!({
                 "id": id, "name": id, "kind": "query",
-                "params": {"sql": sql}
+                "params": {"sql": sql}, "then": then
             }))
             .expect("params");
-            job_create(&mut session, &p).expect("create");
+            job_create(session, &p).expect("create");
+        };
+        mk(&mut session, "third", "select 3", &[]);
+        mk(&mut session, "second", "select 2", &["third"]);
+        mk(&mut session, "first", "select 1", &["second"]);
+        // Success path: first -> second -> third all run, in order, each recorded once.
+        run_job(&mut session, "first").expect("chain runs");
+        for id in ["first", "second", "third"] {
+            assert_eq!(session.jobs.get(id).expect("job").runs, 1, "{id} ran");
+            assert_eq!(
+                session.jobs.get(id).expect("job").last_status,
+                Some("ok".to_string()),
+                "{id} succeeded"
+            );
         }
-        // first -> second: `then` is part of job.create, so delete and recreate first with it.
-        let p = Params::from_json(json!({"id": "first"})).expect("params");
-        job_delete(&mut session, &p).expect("remove first");
-        let p = Params::from_json(json!({
-            "id": "first", "name": "first", "kind": "query",
-            "params": {"sql": "select 1"}, "then": ["second"]
-        }))
-        .expect("params");
-        job_create(&mut session, &p).expect("recreate with chain");
-        // All three jobs have no connection, so every run fails: first's failure must stop the
-        // chain before second ever runs.
-        assert!(run_job(&mut session, "first").is_err());
-        assert_eq!(session.jobs.get("first").expect("job").runs, 1);
-        assert_eq!(session.jobs.get("second").expect("job").runs, 0);
-        assert_eq!(session.jobs.get("third").expect("job").runs, 0);
 
-        // A chain target that does not exist is rejected at create time.
+        // Mid-chain failure: broken -> mid fails, and mid's own chain (tail) must never run.
+        // A job whose SQL fails does not run its chain at all, so the failure has to sit in
+        // the middle: broken succeeds, mid's SQL fails, tail stays at zero runs.
+        mk(&mut session, "tail", "select 1", &[]);
+        mk(&mut session, "mid", "select no_such_column", &["tail"]);
+        mk(&mut session, "broken", "select 1", &["mid"]);
+        assert!(run_job(&mut session, "broken").is_err());
+        assert_eq!(session.jobs.get("broken").expect("job").runs, 1);
+        assert_eq!(session.jobs.get("mid").expect("job").runs, 1);
+        assert_eq!(
+            session.jobs.get("tail").expect("job").runs,
+            0,
+            "tail must not run"
+        );
+
+        // A chain target that does not exist is rejected at create time — and, crucially,
+        // the rejected job is not left in the store.
         let p = Params::from_json(json!({
-            "id": "bad", "name": "bad", "kind": "query",
+            "id": "dangling", "name": "dangling", "kind": "query",
             "params": {"sql": "select 1"}, "then": ["no-such-job"]
         }))
         .expect("params");
         assert!(job_create(&mut session, &p).is_err());
+        assert!(session.jobs.get("dangling").is_none());
+    }
+
+    #[test]
+    fn a_chain_diamond_is_legal_but_cycles_and_referenced_deletes_are_not() {
+        let _guard = crate::test_support::scratch_config();
+        let mut session = Session::new();
+        let mk = |session: &mut Session, id: &str, then: &[&str]| {
+            let p = Params::from_json(json!({
+                "id": id, "name": id, "kind": "query",
+                "params": {"sql": "select 1"}, "then": then
+            }))
+            .expect("params");
+            job_create(session, &p).expect("create");
+        };
+        mk(&mut session, "d", &[]);
+        mk(&mut session, "b", &["d"]);
+        mk(&mut session, "c", &["d"]);
+        mk(&mut session, "a", &["b", "c"]); // diamond: d reached twice, still acyclic
+        mk(&mut session, "a2", &["b"]);
+
+        // A referenced job cannot be deleted while someone chains into it.
+        let p = Params::from_json(json!({"id": "d"})).expect("params");
+        assert!(job_delete(&mut session, &p).is_err());
+        // Clearing the chain via job.chain frees it.
+        let p = Params::from_json(json!({"id": "b", "then": []})).expect("params");
+        let out = job_chain(&mut session, &p).expect("clear chain");
+        assert_eq!(out["then"].as_array().map(Vec::len), Some(0));
+        let p = Params::from_json(json!({"id": "c", "then": []})).expect("params");
+        job_chain(&mut session, &p).expect("clear c too — it also chains into d");
+        let p = Params::from_json(json!({"id": "d"})).expect("params");
+        assert!(job_delete(&mut session, &p).is_ok());
+
+        // job.chain lists, sets a valid chain, and rejects a cycle.
+        let p = Params::from_json(json!({"id": "a2"})).expect("params");
+        let out = job_chain(&mut session, &p).expect("list chain");
+        assert_eq!(out["then"], json!(["b"]));
+        let p = Params::from_json(json!({"id": "a2", "then": ["c"]})).expect("params");
+        job_chain(&mut session, &p).expect("set chain");
+        // c -> a2 while a2 -> c is a real two-node cycle, unlike a -> a2 which is just an edge.
+        let p = Params::from_json(json!({"id": "c", "then": ["a2"]})).expect("params");
+        assert!(job_chain(&mut session, &p).is_err());
+    }
+
+    #[test]
+    fn a_due_chained_child_is_not_run_twice_in_one_tick() {
+        let (_guard, mut session) = live_session();
+        let mk = |session: &mut Session, id: &str, then: &[&str]| {
+            let p = Params::from_json(json!({
+                "id": id, "name": id, "kind": "query",
+                "params": {"sql": "select 1"}, "then": then, "schedule": "every 1m"
+            }))
+            .expect("params");
+            job_create(session, &p).expect("create");
+        };
+        mk(&mut session, "child", &[]);
+        mk(&mut session, "parent", &["child"]);
+        // Both are due; running parent runs child via the chain, so the tick must not run
+        // child a second time as its own due entry.
+        let out = job_run_due(&mut session, &Params::none()).expect("run due");
+        assert_eq!(
+            out["results"].as_array().map(Vec::len),
+            Some(2),
+            "both jobs stay in the report: {out}"
+        );
+        assert_eq!(
+            session.jobs.get("child").expect("job").runs,
+            1,
+            "no double run"
+        );
+        assert_eq!(session.jobs.get("parent").expect("job").runs, 1);
     }
 
     #[test]

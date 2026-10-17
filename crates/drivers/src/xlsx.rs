@@ -14,8 +14,8 @@ use std::io::Write;
 pub fn read_rows<P: AsRef<std::path::Path>>(path: P) -> Result<Vec<Vec<String>>> {
     let file = std::fs::File::open(path.as_ref())
         .map_err(|e| Error::io(format!("open {}: {e}", path.as_ref().display())))?;
-    let mut book: Xlsx<std::fs::File> = Xlsx::new(file)
-        .map_err(|e| Error::io(format!("open xlsx: {e}")))?;
+    let mut book: Xlsx<std::fs::File> =
+        Xlsx::new(file).map_err(|e| Error::io(format!("open xlsx: {e}")))?;
     let range = book
         .worksheet_range_at(0)
         .ok_or_else(|| Error::io("the workbook has no first sheet"))?
@@ -158,8 +158,8 @@ pub fn write_rows<P: AsRef<std::path::Path>>(path: P, rows: &[Vec<String>]) -> R
     let file = std::fs::File::create(path.as_ref())
         .map_err(|e| Error::io(format!("create {}: {e}", path.as_ref().display())))?;
     let mut zip = zip::ZipWriter::new(file);
-    let opts: zip::write::SimpleFileOptions = zip::write::FileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let opts: zip::write::SimpleFileOptions =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for (name, bytes) in [
         ("[Content_Types].xml", content_types.as_bytes()),
         ("_rels/.rels", root_rels.as_bytes()),
@@ -191,7 +191,7 @@ mod tests {
                 vec!["1".into(), "Ann & <Bob>".into()],
             ],
         )
-            .expect("write");
+        .expect("write");
         let rows = read_rows(&path).expect("read");
         assert_eq!(rows, vec![vec!["id", "name"], vec!["1", "Ann & <Bob>"]]);
         let _ = std::fs::remove_file(&path);

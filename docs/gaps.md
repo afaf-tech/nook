@@ -40,9 +40,11 @@ they appear in DDL but cannot be created or edited. (`schema.triggerEditor`, `sc
 ## 5. ~~Job notifications and chaining~~ — done
 
 Shipped: `job.notifications` lists, sets and clears a failure webhook (the job's JSON status
-POSTed via the system curl — email is a webhook to a relay), and `job.create` takes `then: [ids]`
-to run jobs in order after a success; a chained failure stops the chain and cycles are rejected
-at create time. Still open: `job.agent`, deploying jobs to another machine.
+POSTed via the system curl — email is a webhook to a mail relay), and chains are editable after
+creation via `job.chain` (list or set `then`, validated acyclic, empty array clears; `job.create`
+accepts the same field). A chained failure stops the chain, a due chained child never runs twice
+in one tick, a referenced job cannot be deleted, and a hand-edited cycle is stopped at run time.
+Still open: `job.agent`, deploying jobs to another machine.
 
 ## 6. ~~Excel import and export~~ — done
 

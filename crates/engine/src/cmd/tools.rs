@@ -442,9 +442,8 @@ fn export_excel(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
         rows.push(row.iter().map(|v| v.as_text()).collect());
     }
     let path = crate::cmd::grid::expand(
-        &p.str_opt("path").unwrap_or_else(|| {
-            format!("exports/query-{}.xlsx", crate::jobs::now())
-        }),
+        &p.str_opt("path")
+            .unwrap_or_else(|| format!("exports/query-{}.xlsx", crate::jobs::now())),
         &session.home,
     );
     if let Some(parent) = path.parent() {

@@ -642,7 +642,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Automation",
         "job.chain",
         "Chained jobs",
-        "\"then\" runs jobs in order after a success; cycles rejected at create time",
+        "`job.chain` lists and sets a job's `then`; a chained failure stops the chain",
     ),
     (
         "Automation",
