@@ -103,9 +103,10 @@ fn export_excel_writes_a_file_that_reads_back() {
     f.session
         .run(
             "sql.run",
-            json!({"sql": "insert into t values (1,'Ann'),(2,'Bob & <Co>')" , "conn": f.conn}),
+            json!({"sql": "insert into t values (1,'Ann'),(2,'Bob & <Co>'),(3,NULL)" , "conn": f.conn}),
         )
         .expect("seed");
+    // NULL must export as an empty cell, not the grid's "NULL" placeholder.
 
     let target = f.dir.join("exported.xlsx");
     let out = f
@@ -115,7 +116,7 @@ fn export_excel_writes_a_file_that_reads_back() {
             json!({"sql": "select id, name from t order by id", "path": target.display().to_string(), "conn": f.conn}),
         )
         .expect("export");
-    assert_eq!(out["rows"], 2);
+    assert_eq!(out["rows"], 3);
     assert_eq!(out["format"], "xlsx");
 
     let read_back = nook_drivers::xlsx::read_rows(&target).expect("the export reads back");
@@ -125,6 +126,7 @@ fn export_excel_writes_a_file_that_reads_back() {
             vec!["id".to_string(), "name".to_string()],
             vec!["1".to_string(), "Ann".to_string()],
             vec!["2".to_string(), "Bob & <Co>".to_string()],
+            vec!["3".to_string(), String::new()],
         ]
     );
 }

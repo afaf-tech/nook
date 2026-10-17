@@ -1,10 +1,10 @@
 //! Minimal `.xlsx` read and write for the Excel import/export tools.
 //!
-//! Reading uses calamine, which handles the format's quirks so callers get plain strings.
-//! Writing is the small half of the spec done by hand: one sheet, inline strings, no shared
-//! string table, no styles - a ZIP of six XML parts. That is enough for a data export and
-//! keeps the binary free of a full spreadsheet engine. `zip` is already in the tree through
-//! calamine, so no new dependency.
+//! Reading uses calamine; dates come out as `YYYY-MM-DD HH:MM:SS` instead of Excel serial
+//! numbers. Writing is the small half of the spec done by hand: one sheet, inline strings,
+//! no shared string table, no styles, every cell text - a ZIP of five XML parts. That is
+//! enough for a data export and keeps the binary free of a full spreadsheet engine; numeric
+//! cells (`t="n"`) and styles are the ceiling, rust_xlsxwriter is the upgrade path.
 
 use calamine::{Data, Reader, Xlsx};
 use nook_core::{Error, Result};
@@ -30,7 +30,11 @@ pub fn read_rows<P: AsRef<std::path::Path>>(path: P) -> Result<Vec<Vec<String>>>
                     Data::Float(f) => format_float(*f),
                     Data::Int(i) => i.to_string(),
                     Data::Bool(b) => b.to_string(),
-                    Data::DateTime(d) => d.to_string(),
+                    Data::DateTime(d) => {
+                        // Display is the raw serial float; dates must arrive as dates.
+                        let (y, mo, dy, h, mi, s, _) = d.to_ymd_hms_milli();
+                        format!("{y:04}-{mo:02}-{dy:02} {h:02}:{mi:02}:{s:02}")
+                    }
                     other => other.to_string(),
                 })
                 .collect(),
@@ -79,6 +83,21 @@ fn column_letter(mut i: usize) -> String {
     }
     out.reverse();
     String::from_utf8(out).unwrap_or_else(|_| "A".to_string())
+}
+
+#[cfg(test)]
+mod column_tests {
+    #[test]
+    fn column_letters_follow_spreadsheet_ordering() {
+        use super::column_letter;
+        assert_eq!(column_letter(0), "A");
+        assert_eq!(column_letter(25), "Z");
+        assert_eq!(column_letter(26), "AA");
+        assert_eq!(column_letter(51), "AZ");
+        assert_eq!(column_letter(52), "BA");
+        assert_eq!(column_letter(701), "ZZ");
+        assert_eq!(column_letter(702), "AAA");
+    }
 }
 
 /// Write `rows` (header row included) as a plain one-sheet `.xlsx`.

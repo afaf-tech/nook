@@ -484,13 +484,13 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Import/Export",
         "tools.exportExcel",
         "Export to Excel",
-        "not implemented; CSV opens in any spreadsheet",
+        "query result as a plain one-sheet workbook",
     ),
     (
         "Import/Export",
         "tools.importExcel",
         "Import from Excel",
-        "not implemented; export to CSV first",
+        "first sheet of an .xlsx, every cell as text, like the CSV import",
     ),
     (
         "Import/Export",

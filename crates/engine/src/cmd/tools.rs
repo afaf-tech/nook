@@ -438,7 +438,8 @@ fn export_excel(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
     let result = run_sql(session, index, &sql, None)?;
     let mut rows: Vec<Vec<String>> = vec![result.columns.clone()];
     for row in &result.rows {
-        rows.push(row.iter().map(|v| v.display()).collect());
+        // as_text is the round-trip method: NULL must export as an empty cell, not "NULL".
+        rows.push(row.iter().map(|v| v.as_text()).collect());
     }
     let path = crate::cmd::grid::expand(
         &p.str_opt("path").unwrap_or_else(|| {

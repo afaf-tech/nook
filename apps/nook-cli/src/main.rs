@@ -48,8 +48,8 @@ fn usage() -> String {
   sync-data --from A --to B [--tables a,b] [--apply] [--batch N]
   diff-structure --from A --to B [--apply] [--allow-destructive]
   datagen <conn> <table> [--rows N] [--seed N] [--override col=spec ...] [--apply] [--out f.sql]
-  import <conn> --file x.csv --table t [--no-create] [--delimiter C]
-  export <conn> "<SQL>" --out f.csv [--format F]
+  import <conn> --file x.csv|x.json|x.xlsx --table t [--no-create] [--delimiter C]
+  export <conn> "<SQL>" --out f.csv|f.json|f.md|f.sql|f.xlsx [--format F]
   monitor <conn> [--processes] [--status] [--variables] [--filter S]
   users <conn> [--grants USER]
   diagram <conn> --out schema.svg [--schema S]
@@ -906,6 +906,8 @@ fn import(args: &[String]) -> CliResult {
     }
     let command = if file.to_ascii_lowercase().ends_with(".json") {
         "tools.importJson"
+    } else if file.to_ascii_lowercase().ends_with(".xlsx") {
+        "tools.importExcel"
     } else {
         "tools.importCsv"
     };
@@ -946,7 +948,21 @@ fn export(args: &[String]) -> CliResult {
     let mut params = serde_json::Map::new();
     params.insert("conn".into(), json!(session.conns[index].cfg.id));
     params.insert("sql".into(), json!(statement));
-    params.insert("path".into(), json!(out_path));
+    params.insert("path".into(), json!(out_path.clone()));
+    if out_path.ends_with(".xlsx") {
+        let out = run_command(
+            &mut session,
+            "tools.exportExcel",
+            serde_json::Value::Object(params),
+        )
+        .map_err(|e| e.to_string())?;
+        println!(
+            "wrote {} ({} rows)",
+            out["path"].as_str().unwrap_or(""),
+            out["rows"].as_u64().unwrap_or(0)
+        );
+        return Ok(());
+    }
     params.insert("format".into(), json!(format));
     if let Some(table) = opt(args, "--table") {
         params.insert("table".into(), json!(table));
