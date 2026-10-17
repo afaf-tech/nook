@@ -43,10 +43,12 @@ A failing nightly backup currently only shows in the log. A webhook or email hoo
 after that one" is what makes the scheduler useful unattended. (`job.notifications`, `job.chain`,
 `job.agent`)
 
-## 6. Excel import and export
+## 6. ~~Excel import and export~~ — done
 
-CSV covers the technical case; spreadsheets are what people actually have. (`tools.exportExcel`,
-`tools.importExcel`)
+Shipped: `tools.importExcel` reads the first sheet of an `.xlsx` (calamine) through the same
+`load_rows` path as CSV — `columnMapping`, `create_table` and `max_rows` behave identically — and
+`tools.exportExcel` writes a query result as a plain one-sheet workbook. Still open: styles,
+multi-sheet output and `.xls` (legacy binary) input.
 
 ## 7. Cancelling a running statement
 

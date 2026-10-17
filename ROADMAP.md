@@ -12,7 +12,7 @@
 | Commands | 146 registered ids | measured (`nook-cli mcp` → `tools/list`) |
 | Engines with a live driver | **3** (SQLite, PostgreSQL, MySQL/MariaDB) | measured: catalogs, queries, edits, transfer, sync and backup run against each |
 | Engines catalogued but not implemented | 4 (SQL Server, Oracle, MongoDB, Redis) | named in the catalog, no driver |
-| Tests | 415 | measured (`cargo test --workspace`) |
+| Tests | 419 | measured (`cargo test --workspace`) |
 | Code | ~44,400 lines of Rust in 7 crates, 2 apps and xtask | measured (`wc -l` over every `.rs`) |
 | Surfaces over the same registry | 5 (ribbon/menus, command palette, CLI, control channel, MCP) | measured |
 
@@ -37,7 +37,7 @@ against a live server on this machine (see the gaps).
 | Monitoring | 56% | process list, status, variables, dashboard; no locks, replication or alerts |
 | Privileges | 78% | users, grants, create/drop, password, grant/revoke; no audit report |
 | Reports and modeler | 50% | aggregates, charts, pivot, ER diagram and SVG export; no report designer, no BI dashboard |
-| Import and export | 55% | CSV, JSON, `.sql`, data generation; no Excel, XML or DBF |
+| Import and export | 65% | CSV, JSON, `.sql`, Excel (xlsx in/out), data generation; no XML or DBF |
 | Platform | 33% | native app, MCP, CLI and themes; no control-channel parity in the UI checklist, no localisation, no Windows or Linux build made here |
 
 ## Milestones
@@ -46,10 +46,10 @@ against a live server on this machine (see the gaps).
 |---|---|---|
 | M1 Skeleton | done | layered workspace, error type, cell type, dialect quoting, DDL, edit plans, structure diff, ER layout |
 | M2 Drivers | done | SQLite, PostgreSQL and MySQL: catalog introspection, typed results, server info, monitor, privileges, DDL, table rebuild |
-| M3 Engine | done | `Session`, 146 commands, the Navicat catalog, parity measurement, jobs, data generation, reports, profiles, keychain, SSH tunnel |
+| M3 Engine | done | `Session`, 149 commands, the Navicat catalog, parity measurement, jobs, data generation, reports, profiles, keychain, SSH tunnel |
 | M4 Surfaces | done | desktop app, CLI, MCP server, JSON control channel |
-| M5 Verification | in progress | 415 tests; live runs against SQLite, PostgreSQL and MySQL 8.4 (portable server; the Homebrew binary is ICU-broken and was left alone) |
-| M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): Excel import, trigger editors, notification hooks |
+| M5 Verification | in progress | 419 tests; live runs against SQLite, PostgreSQL and MySQL 8.4 (portable server; the Homebrew binary is ICU-broken and was left alone) |
+| M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): sequence editor, job notifications, statement cancel, explain plans |
 
 ## Progress log
 
