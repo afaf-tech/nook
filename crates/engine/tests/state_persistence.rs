@@ -86,13 +86,19 @@ fn a_tab_whose_connection_vanished_restores_without_a_connection() {
     let _s = Scratch::new();
     let mut a = Session::new();
     a.run("state.persist", json!({"tabs":[
-        {"kind":"Query","title":"Orphan","conn":9999,"sql":"select 1"}
+        {"kind":"Query","title":"Orphan","conn":"ghost","sql":"select 1"}
     ],"active":0})).expect("persist");
     let mut b = Session::new();
     let out = b.run("state.restore", json!({})).expect("restore must not fail");
     let tabs = out["tabs"].as_array().expect("tabs");
     let orphan = tabs.iter().find(|t| t["title"] == "Orphan").expect("kept, not dropped");
     assert_eq!(orphan["conn"], serde_json::Value::Null);
+    // The rule is a named warning, never a silent drop.
+    assert!(
+        b.messages.iter().any(|m| m.text.contains("ghost")),
+        "expected a warning naming the missing connection: {:?}",
+        b.messages
+    );
 }
 
 #[test]

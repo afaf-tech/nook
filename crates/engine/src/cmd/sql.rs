@@ -40,6 +40,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("sql.history", "Query history", "Query", history)
             .params(r#"{"limit":20}"#),
         CommandSpec::new("sql.clearHistory", "Clear history", "Query", clear_history),
+        CommandSpec::new("sql.snippets", "Code snippets", "Query", sql_snippets)
+            .params(r#"{"action":"list"}"#)
+            .help("The catalog-facing snippet id. {\"action\":\"list\"} lists; save and delete go through snippet.save / snippet.delete."),
         CommandSpec::new(
             "sql.transaction",
             "Transaction control",
@@ -471,6 +474,21 @@ fn clear_history(session: &mut Session, _p: &Params) -> Result<serde_json::Value
         session.log(Level::Warn, format!("history clear: {}", e.message()));
     }
     Ok(json!({ "cleared": n }))
+}
+
+/// The catalog-facing id for the snippet area: one id, one action. Saving and deleting stay on
+/// `snippet.save` / `snippet.delete`, which the CLI, MCP and editor reference.
+fn sql_snippets(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    match p.str_arg("action")?.as_str() {
+        "list" => Ok(json!({
+            "snippets": session.snippets.iter().map(|s| json!({
+                "name": s.name, "sql": s.sql, "tags": s.tags
+            })).collect::<Vec<_>>()
+        })),
+        other => Err(Error::config(format!(
+            "unknown action '{other}'; use \"list\" (or snippet.save / snippet.delete)"
+        ))),
+    }
 }
 
 fn transaction(session: &mut Session, p: &Params) -> Result<serde_json::Value> {

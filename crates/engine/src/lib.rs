@@ -917,8 +917,10 @@ impl Session {
         }
         // The store is the durable twin of this vec. A failed write costs history rows, not data:
         // say so and keep going.
-        if let Err(e) = store::push_history(self.history.last().expect("just pushed")) {
-            self.log(Level::Warn, format!("history write: {}", e.message()));
+        if let Some(entry) = self.history.last() {
+            if let Err(e) = store::push_history(entry) {
+                self.log(Level::Warn, format!("history write: {}", e.message()));
+            }
         }
         if let Err(e) = store::trim_history(self.settings.keep_history.max(10)) {
             self.log(Level::Warn, format!("history trim: {}", e.message()));
@@ -983,17 +985,6 @@ impl Session {
         let Some(entries) = snap["tabs"].as_array() else {
             return;
         };
-        let kind_of = |name: &str| match name {
-            "Data" => TabKind::Data,
-            "Design" => TabKind::Design,
-            "Diagram" => TabKind::Diagram,
-            "Monitor" => TabKind::Monitor,
-            "Transfer" => TabKind::Transfer,
-            "Jobs" => TabKind::Jobs,
-            "Report" => TabKind::Report,
-            "Users" => TabKind::Users,
-            _ => TabKind::Query,
-        };
         let mut restored = 0usize;
         for entry in entries {
             if restored >= 20 {
@@ -1020,7 +1011,26 @@ impl Session {
             });
             let id = self.next_tab_id;
             self.next_tab_id += 1;
-            let mut tab = Tab::new(id, kind_of(entry["kind"].as_str().unwrap_or("Query")), title);
+            let mut unknown_kind: Option<String> = None;
+            let kind = match entry["kind"].as_str().unwrap_or("Query") {
+                "Data" => TabKind::Data,
+                "Design" => TabKind::Design,
+                "Diagram" => TabKind::Diagram,
+                "Monitor" => TabKind::Monitor,
+                "Transfer" => TabKind::Transfer,
+                "Jobs" => TabKind::Jobs,
+                "Report" => TabKind::Report,
+                "Users" => TabKind::Users,
+                "Welcome" => TabKind::Welcome,
+                other => {
+                    unknown_kind = Some(other.to_string());
+                    TabKind::Query
+                }
+            };
+            if let Some(other) = unknown_kind {
+                self.log(Level::Warn, format!("unknown tab kind '{other}'; restoring as Query"));
+            }
+            let mut tab = Tab::new(id, kind, title);
             tab.conn = conn;
             if let Some(sql) = entry["sql"].as_str() {
                 tab.sql.text = sql.to_string();
@@ -1113,9 +1123,7 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Helpers shared by the tests that touch the filesystem.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    use std::sync::MutexGuard;
 
     /// Point the config directory at a scratch path and hold the lock that keeps the job-store tests
     /// from writing over each other. The guard has to stay alive for the whole test.

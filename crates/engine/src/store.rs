@@ -1,17 +1,22 @@
-//! The app's own SQLite database: where the AI configuration lives.
+//! The app's own SQLite database: where app state that is not a profile lives — the AI
+//! configuration, saved snippets, query history, the tab snapshot and the connection pins.
 //!
 //! Deliberately not `profiles.json`. A profile is a connection the user manages in the tree; this is
-//! state the app keeps about itself. The file is `nook.db` beside the profile store, mode `0600`, and
-//! it holds no secret — an API key stays in the login keychain, which is the one place a key can live
-//! that this file cannot be read from.
+//! state the app keeps about itself. The file is `nook.db` beside the profile store, mode `0600`,
+//! and it holds no keychain secret — an API key stays in the login keychain. It does hold SQL text:
+//! the editor content, the history and the snippet bodies, any of which may contain a literal
+//! password the user typed. That is why the mode is `0600` and must stay `0600` — do not "fix" the
+//! file mode.
 //!
 //! SQLite through `rusqlite` directly, rather than the `Driver` trait: `nook_drivers::Driver` speaks
 //! catalogues, result sets and tunnels for a *user's* database, which is the wrong shape for a
 //! one-row table and would drag connection state into app state.
 //!
-//! ponytail: the table has no version column. A schema change here is a change to one row, so the
-//! migration is rewriting it; add a version and a real migration when the app's state outgrows a
-//! single row per concern.
+//! Versioning: `PRAGMA user_version` carries the schema version (`USER_VERSION` below). Every open
+//! applies `SCHEMA`, whose statements are all `CREATE TABLE IF NOT EXISTS`, so a file at a lower
+//! version — or at 0, predating the column — is brought up to date by the same idempotent batch.
+//! A migration that must transform data rather than add tables is the moment this becomes a
+//! versioned `match`.
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -163,10 +168,20 @@ pub fn save_ai(cfg: &AiConfig) -> Result<()> {
     Ok(())
 }
 
+/// True when the store file is on disk. Reads go through this first: `open()` creates the file,
+/// and a start must not add `nook.db` to the user's config directory just because it looked —
+/// the same promise `load_ai` makes.
+fn exists() -> bool {
+    crate::profiles::ai_db_path().exists()
+}
+
 // --- Snippets ---------------------------------------------------------------
 
 /// Every saved snippet, oldest first (rowid order — save order).
 pub fn load_snippets() -> Result<Vec<Snippet>> {
+    if !exists() {
+        return Ok(Vec::new());
+    }
     let conn = open()?;
     let mut stmt = conn
         .prepare("SELECT name, sql, tags FROM snippet ORDER BY rowid")
@@ -248,6 +263,9 @@ pub fn trim_history(keep: usize) -> Result<()> {
 /// Every kept history entry, oldest first (the caller reverses for display, as `sql.history` does
 /// over the in-memory vec).
 pub fn load_history() -> Result<Vec<HistoryEntry>> {
+    if !exists() {
+        return Ok(Vec::new());
+    }
     let conn = open()?;
     let mut stmt = conn
         .prepare("SELECT conn, sql, ok, elapsed_ms, rows, at FROM history ORDER BY id")
@@ -282,6 +300,9 @@ pub fn clear_history() -> Result<()> {
 
 /// Read one `ui_state` value by key.
 pub fn load_ui_state(key: &str) -> Result<Option<String>> {
+    if !exists() {
+        return Ok(None);
+    }
     let conn = open()?;
     let value = conn
         .query_row("SELECT value FROM ui_state WHERE key = ?1", params![key], |r| {
@@ -306,6 +327,9 @@ pub fn save_ui_state(key: &str, value: &str) -> Result<()> {
 
 /// Pinned connection ids, first-painted first.
 pub fn load_pins() -> Result<Vec<String>> {
+    if !exists() {
+        return Ok(Vec::new());
+    }
     let conn = open()?;
     let mut stmt = conn
         .prepare("SELECT conn_id FROM pinned ORDER BY pin_order")

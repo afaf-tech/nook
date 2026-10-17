@@ -726,6 +726,10 @@ pub struct NookApp {
     pub session: Session,
     pub state: UiState,
     last_job_tick: std::time::Instant,
+    /// Next wall-clock moment the tab snapshot may be written (throttled to 2 s).
+    tab_persist_at: Option<std::time::Instant>,
+    /// The snapshot string as of the last write, so an unchanged session writes nothing.
+    last_tab_snapshot: Option<String>,
     options: Options,
 }
 
@@ -791,6 +795,8 @@ impl NookApp {
             session,
             state,
             last_job_tick: std::time::Instant::now(),
+            tab_persist_at: None,
+            last_tab_snapshot: None,
             options,
         }
     }
@@ -2604,15 +2610,21 @@ impl eframe::App for NookApp {
         self.shortcuts(&ctx);
         self.tick_jobs();
 
-        // Phase 1: snapshot the tabs when the session has been quiet for two seconds. A crash
-        // loses at most that much typing — the recorded ceiling, not a bug. `time_since_last` is
-        // the time since the last input event, so this fires only during a genuinely idle frame;
-        // no second flag is needed.
-        if ctx.input(|i| i.pointer.time_since_last_movement()) > 2.0
-            && ctx.input(|i| i.pointer.time_since_last_click()) > 2.0
-        {
+        // Phase 1: snapshot the tabs at most every two seconds of wall-clock time. egui repaints
+        // only on input, so a "no input for 2 s" frame never arrives in the plain window — the
+        // wake-up has to be scheduled (`request_repaint_after`), the same way `tick_jobs` ticks.
+        // The write is skipped when the snapshot is unchanged, so an idle app writes nothing.
+        self.tab_persist_at.get_or_insert_with(std::time::Instant::now);
+        if self.tab_persist_at.unwrap().elapsed() >= std::time::Duration::from_secs(2) {
+            self.tab_persist_at = Some(std::time::Instant::now());
+            let before = self.last_tab_snapshot.clone();
             self.session.persist_tabs();
+            let after = nook_engine::store::load_ui_state("tabs").ok().flatten();
+            if after != before {
+                self.last_tab_snapshot = after;
+            }
         }
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
 
         if self.state.want_demo {
             self.state.want_demo = false;

@@ -103,10 +103,16 @@ fn set_color(session: &mut Session, p: &crate::Params) -> Result<serde_json::Val
         .get(&id)
         .ok_or_else(|| Error::not_found(format!("no connection named '{id}'")))?
         .clone();
-    session.profiles.upsert(ConnectionConfig {
+    let new_cfg = ConnectionConfig {
         color: color.clone(),
         ..cfg
-    })?;
+    };
+    session.profiles.upsert(new_cfg.clone())?;
+    // The tree paints the live entry's cfg, so mirror the colour into the open connection too —
+    // the change must be visible now, not after a restart.
+    if let Some(conn) = session.conns.iter_mut().find(|c| c.cfg.id == id) {
+        conn.cfg.color = color.clone();
+    }
     Ok(json!({ "conn": id, "color": color }))
 }
 

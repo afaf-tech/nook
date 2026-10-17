@@ -131,9 +131,13 @@ first time a setting changes. The API key is deliberately not part of this: it s
 keychain, which is one place this file cannot be read from.
 
 **Ceiling: the store is plaintext, and the app owns one more file.** `nook.db` is not encrypted; mode
-`0600` is the same treatment `profiles.json` gets, and what it holds is six non-secrets. It carries no
-version column, because the migration for a one-row table is rewriting the row — recorded as a
-`ponytail:` note on the module. `app.platform` reports the path (`ai_db_file`).
+`0600` is the same treatment `profiles.json` gets, and it matters more than it did: besides the AI
+configuration the file now holds saved snippets, query history and the tab snapshot — SQL text, any
+line of which may contain a literal password the user typed. The keychain secret still never enters
+this file. The schema is versioned through `PRAGMA user_version`; every open applies an idempotent
+`CREATE TABLE IF NOT EXISTS` batch, so a file from any earlier build is brought up on the next
+start. A start reads the store and creates it only when something is written. `app.platform` reports
+the path (`ai_db_file`).
 
 **Ceiling: a stored key is the `security` child's own argument.** `keychain_store` hands the secret to
 `security add-generic-password -w <secret>`; while that child lives, the same user can read it from the

@@ -131,7 +131,8 @@ pub fn call_tool(
     let local = name.starts_with("snippet.")
         || name.starts_with("state.")
         || name == "conn.pin"
-        || name == "conn.reorder";
+        || name == "conn.reorder"
+        || name == "conn.setColor";
     if !local {
         if !map.contains_key("conn") && !map.contains_key("from") {
             if let Some(default) = session.active_conn.map(|i| session.conns[i].cfg.id.clone()) {
