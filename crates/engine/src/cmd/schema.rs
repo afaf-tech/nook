@@ -67,7 +67,7 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("list/create/drop sequences via \"action\"; PostgreSQL only."),
         CommandSpec::new("schema.setPrimaryKey", "Set primary key", "Design", set_primary_key)
             .params(r#"{"table":"public.users","columns":["id"]}"#)
-            .help("Add the table's primary key with ALTER TABLE; refuses a table that already has one; SQLite refuses (needs a rebuild)."),
+            .help("Add the table's primary key with ALTER TABLE; refuses a table that already has one; SQLite rebuilds the table inside a transaction (which refuses an open one)."),
     ]
 }
 
@@ -383,6 +383,14 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
         // transaction — so they run outside; every step in between is atomic. A failure after
         // DROP TABLE would otherwise leave the rows stranded in {table}_dc_new and the session
         // without its pragma restore.
+        // A rebuild cannot run inside a transaction the user already opened: the plan's pragma
+        // OFF would be a silent no-op in it (DROP TABLE would cascade child rows), and BEGIN
+        // would fail with "cannot start a transaction within a transaction". Fail fast.
+        if session.driver_for(index)?.in_transaction() {
+            return Err(Error::config(
+                "commit or roll back the open transaction before rebuilding the table",
+            ));
+        }
         let (pre, body, post): (Vec<_>, Vec<_>, Vec<_>) = {
             let mut pre = Vec::new();
             let mut body = Vec::new();
@@ -1187,5 +1195,41 @@ mod tests {
         // Enforcement is restored to ON — the session's own choice, not the plan's.
         let rs = driver.run("PRAGMA foreign_keys", 1).expect("pragma read");
         assert_eq!(rs.rows[0][0].as_text(), "1");
+    }
+
+    /// The rebuild cannot run inside a transaction the user already opened: the plan's pragma
+    /// OFF would be a silent no-op in it (DROP TABLE would cascade child rows), and BEGIN would
+    /// fail with "cannot start a transaction within a transaction". Fail fast with the reason.
+    #[test]
+    fn set_primary_key_refuses_an_open_transaction() {
+        let mut session = Session::new();
+        let cfg = nook_core::ConnectionConfig::new("mem", nook_core::DriverKind::Sqlite);
+        let mut driver = nook_drivers::sqlite::Sqlite::memory().expect("memory db");
+        nook_drivers::Driver::run_script(
+            &mut driver,
+            "CREATE TABLE users (id INTEGER, email TEXT);",
+            10,
+        )
+        .expect("setup");
+        nook_drivers::Driver::begin(&mut driver).expect("begin");
+        let mut conn = crate::Conn::new(cfg);
+        conn.driver = Some(Box::new(driver));
+        conn.catalog = Some(
+            conn.driver
+                .as_mut()
+                .expect("driver installed")
+                .catalog()
+                .expect("catalog"),
+        );
+        session.conns.push(conn);
+        let p = Params::from_json(
+            json!({"table": "users", "columns": ["id"], "conn": "mem"}),
+        )
+        .expect("params");
+        let e = set_primary_key(&mut session, &p).expect_err("an open tx must refuse");
+        assert!(
+            e.message().contains("transaction"),
+            "the refusal names the open transaction: {e}"
+        );
     }
 }
