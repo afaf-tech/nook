@@ -164,6 +164,7 @@ mod tests {
             schemas: vec![Schema {
                 name: "public".into(),
                 tables: vec![users, posts, view],
+                ..Default::default()
             }],
             ..Catalog::default()
         }

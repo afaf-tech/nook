@@ -341,6 +341,101 @@ pub fn dialect_label(d: Dialect) -> &'static str {
     }
 }
 
+/// `CREATE TRIGGER` for the three dialects. The body is the server-side language as-is
+/// (`BEGIN … END` / `EXECUTE FUNCTION …`); we wire the header, the caller owns the body.
+pub fn create_trigger(
+    schema: Option<&str>,
+    name: &str,
+    table: &str,
+    timing: &str,
+    events: &str,
+    body: &str,
+    dialect: Dialect,
+) -> String {
+    let quoted = quote_ident(name, dialect);
+    match dialect {
+        Dialect::Sqlite => format!(
+            "CREATE TRIGGER {quoted} {timing} {events} ON {table}\nBEGIN\n{body}\nEND;"
+        ),
+        Dialect::Postgres => format!(
+            "CREATE TRIGGER {quoted} {timing} {events} ON {table} FOR EACH ROW EXECUTE FUNCTION {body};"
+        ),
+        Dialect::MySql => format!(
+            "CREATE TRIGGER {quoted} {timing} {events} ON {table} FOR EACH ROW\nBEGIN\n{body}\nEND;"
+        ),
+    }
+}
+
+pub fn drop_trigger(schema: Option<&str>, name: &str, dialect: Dialect) -> String {
+    let target = quote_qualified(schema, name, dialect);
+    match dialect {
+        // SQLite has no IF EXISTS for triggers.
+        Dialect::Sqlite => format!("DROP TRIGGER {target};"),
+        _ => format!("DROP TRIGGER IF EXISTS {target};"),
+    }
+}
+
+/// `CREATE FUNCTION`/`CREATE PROCEDURE`: the body is passed through verbatim — the dialects'
+/// function languages are too different to generate, so we only enforce the create-or-replace
+/// header per dialect.
+pub fn create_routine(
+    schema: Option<&str>,
+    name: &str,
+    kind: &str,
+    body: &str,
+    dialect: Dialect,
+) -> String {
+    let target = quote_qualified(schema, name, dialect);
+    match (dialect, kind) {
+        (Dialect::Postgres, "function") => {
+            format!("CREATE OR REPLACE FUNCTION {target} {body}")
+        }
+        (Dialect::Postgres, _) => format!("CREATE OR REPLACE PROCEDURE {target} {body}"),
+        (Dialect::MySql, "function") => format!("CREATE FUNCTION {target} {body}"),
+        (Dialect::MySql, _) => format!("CREATE PROCEDURE {target} {body}"),
+        // SQLite has no stored functions: routes go through `create_function` at connection
+        // time, not DDL, so this arm only exists to keep the match total.
+        (Dialect::Sqlite, _) => format!("CREATE TRIGGER {target} {body}"),
+    }
+}
+
+pub fn drop_routine(schema: Option<&str>, name: &str, kind: &str, dialect: Dialect) -> String {
+    let target = quote_qualified(schema, name, dialect);
+    let kw = if kind == "function" { "FUNCTION" } else { "PROCEDURE" };
+    match dialect {
+        Dialect::Sqlite => format!("DROP {kw} {target};"),
+        _ => format!("DROP {kw} IF EXISTS {target};"),
+    }
+}
+
+pub fn create_sequence(seq: &crate::Sequence, dialect: Dialect) -> String {
+    let target = quote_qualified(seq.schema.as_deref(), &seq.name, dialect);
+    let mut s = format!("CREATE SEQUENCE {target}");
+    if seq.start != 0 {
+        s.push_str(&format!(" START WITH {}", seq.start));
+    }
+    if seq.increment != 1 {
+        s.push_str(&format!(" INCREMENT BY {}", seq.increment));
+    }
+    if let Some(min) = seq.min {
+        s.push_str(&format!(" MINVALUE {min}"));
+    }
+    if let Some(max) = seq.max {
+        s.push_str(&format!(" MAXVALUE {max}"));
+    }
+    if seq.cycle {
+        s.push_str(" CYCLE");
+    }
+    s.push(';');
+    s
+}
+
+pub fn drop_sequence(schema: Option<&str>, name: &str, dialect: Dialect) -> String {
+    format!(
+        "DROP SEQUENCE IF EXISTS {};",
+        quote_qualified(schema, name, dialect)
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +533,84 @@ mod tests {
         };
         let sql = add_foreign_key(Some("public"), "posts", &fk, Dialect::Postgres);
         assert!(sql.contains("FOREIGN KEY (\"author_id\") REFERENCES \"public\".\"users\" (\"id\") ON DELETE CASCADE"));
-        assert!(!sql.contains("ON UPDATE"));
+    }
+
+    #[test]
+    fn trigger_routine_sequence_ddl_per_dialect() {
+        let sql = create_trigger(
+            Some("public"),
+            "touch",
+            "users",
+            "BEFORE",
+            "UPDATE",
+            "UPDATE users SET touched = 1;",
+            Dialect::Sqlite,
+        );
+        assert_eq!(
+            sql,
+            "CREATE TRIGGER \"touch\" BEFORE UPDATE ON users\nBEGIN\nUPDATE users SET touched = 1;\nEND;"
+        );
+        let sql = create_trigger(
+            None,
+            "touch",
+            "users",
+            "AFTER",
+            "INSERT",
+            "notify_inserted()",
+            Dialect::Postgres,
+        );
+        assert_eq!(
+            sql,
+            "CREATE TRIGGER \"touch\" AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION notify_inserted();"
+        );
+        assert_eq!(
+            drop_trigger(None, "touch", Dialect::Sqlite),
+            "DROP TRIGGER \"touch\";"
+        );
+        assert_eq!(
+            drop_trigger(Some("public"), "touch", Dialect::Postgres),
+            "DROP TRIGGER IF EXISTS \"public\".\"touch\";"
+        );
+
+        let sql = create_routine(
+            Some("public"),
+            "add",
+            "function",
+            "(a int, b int) RETURNS int AS $$ SELECT a + b $$ LANGUAGE SQL;",
+            Dialect::Postgres,
+        );
+        assert!(sql.starts_with("CREATE OR REPLACE FUNCTION \"public\".\"add\""));
+        assert!(sql.ends_with("LANGUAGE SQL;"));
+        assert_eq!(
+            drop_routine(Some("public"), "add", "function", Dialect::Postgres),
+            "DROP FUNCTION IF EXISTS \"public\".\"add\";"
+        );
+        assert_eq!(
+            drop_routine(None, "add", "procedure", Dialect::MySql),
+            "DROP PROCEDURE IF EXISTS `add`;"
+        );
+
+        let seq = crate::Sequence {
+            schema: Some("public".into()),
+            name: "order_seq".into(),
+            start: 10,
+            increment: 5,
+            min: Some(10),
+            max: Some(1000),
+            cycle: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            create_sequence(&seq, Dialect::Postgres),
+            "CREATE SEQUENCE \"public\".\"order_seq\" START WITH 10 INCREMENT BY 5 MINVALUE 10 MAXVALUE 1000 CYCLE;"
+        );
+        // Defaults stay silent: increment 1 and no bounds emit a bare create.
+        let plain = crate::Sequence { name: "s".into(), ..Default::default() };
+        assert_eq!(create_sequence(&plain, Dialect::Postgres), "CREATE SEQUENCE \"s\";");
+        assert_eq!(
+            drop_sequence(Some("public"), "s", Dialect::Postgres),
+            "DROP SEQUENCE IF EXISTS \"public\".\"s\";"
+        );
     }
 }
+

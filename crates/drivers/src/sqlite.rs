@@ -236,6 +236,23 @@ impl Driver for Sqlite {
             }
             tables.push(table);
         }
+        let trigger_rows = self.run(
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            MAX_ROWS,
+        )?;
+        let triggers: Vec<nook_model::Trigger> = trigger_rows
+            .rows
+            .iter()
+            .map(|row| nook_model::Trigger {
+                name: row.first().map(Value::as_text).unwrap_or_default(),
+                table: row.get(1).map(Value::as_text).unwrap_or_default(),
+                // `ddl` carries the whole statement; timing and events stay empty rather
+                // than a hand parser — consumers show the DDL for SQLite anyway.
+                enabled: true,
+                ddl: row.get(2).map(Value::as_text).unwrap_or_default(),
+                ..Default::default()
+            })
+            .collect();
         Ok(Catalog {
             driver: self
                 .server_info()
@@ -246,6 +263,8 @@ impl Driver for Sqlite {
             schemas: vec![Schema {
                 name: "main".into(),
                 tables,
+                triggers,
+                ..Default::default()
             }],
             fetched_ms: started.elapsed().as_millis() as u64,
         })

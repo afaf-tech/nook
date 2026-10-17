@@ -160,10 +160,82 @@ impl Table {
     }
 }
 
+
+/// A trigger as the catalog reports it: the event wiring plus the body, for display and DDL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Trigger {
+    pub schema: Option<String>,
+    pub name: String,
+    pub table: String,
+    /// `BEFORE INSERT`, `AFTER UPDATE`, … as the server spells it.
+    pub timing: String,
+    /// One or more events: `INSERT`, `INSERT OR UPDATE`, `INSERT, UPDATE, DELETE`, …
+    pub events: String,
+    pub enabled: bool,
+    /// The full `CREATE TRIGGER` statement, as read back from the server.
+    pub ddl: String,
+}
+
+/// A stored function or procedure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Routine {
+    pub schema: Option<String>,
+    pub name: String,
+    /// `function`, `procedure` — spelled the way the server does.
+    pub kind: String,
+    pub returns: String,
+    pub comment: String,
+    /// The full `CREATE FUNCTION`/`CREATE PROCEDURE` statement, as read back from the server.
+    pub ddl: String,
+}
+
+/// A sequence (PostgreSQL; `AUTO_INCREMENT` metadata on MySQL tables covers the same need).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sequence {
+    pub schema: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub start: i64,
+    #[serde(default = "one")]
+    pub increment: i64,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+    pub cycle: bool,
+    pub last_value: Option<i64>,
+}
+
+fn one() -> i64 {
+    1
+}
+
+/// `increment` defaults to 1, not 0: a bare `CREATE SEQUENCE` must stay silent.
+impl Default for Sequence {
+    fn default() -> Self {
+        Sequence {
+            increment: 1,
+            ..Sequence {
+                schema: None,
+                name: String::new(),
+                start: 0,
+                increment: 0,
+                min: None,
+                max: None,
+                cycle: false,
+                last_value: None,
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Schema {
     pub name: String,
     pub tables: Vec<Table>,
+    #[serde(default)]
+    pub triggers: Vec<Trigger>,
+    #[serde(default)]
+    pub routines: Vec<Routine>,
+    #[serde(default)]
+    pub sequences: Vec<Sequence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -446,6 +518,7 @@ mod tests {
             schemas: vec![Schema {
                 name: "public".into(),
                 tables: vec![users, posts],
+                ..Default::default()
             }],
             fetched_ms: 3,
         }
