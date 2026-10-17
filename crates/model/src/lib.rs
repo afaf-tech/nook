@@ -155,6 +155,10 @@ impl Table {
         self.columns.iter().find(|c| c.name == name)
     }
 
+    pub fn column_mut(&mut self, name: &str) -> Option<&mut Column> {
+        self.columns.iter_mut().find(|c| c.name == name)
+    }
+
     pub fn column_names(&self) -> Vec<String> {
         self.columns.iter().map(|c| c.name.clone()).collect()
     }

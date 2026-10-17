@@ -61,8 +61,14 @@ pub fn column_ddl(col: &Column, dialect: Dialect, inline_pk: bool) -> String {
     out
 }
 
-/// `CREATE TABLE`, primary key inlined. Indexes and foreign keys come from the sibling helpers.
+/// `CREATE TABLE`, primary key inlined. Indexes and foreign keys come from the sibling helpers —
+/// except when `inline_foreign_keys` is set: SQLite cannot `ALTER TABLE … ADD FOREIGN KEY`, so a
+/// rebuild has to carry the constraints inside the CREATE it runs.
 pub fn create_table(table: &Table, dialect: Dialect) -> String {
+    create_table_with(table, dialect, false)
+}
+
+pub fn create_table_with(table: &Table, dialect: Dialect, inline_foreign_keys: bool) -> String {
     let target = quote_qualified(table.schema.as_deref(), &table.name, dialect);
     let pk = table.primary_key();
     let inline = pk.len() == 1;
@@ -79,6 +85,34 @@ pub fn create_table(table: &Table, dialect: Dialect) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    if inline_foreign_keys {
+        for fk in &table.foreign_keys {
+            let cols = fk
+                .columns
+                .iter()
+                .map(|c| quote_ident(c, dialect))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ref_target =
+                quote_qualified(fk.ref_schema.as_deref().or(table.schema.as_deref()), &fk.ref_table, dialect);
+            let ref_cols = fk
+                .ref_columns
+                .iter()
+                .map(|c| quote_ident(c, dialect))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut constraint = format!(
+                "FOREIGN KEY ({cols}) REFERENCES {ref_target} ({ref_cols})",
+            );
+            if !fk.on_delete.is_empty() && !fk.on_delete.eq_ignore_ascii_case("no action") {
+                constraint.push_str(&format!(" ON DELETE {}", fk.on_delete.to_ascii_uppercase()));
+            }
+            if !fk.on_update.is_empty() && !fk.on_update.eq_ignore_ascii_case("no action") {
+                constraint.push_str(&format!(" ON UPDATE {}", fk.on_update.to_ascii_uppercase()));
+            }
+            defs.push(constraint);
+        }
     }
     format!("CREATE TABLE {target} (\n  {}\n);", defs.join(",\n  "))
 }

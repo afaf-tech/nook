@@ -325,6 +325,9 @@ pub(crate) fn sync_grid_table(session: &mut Session, tab_index: usize) -> Result
         .get(tab_index)
         .and_then(|tab| tab.grid.table.clone())
         .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
+    // Re-bind first — a schema edit since the tab was bound must be seen even when the page still
+    // describes the table. `stale_page` is then judged against the freshly bound columns: a page
+    // whose columns no longer exist must reload, and its `load_grid` re-binds before it selects.
     bind_grid_table(session, tab_index, reference)?;
     let stale_page = {
         let tab = session

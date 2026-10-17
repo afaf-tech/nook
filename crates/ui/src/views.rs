@@ -243,7 +243,7 @@ pub fn design(
                 ui,
                 tokens,
                 "Columns",
-                Some("double-click a header to sort nothing — this is the definition"),
+                Some("right-click a column to rename it, change its type, nullability, default — or drop it"),
             );
             ui.add_space(4.0);
             let column_specs = specs(
@@ -418,7 +418,8 @@ pub fn design(
                         egui::TextEdit::multiline(ddl)
                             .code_editor()
                             .desired_rows(10)
-                            .desired_width(f32::INFINITY),
+                            .desired_width(f32::INFINITY)
+                            .interactive(false),
                     );
                 });
             } else {

@@ -16,7 +16,7 @@ pub mod transfer;
 pub mod xlsx;
 
 use nook_core::{quote_qualified, ConnectionConfig, Dialect, DriverKind, Error, Result};
-use nook_model::{Catalog, DbProcess, DbUser, ResultSet, ServerInfo};
+use nook_model::{Catalog, Column, DbProcess, DbUser, ResultSet, ServerInfo, Table};
 
 /// Rows a single fetch may hold before the driver stops reading. Grid pages ask for far fewer.
 pub const MAX_ROWS: usize = 50_000;
@@ -102,6 +102,21 @@ pub trait Driver: Send {
         let qualified = quote_qualified(schema, table, self.dialect());
         Err(Error::unsupported(format!(
             "{} cannot show DDL for {qualified}",
+            self.kind().label()
+        )))
+    }
+
+    /// Rebuild a table with new column definitions, for schema changes the server cannot ALTER in
+    /// place. The statements run in order, inside one transaction. SQLite is the engine that needs
+    /// it (a primary key cannot be added in place); the SQL engines answer through `ALTER TABLE`.
+    fn rebuild_table(
+        &mut self,
+        _schema: Option<&str>,
+        _table: &Table,
+        _new_columns: &[Column],
+    ) -> Result<Vec<String>> {
+        Err(Error::unsupported(format!(
+            "{} does not need a table rebuild",
             self.kind().label()
         )))
     }

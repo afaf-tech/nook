@@ -289,6 +289,15 @@ impl Driver for Sqlite {
         }
     }
 
+    fn rebuild_table(
+        &mut self,
+        schema: Option<&str>,
+        table: &Table,
+        new_columns: &[Column],
+    ) -> Result<Vec<String>> {
+        self.rebuild_table_plan(schema, table, new_columns)
+    }
+
     fn variables(&mut self) -> Result<Vec<(String, String)>> {
         let rows = self.pragma_rows("PRAGMA compile_options")?;
         Ok(rows
@@ -474,7 +483,9 @@ impl Sqlite {
         };
         let mut script = vec![
             "PRAGMA foreign_keys = OFF;".to_string(),
-            nook_model::ddl::create_table(&scratch, Dialect::Sqlite),
+            // FKs ride inside the CREATE: SQLite cannot ALTER a constraint onto a table, so a
+            // rebuild that dropped them would silently delete every reference the table has.
+            nook_model::ddl::create_table_with(&scratch, Dialect::Sqlite, true),
             nook_core::quote_qualified(None, &tmp, Dialect::Sqlite),
         ];
         script[2] = format!(
@@ -652,6 +663,46 @@ mod tests {
         let users2 = cat2.find_table(None, "users").expect("users again");
         assert!(users2.column("created_at").is_some());
         assert_eq!(users2.primary_key(), vec!["id".to_string()]);
+    }
+
+    /// A rebuild of a child table must not drop its foreign key: SQLite cannot ALTER a constraint
+    /// back on, so the FK has to ride inside the scratch CREATE. Regression for the rebuild that
+    /// silently deleted `posts.author_id REFERENCES users(id)`.
+    #[test]
+    fn rebuild_plan_keeps_foreign_keys() {
+        let mut db = db();
+        let cat = db.catalog().expect("catalog");
+        let posts = cat.find_table(None, "posts").expect("posts").clone();
+        assert!(!posts.foreign_keys.is_empty(), "the fixture has a child table");
+        // Give the child table a key the way the designer would: same columns, marked.
+        let mut cols = posts.columns.clone();
+        for column in cols.iter_mut() {
+            if column.name == "id" {
+                column.primary_key = true;
+            }
+        }
+        let plan = db.rebuild_table_plan(None, &posts, &cols).expect("plan");
+        for stmt in &plan {
+            if stmt.starts_with("/*") {
+                continue;
+            }
+            db.run(stmt, 10).expect("run rebuild step");
+        }
+        let cat2 = db.catalog().expect("catalog again");
+        let posts2 = cat2.find_table(None, "posts").expect("posts again");
+        assert_eq!(posts2.primary_key(), vec!["id".to_string()]);
+        assert!(
+            !posts2.foreign_keys.is_empty(),
+            "the foreign key must survive the rebuild"
+        );
+        assert_eq!(posts2.foreign_keys[0].ref_table, "users");
+        // And the constraint really is enforced by the server, not just in the catalog.
+        let err = crate::Driver::run_script(
+            &mut db,
+            "INSERT INTO posts (id, author_id, title) VALUES (1, 99, 'orphan');",
+            1,
+        );
+        assert!(err.is_err(), "the restored FK must reject an orphan row");
     }
 
     #[test]

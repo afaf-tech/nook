@@ -350,7 +350,7 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
         }
         list
     };
-    let (index, reference, table) = table_from_params(session, p)?;
+    let (index, reference, mut table) = table_from_params(session, p)?;
     let existing = table.primary_key();
     if !existing.is_empty() {
         return Err(Error::config(format!(
@@ -365,6 +365,22 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
         .and_then(|c| c.driver.as_ref())
         .map(|d| d.dialect())
         .ok_or_else(|| Error::config("the connection is not open"))?;
+    // SQLite cannot ALTER a key in place: mark the columns and let the driver rebuild the table.
+    if dialect == Dialect::Sqlite {
+        for name in &columns {
+            let column = table
+                .column_mut(name)
+                .ok_or_else(|| Error::not_found(format!("no column '{name}'")))?;
+            column.primary_key = true;
+        }
+        let driver = session.driver_for(index)?;
+        let script = driver.rebuild_table(
+            reference.schema.as_deref(),
+            &table,
+            &table.columns.clone(),
+        )?;
+        return execute_ddl(session, index, &script);
+    }
     let sql = ddl::add_primary_key(
         reference.schema.as_deref(),
         &reference.table,
@@ -970,5 +986,53 @@ mod tests {
         let p = Params::from_json(json!({"table": "users"})).expect("params");
         let e = set_primary_key(&mut session, &p).expect_err("no columns");
         assert!(e.message().contains("columns"), "{e}");
+    }
+
+    /// The path the demo database takes: a keyless SQLite table gets its key through the rebuild,
+    /// and the catalog shows it — the whole reason `rebuild_table` was wired into the driver.
+    #[test]
+    fn set_primary_key_rebuilds_a_sqlite_table() {
+        let mut session = Session::new();
+        let cfg = nook_core::ConnectionConfig::new("mem", nook_core::DriverKind::Sqlite);
+        let mut driver = nook_drivers::sqlite::Sqlite::memory().expect("memory db");
+        nook_drivers::Driver::run_script(
+            &mut driver,
+            "CREATE TABLE users (id INTEGER, email TEXT);",
+            10,
+        )
+        .expect("setup");
+        let mut conn = crate::Conn::new(cfg);
+        conn.driver = Some(Box::new(driver));
+        conn.catalog = Some(
+            conn.driver
+                .as_mut()
+                .expect("driver installed")
+                .catalog()
+                .expect("catalog"),
+        );
+        session.conns.push(conn);
+        let p = Params::from_json(
+            json!({"table": "users", "columns": ["id"], "conn": "mem"}),
+        )
+        .expect("params");
+        let out = set_primary_key(&mut session, &p).expect("the key is added");
+        assert!(out["statements"].as_array().expect("statements").len() > 1);
+        let table = session.conns[0]
+            .catalog
+            .as_ref()
+            .and_then(|c| c.find_table(None, "users"))
+            .expect("the table is in the catalog");
+        assert_eq!(table.primary_key(), vec!["id".to_string()]);
+        // The rebuilt table really carries the key: an insert without the column fails is wrong —
+        // what proves it is the schema, read straight from the server.
+        let driver = session.driver_for(0).expect("driver");
+        let rs = driver
+            .run("SELECT sql FROM sqlite_master WHERE name = 'users'", 1)
+            .expect("schema read");
+        assert!(
+            rs.rows[0][0].as_text().contains("PRIMARY KEY"),
+            "the rebuilt table declares its key: {}",
+            rs.rows[0][0].as_text()
+        );
     }
 }
