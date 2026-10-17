@@ -586,6 +586,10 @@ pub struct SyncReport {
     pub changes: Vec<(String, RowChangeKind)>,
     pub applied: u64,
     pub elapsed_ms: u128,
+    /// Whether this run was a dry run. The label must come from what the caller asked for, not
+    /// from `applied == 0`: an applied sync over tables that were already in sync also has zero
+    /// applied statements and must not be mislabeled.
+    pub dry_run: bool,
 }
 
 impl SyncReport {
@@ -613,7 +617,7 @@ impl SyncReport {
             self.inserts(),
             self.updates(),
             self.deletes(),
-            if self.applied == 0 {
+            if self.dry_run {
                 " (dry run)".to_string()
             } else {
                 format!(", {} applied", self.applied)
@@ -637,7 +641,10 @@ pub fn sync_data(
     progress: &mut dyn FnMut(&str),
 ) -> Result<SyncReport> {
     let started = Instant::now();
-    let mut report = SyncReport::default();
+    let mut report = SyncReport {
+        dry_run,
+        ..SyncReport::default()
+    };
     let selected: Vec<Table> = src_catalog
         .schemas
         .iter()

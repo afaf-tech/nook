@@ -62,11 +62,26 @@ impl Change {
 }
 
 /// `source` is what you want, `target` is what is there. Emitted DDL runs on `target`.
+///
+/// Schemas are matched by name first. Cross-driver pairs (SQLite's `main` against MySQL's
+/// database name) never agree, so when a catalog has a single schema the lookup falls back to
+/// the bare table name — as a fallback only: a multi-schema catalog must keep matching by
+/// schema, or two same-named tables in different schemas would be compared against each other.
 pub fn diff(source: &Catalog, target: &Catalog, dialect: Dialect) -> Vec<Change> {
+    let loose = |cat: &Catalog| cat.schemas.len() <= 1;
     let mut out = Vec::new();
     for sc in &source.schemas {
         for table in &sc.tables {
-            match target.find_table(Some(&sc.name), &table.name) {
+            let found = target
+                .find_table(Some(&sc.name), &table.name)
+                .or_else(|| {
+                    if loose(target) {
+                        target.find_table(None, &table.name)
+                    } else {
+                        None
+                    }
+                });
+            match found {
                 None if table.kind != crate::TableKind::Table => out.push(Change {
                     kind: ChangeKind::AddTable,
                     schema: table.schema.clone(),
@@ -97,7 +112,9 @@ pub fn diff(source: &Catalog, target: &Catalog, dialect: Dialect) -> Vec<Change>
     }
     for sc in &target.schemas {
         for table in &sc.tables {
-            if source.find_table(Some(&sc.name), &table.name).is_none() {
+            if source.find_table(Some(&sc.name), &table.name).is_none()
+                && !(loose(source) && source.find_table(None, &table.name).is_some())
+            {
                 let is_table = table.kind == crate::TableKind::Table;
                 out.push(Change {
                     kind: ChangeKind::DropTable,
@@ -346,6 +363,30 @@ mod tests {
             .find(|c| c.kind == ChangeKind::DropColumn)
             .expect("drop")
             .destructive());
+    }
+
+    #[test]
+    fn single_schema_catalogs_match_by_table_name_across_drivers() {
+        // SQLite catalogs name their schema `main`; MySQL catalogs name it after the database.
+        // Schema-qualified matching would emit a spurious add+drop pair for a table that exists
+        // on both sides; with one schema per catalog the match is by bare table name.
+        let mut source = cat(vec![table(
+            "users",
+            &[("id", "int", true), ("name", "text", false)],
+        )]);
+        let mut target = cat(vec![table(
+            "users",
+            &[("id", "int", true), ("name", "text", false)],
+        )]);
+        source.schemas[0].name = "main".into();
+        for t in &mut source.schemas[0].tables {
+            t.schema = Some("main".into());
+        }
+        target.schemas[0].name = "stage".into();
+        for t in &mut target.schemas[0].tables {
+            t.schema = Some("stage".into());
+        }
+        assert!(diff(&source, &target, Dialect::MySql).is_empty());
     }
 
     #[test]
