@@ -217,6 +217,12 @@ pub struct Job {
     pub runs: u64,
     #[serde(default)]
     pub failures: u64,
+    /// Webhook POSTed the job's JSON status on failure. Empty means no notification.
+    #[serde(default)]
+    pub webhook: String,
+    /// Jobs run after a successful run, in order. A chained failure stops the chain.
+    #[serde(default)]
+    pub then: Vec<String>,
 }
 
 fn default_schedule() -> Schedule {
@@ -242,6 +248,8 @@ impl Job {
             last_status: None,
             runs: 0,
             failures: 0,
+            webhook: String::new(),
+            then: Vec::new(),
         }
     }
 

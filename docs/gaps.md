@@ -37,11 +37,12 @@ Object design stops at tables, views and indexes. Triggers and stored routines a
 they appear in DDL but cannot be created or edited. (`schema.triggerEditor`, `schema.functionEditor`,
 `schema.sequenceEditor`)
 
-## 5. Job notifications and chaining
+## 5. ~~Job notifications and chaining~~ — done
 
-A failing nightly backup currently only shows in the log. A webhook or email hook plus "run this job
-after that one" is what makes the scheduler useful unattended. (`job.notifications`, `job.chain`,
-`job.agent`)
+Shipped: `job.notifications` lists, sets and clears a failure webhook (the job's JSON status
+POSTed via the system curl — email is a webhook to a relay), and `job.create` takes `then: [ids]`
+to run jobs in order after a success; a chained failure stops the chain and cycles are rejected
+at create time. Still open: `job.agent`, deploying jobs to another machine.
 
 ## 6. ~~Excel import and export~~ — done
 

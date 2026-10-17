@@ -46,6 +46,9 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("Called by the app's timer and by `nook-cli job serve`."),
         CommandSpec::new("job.logs", "Job log", "Automation", job_logs)
             .params(r#"{"id":"nightly","limit":20}"#),
+        CommandSpec::new("job.notifications", "Webhook on failure", "Automation", job_notifications)
+            .params(r#"{"id":"nightly","webhook":"https://hooks.example.com/nook"}"#)
+            .help("List, set or clear a job's failure webhook. An empty webhook clears it. Email is a webhook to a mail relay."),
     ]
 }
 
@@ -477,7 +480,10 @@ fn job_create(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     job.params = p.get("params").cloned().unwrap_or_else(|| json!({}));
     job.schedule = Schedule::parse(&p.str_opt("schedule").unwrap_or_else(|| "manual".into()))?;
     job.enabled = p.bool_opt("enabled", true);
+    job.webhook = p.str_opt("webhook").unwrap_or_default();
+    job.then = p.list("then");
     session.jobs.add(job)?;
+    validate_chain(&session.jobs, &id)?;
     session.log(Level::Success, format!("job '{id}' created"));
     job_list(session, p)
 }
@@ -498,6 +504,27 @@ fn job_set_enabled(session: &mut Session, p: &Params) -> Result<serde_json::Valu
     job.enabled = enabled;
     session.jobs.save()?;
     Ok(json!({ "id": id, "enabled": enabled }))
+}
+
+/// Every `then` target must exist, and the chain graph must be acyclic — checked from the job
+/// that just gained an edge, so a bad edge is rejected at create time, before it can run.
+fn validate_chain(store: &crate::jobs::JobStore, start: &str) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![start.to_string()];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            return Err(Error::config(format!(
+                "job '{start}' would chain into itself"
+            )));
+        }
+        let job = store
+            .get(&id)
+            .ok_or_else(|| Error::not_found(format!("no job named '{id}'")))?;
+        for next in &job.then {
+            stack.push(next.clone());
+        }
+    }
+    Ok(())
 }
 
 /// Run one job by dispatching its command with the job's parameters.
@@ -535,11 +562,104 @@ pub fn run_job(session: &mut Session, id: &str) -> Result<String> {
                         .unwrap_or_else(|| "ok".to_string())
                 });
             session.jobs.record(&job.id, true, message.clone(), ms, at);
+            // The chain runs after a success, in order, and a failure stops it. Each chained
+            // run is recorded in its own job's log by the recursive run_job call.
+            for next in &job.then {
+                run_job(session, next)?;
+            }
             Ok(message)
         }
         Err(e) => {
             session.jobs.record(&job.id, false, e.to_string(), ms, at);
+            if !job.webhook.is_empty() {
+                notify_webhook(&job, &e, ms, at, session);
+            }
             Err(e)
+        }
+    }
+}
+
+/// POST the job's failure as JSON to its webhook via the system curl — the same convention the
+/// AI client uses (`NOOK_CURL_BIN` names a fake in tests). A webhook failure is logged and
+/// swallowed: it must never mask the job's own error.
+fn notify_webhook(job: &Job, error: &Error, ms: u128, at: u64, session: &mut Session) {
+    let body = json!({
+        "job": job.id,
+        "name": job.name,
+        "ok": false,
+        "error": error.to_string(),
+        "elapsed_ms": ms,
+        "at": at,
+    });
+    let bin = std::env::var("NOOK_CURL_BIN").unwrap_or_else(|_| "curl".to_string());
+    let args = [
+        "-sS".to_string(),
+        "-X".to_string(),
+        "POST".to_string(),
+        "-H".to_string(),
+        "content-type: application/json".to_string(),
+        "--data-binary".to_string(),
+        "@-".to_string(),
+        "--max-time".to_string(),
+        "10".to_string(),
+        job.webhook.clone(),
+    ];
+    let payload = serde_json::to_string(&body).unwrap_or_default();
+    match std::process::Command::new(&bin)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(payload.as_bytes());
+            }
+            match child.wait() {
+                Ok(status) if status.success() => {}
+                Ok(status) => session.log(
+                    Level::Warn,
+                    format!("webhook for '{}' failed with {status}", job.id),
+                ),
+                Err(e) => session.log(
+                    Level::Warn,
+                    format!("webhook for '{}' did not finish: {e}", job.id),
+                ),
+            }
+        }
+        Err(e) => session.log(
+            Level::Warn,
+            format!("webhook for '{}' could not run: {e}", job.id),
+        ),
+    }
+}
+
+fn job_notifications(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let id = p.str_arg("id")?;
+    match p.str_opt("webhook") {
+        None => {
+            let job = session
+                .jobs
+                .get(&id)
+                .ok_or_else(|| Error::not_found(format!("no job named '{id}'")))?;
+            Ok(json!({ "id": id, "webhook": job.webhook, "then": job.then }))
+        }
+        Some(webhook) => {
+            session
+                .jobs
+                .get_mut(&id)
+                .ok_or_else(|| Error::not_found(format!("no job named '{id}'")))?
+                .webhook = webhook;
+            session.jobs.save()?;
+            session.log(Level::Success, format!("webhook for '{id}' updated"));
+            let webhook = session
+                .jobs
+                .get(&id)
+                .map(|j| j.webhook.clone())
+                .unwrap_or_default();
+            Ok(json!({ "id": id, "webhook": webhook }))
         }
     }
 }
@@ -661,6 +781,75 @@ mod tests {
         let p = Params::from_json(json!({"conn": "missing"})).expect("params");
         assert!(dump(&mut session, &p).is_err());
         assert!(restore(&mut session, &p).is_err());
+    }
+
+    #[test]
+    fn failing_job_posts_its_status_to_the_webhook() {
+        let (_guard, log) = crate::test_support::fake_curl();
+        let mut session = Session::new();
+        let p = Params::from_json(json!({
+            "id": "failing", "name": "Failing", "kind": "query",
+            "params": {"sql": "select 1"},
+            "webhook": "https://hooks.example.com/nook"
+        }))
+        .expect("params");
+        job_create(&mut session, &p).expect("create");
+        assert!(run_job(&mut session, "failing").is_err());
+        let calls = std::fs::read_to_string(&log).expect("the fake curl ran");
+        assert!(calls.contains("hooks.example.com/nook"), "{calls}");
+        assert!(calls.contains("POST"), "{calls}");
+        assert!(calls.contains("\"job\":\"failing\""), "{calls}");
+        assert!(calls.contains("\"ok\":false"), "{calls}");
+    }
+
+    #[test]
+    fn a_successful_job_runs_its_chain_and_a_failure_stops_it() {
+        let _guard = crate::test_support::scratch_config();
+        let mut session = Session::new();
+        for (id, sql) in [("first", "select 1"), ("second", "select 2"), ("third", "select 3")] {
+            let p = Params::from_json(json!({
+                "id": id, "name": id, "kind": "query",
+                "params": {"sql": sql}
+            }))
+            .expect("params");
+            job_create(&mut session, &p).expect("create");
+        }
+        // first -> second: `then` is part of job.create, so delete and recreate first with it.
+        let p = Params::from_json(json!({"id": "first"})).expect("params");
+        job_delete(&mut session, &p).expect("remove first");
+        let p = Params::from_json(json!({
+            "id": "first", "name": "first", "kind": "query",
+            "params": {"sql": "select 1"}, "then": ["second"]
+        }))
+        .expect("params");
+        job_create(&mut session, &p).expect("recreate with chain");
+        // All three jobs have no connection, so every run fails: first's failure must stop the
+        // chain before second ever runs.
+        assert!(run_job(&mut session, "first").is_err());
+        assert_eq!(session.jobs.get("first").expect("job").runs, 1);
+        assert_eq!(session.jobs.get("second").expect("job").runs, 0);
+        assert_eq!(session.jobs.get("third").expect("job").runs, 0);
+
+        // A chain target that does not exist is rejected at create time.
+        let p = Params::from_json(json!({
+            "id": "bad", "name": "bad", "kind": "query",
+            "params": {"sql": "select 1"}, "then": ["no-such-job"]
+        }))
+        .expect("params");
+        assert!(job_create(&mut session, &p).is_err());
+    }
+
+    #[test]
+    fn old_job_json_without_the_new_fields_loads() {
+        let legacy = r#"{
+            "id": "old", "name": "Old", "kind": "query",
+            "conn": "", "target": "", "params": {},
+            "schedule": {"kind": "manual"}, "enabled": true,
+            "last_run": null, "last_status": null, "runs": 3, "failures": 1
+        }"#;
+        let job: crate::jobs::Job = serde_json::from_str(legacy).expect("legacy job loads");
+        assert!(job.webhook.is_empty());
+        assert!(job.then.is_empty());
     }
 
     #[test]

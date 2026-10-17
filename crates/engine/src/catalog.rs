@@ -630,7 +630,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Automation",
         "job.notifications",
         "Email or webhook on failure",
-        "not implemented",
+        "webhook POST on failure via the system curl; email is a webhook to a relay",
     ),
     (
         "Automation",
@@ -642,7 +642,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Automation",
         "job.chain",
         "Chained jobs",
-        "not implemented; one job runs one command",
+        "\"then\" runs jobs in order after a success; cycles rejected at create time",
     ),
     (
         "Automation",

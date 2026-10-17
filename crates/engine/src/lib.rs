@@ -995,6 +995,29 @@ pub(crate) mod test_support {
         std::env::set_var("NOOK_SECURITY_BIN", &script);
         (guard, log)
     }
+
+    /// A fake `curl` on `NOOK_CURL_BIN`: it records the whole command line plus the stdin body
+    /// to a log and exits 0. Same lock discipline as `fake_security` — one process-wide override.
+    pub fn fake_curl() -> (MutexGuard<'static, ()>, std::path::PathBuf) {
+        let guard = scratch_config();
+        let dir = std::env::temp_dir().join("nook-test-curl");
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("calls.log");
+        let _ = std::fs::remove_file(&log);
+        let script = dir.join("curl");
+        let body = format!(
+            "#!/bin/sh\n{{ printf '%s\\n' \"$*\"; cat; printf '\\n'; }} >> \"{}\"\nexit 0\n",
+            log.display(),
+        );
+        let _ = std::fs::write(&script, body);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+        }
+        std::env::set_var("NOOK_CURL_BIN", &script);
+        (guard, log)
+    }
 }
 
 #[cfg(test)]
