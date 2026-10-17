@@ -19,10 +19,15 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("tools.generators", "Available generators", "Tools", generators),
         CommandSpec::new("tools.importCsv", "Import CSV", "Tools", import_csv)
             .params(r#"{"path":"~/data/users.csv","table":"users","create_table":true}"#),
+        CommandSpec::new("tools.importExcel", "Import Excel", "Tools", import_excel)
+            .params(r#"{"path":"~/data/users.xlsx","table":"users","create_table":true}"#)
+            .help("First sheet of an .xlsx file; every cell arrives as text, like the CSV import."),
         CommandSpec::new("tools.importJson", "Import JSON", "Tools", import_json)
             .params(r#"{"path":"~/data/users.json","table":"users","create_table":true}"#),
         CommandSpec::new("tools.importSql", "Run a .sql file", "Tools", import_sql)
             .params(r#"{"path":"~/data/seed.sql"}"#),
+        CommandSpec::new("tools.exportExcel", "Export a query result to Excel", "Tools", export_excel)
+            .params(r#"{"sql":"select * from users","path":"~/exports/users.xlsx"}"#),
         CommandSpec::new("tools.exportQuery", "Export a query result", "Tools", export_query)
             .params(r#"{"sql":"select * from users","path":"~/exports/users.csv","format":"csv"}"#),
         CommandSpec::new("tools.queryBuilder", "Query builder", "Tools", query_builder)
@@ -411,6 +416,47 @@ fn import_csv(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     out["path"] = json!(path.to_string_lossy());
     out["format"] = json!("csv");
     Ok(out)
+}
+
+fn import_excel(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
+    let rows = nook_drivers::xlsx::read_rows(&path)?;
+    let reference = TableRef::parse(&p.str_arg("table")?);
+    let header = p.bool_opt("header", true);
+    let create_table = p.bool_opt("create_table", true);
+    let mut out = load_rows(session, p, &reference, rows, header, create_table)?;
+    out["path"] = json!(path.to_string_lossy());
+    out["format"] = json!("xlsx");
+    Ok(out)
+}
+
+fn export_excel(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    let sql = p
+        .str_opt("sql")
+        .ok_or_else(|| Error::config("pass \"sql\""))?;
+    let result = run_sql(session, index, &sql, None)?;
+    let mut rows: Vec<Vec<String>> = vec![result.columns.clone()];
+    for row in &result.rows {
+        rows.push(row.iter().map(|v| v.display()).collect());
+    }
+    let path = crate::cmd::grid::expand(
+        &p.str_opt("path").unwrap_or_else(|| {
+            format!("exports/query-{}.xlsx", crate::jobs::now())
+        }),
+        &session.home,
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::io(format!("create {}: {e}", parent.display())))?;
+    }
+    nook_drivers::xlsx::write_rows(&path, &rows)?;
+    session.log(Level::Success, format!("exported to {}", path.display()));
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "rows": result.row_count(),
+        "format": "xlsx",
+    }))
 }
 
 fn import_json(session: &mut Session, p: &Params) -> Result<serde_json::Value> {

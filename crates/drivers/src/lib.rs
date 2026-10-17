@@ -13,6 +13,7 @@ pub mod mysql;
 pub mod pg;
 pub mod sqlite;
 pub mod transfer;
+pub mod xlsx;
 
 use nook_core::{quote_qualified, ConnectionConfig, Dialect, DriverKind, Error, Result};
 use nook_model::{Catalog, DbProcess, DbUser, ResultSet, ServerInfo};
