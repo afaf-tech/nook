@@ -12,7 +12,7 @@
 | Commands | 154 registered ids | measured (`cargo xtask parity`) |
 | Engines with a live driver | **3** (SQLite, PostgreSQL, MySQL/MariaDB) | measured: catalogs, queries, edits, transfer, sync and backup run against each |
 | Engines catalogued but not implemented | 4 (SQL Server, Oracle, MongoDB, Redis) | named in the catalog, no driver |
-| Tests | 425 | measured (`cargo test --workspace`) |
+| Tests | 433 | measured (`cargo test --workspace`) |
 | Code | ~44,400 lines of Rust in 7 crates, 2 apps and xtask | measured (`wc -l` over every `.rs`) |
 | Surfaces over the same registry | 5 (ribbon/menus, command palette, CLI, control channel, MCP) | measured |
 
@@ -48,7 +48,7 @@ against a live server on this machine (see the gaps).
 | M2 Drivers | done | SQLite, PostgreSQL and MySQL: catalog introspection, typed results, server info, monitor, privileges, DDL, table rebuild |
 | M3 Engine | done | `Session`, 154 commands, the Navicat catalog, parity measurement, jobs, data generation, reports, profiles, keychain, SSH tunnel |
 | M4 Surfaces | done | desktop app, CLI, MCP server, JSON control channel |
-| M5 Verification | in progress | 425 tests; live runs against SQLite, PostgreSQL and MySQL 8.4 (portable server; the Homebrew binary is ICU-broken and was left alone) |
+| M5 Verification | in progress | 433 tests; live runs against SQLite, PostgreSQL and MySQL 8.4 (portable server; the Homebrew binary is ICU-broken and was left alone) |
 | M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): statement cancel, explain plans |
 
 ## Progress log

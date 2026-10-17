@@ -142,7 +142,7 @@ process table. This is the pre-existing path for SSH and database passwords too,
 
 ## Testing
 
-- 425 `#[test]` functions across the workspace, 113 of them in the UI crate: quoting and literals,
+- 433 `#[test]` functions across the workspace, 113 of them in the UI crate: quoting and literals,
   catalog types, DDL per dialect, structure diff, ER layout, statement splitting, edit planning, data
   generation determinism, report shaping, schedules, profiles, MCP JSON-RPC, the AI wire formats and
   prompt building, and every command against junk parameters
