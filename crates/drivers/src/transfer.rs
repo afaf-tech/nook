@@ -949,6 +949,8 @@ mod tests {
         assert_eq!(dry.applied, 0);
         assert_eq!(dry.inserts(), 1);
         assert_eq!(dry.deletes(), 1);
+        // The label comes from what the caller asked for, not from `applied == 0`.
+        assert!(dry.summary().contains("(dry run)"));
         let applied = sync_data(
             &mut src,
             &mut dst,
@@ -961,6 +963,22 @@ mod tests {
         )
         .expect("apply");
         assert_eq!(applied.applied, 2);
+        assert!(!applied.summary().contains("(dry run)"));
+        // An apply over already-in-sync tables has zero applied statements and must still
+        // not be mislabeled — the exact case the live battery caught.
+        let in_sync = sync_data(
+            &mut src,
+            &mut dst,
+            &catalog,
+            &["t".to_string()],
+            None,
+            100,
+            false,
+            &mut |_| {},
+        )
+        .expect("apply over in-sync tables");
+        assert_eq!(in_sync.applied, 0);
+        assert!(!in_sync.summary().contains("(dry run)"));
         let rows = dst
             .run("SELECT id FROM t ORDER BY id", 10)
             .expect("read back");

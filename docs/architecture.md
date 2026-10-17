@@ -142,7 +142,7 @@ process table. This is the pre-existing path for SSH and database passwords too,
 
 ## Testing
 
-- 359 `#[test]` functions across the workspace, 113 of them in the UI crate: quoting and literals,
+- 415 `#[test]` functions across the workspace, 113 of them in the UI crate: quoting and literals,
   catalog types, DDL per dialect, structure diff, ER layout, statement splitting, edit planning, data
   generation determinism, report shaping, schedules, profiles, MCP JSON-RPC, the AI wire formats and
   prompt building, and every command against junk parameters
@@ -152,7 +152,9 @@ process table. This is the pre-existing path for SSH and database passwords too,
   - PostgreSQL 17: `nook-cli tables|sql|describe|ddl|monitor|users`, transfer SQLite → PostgreSQL,
     `sync-data` dry run and apply, `diff-structure` and `--apply`, `dump` (pg_dump) and `restore` (psql)
     into a fresh database.
-  - MySQL/MariaDB: the same script, once a server is reachable.
+  - MySQL/MariaDB: the same battery, run against a portable `mysql-8.4.3` tarball on port 3307
+    (the Homebrew `mysqld` is ICU-broken and was left alone): live-check, transfer SQLite → MySQL,
+    `sync-data` dry run and apply, `diff-structure`.
 - `cargo xtask ci` runs fmt, clippy with warnings denied, the workspace tests, the layering check and
   the parity freshness check.
 - UI verification: `cargo run -p nook -- --shot /tmp/shot.png` renders a frame and writes a PNG.
