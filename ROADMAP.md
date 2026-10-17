@@ -48,8 +48,8 @@ against a live server on this machine (see the gaps).
 | M2 Drivers | done | SQLite, PostgreSQL and MySQL: catalog introspection, typed results, server info, monitor, privileges, DDL, table rebuild |
 | M3 Engine | done | `Session`, 146 commands, the Navicat catalog, parity measurement, jobs, data generation, reports, profiles, keychain, SSH tunnel |
 | M4 Surfaces | done | desktop app, CLI, MCP server, JSON control channel |
-| M5 Verification | in progress | 359 tests; live runs against SQLite and PostgreSQL; MySQL pending a working server on this machine |
-| M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): MySQL verification, Excel import, trigger editors, notification hooks |
+| M5 Verification | in progress | 361 tests; live runs against SQLite, PostgreSQL and MySQL 8.4 (portable server; the Homebrew binary is ICU-broken and was left alone) |
+| M6 Breadth | next | the top of [`docs/gaps.md`](docs/gaps.md): Excel import, trigger editors, notification hooks |
 
 ## Progress log
 

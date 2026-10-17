@@ -3,30 +3,21 @@
 The ranked work list, most valuable first. Every entry names the catalog id it would close, so the
 parity number moves when it lands.
 
-## 1. Verify MySQL against a live server
+## 1. ~~Verify MySQL against a live server~~ — done
 
-The driver is written and unit-tested, but no MySQL server was reachable on this machine: the local
-Homebrew `mysql` (8.3.0_1) links `icu4c.74`, and Homebrew no longer ships that version (it offers 75,
-76 and 78), so `mysqld` aborts before it starts:
+The local Homebrew `mysqld` was unusable (8.3.0_1 links `icu4c.74`, only 78 ships — dyld abort before
+start), and reinstalling it would replace the user's server, so it was left untouched. Instead a
+portable `mysql-8.4.3-macos14-arm64` tarball was extracted to `/private/tmp` and run on port 3307
+with its own datadir. Against it the battery ran end to end: `live-check.sh` (connection, catalog,
+monitor, users, grid edits, dump via `mysqldump`, restore, diagram, chart), `transfer` (`2 rows,
+0 failed`), `sync-data --apply` (`1 applied`, verified by reading the rows back), and
+`diff-structure` (`0 change(s)`).
 
-```
-dyld: Library not loaded: /opt/homebrew/opt/icu4c/lib/libicuuc.74.dylib
-Referenced from: /opt/homebrew/Cellar/mysql/8.3.0_1/bin/mysqld
-```
-
-Reinstalling MySQL would replace the user's server, so it was left alone. Everything
-MySQL-specific — the `information_schema` joins, `SHOW CREATE TABLE`, `USE`, `KILL`, the boolean and
-date shapes, `mysql.user` — is therefore unexercised end to end.
-
-*Fix:* any reachable MySQL 8 or MariaDB (a container, a remote server, or a repaired local install),
-then run the battery:
-
-```sh
-scripts/live-check.sh mysql://root@127.0.0.1/shop
-nook-cli transfer --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage --tables '*'
-nook-cli sync-data --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage --apply
-nook-cli diff-structure --from sqlite:./shop.db --to mysql://root@127.0.0.1/stage
-```
+The battery surfaced two bugs, both fixed test-first: cross-driver structure diffs matched schemas by
+name (SQLite `main` never equals the MySQL database name) and emitted a spurious add+drop pair; and
+`SyncReport` labeled any run with zero applied statements "(dry run)", including applied syncs over
+already-in-sync tables. Both carry regression tests; evidence table in
+`.agile/nook/verification-2026-10-16-173802-nook.md`.
 
 ## 2. ~~Form view for one record~~ — done
 
