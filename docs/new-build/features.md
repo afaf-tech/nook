@@ -211,8 +211,8 @@ means something else:
 Two consequences for the parity gate:
 
 1. Those ids appear in the report's `extra` list ("commands beyond the catalog") — `ParityReport::extra`
-   already counts them (`crates/engine/src/parity.rs:25`), and `summary()` prints the number. What does not
-   exist is a *named list* of them in `docs/parity-checklist.md`; phase 2 adds that section so the extras are
-   auditable rather than a number.
+   already counts them (`crates/engine/src/parity.rs:30`), `summary()` prints the number, and the
+   markdown section `## Beyond the catalog` (`parity.rs:106`) names each one in
+   `docs/parity-checklist.md`. No further work is needed to make the extras auditable.
 2. The Navicat ids this plan *does* close are named per phase, so the coverage percentage moves for a
    reason a reader can check. The floor in `parity.rs` rises at the end of each phase that closes one.
