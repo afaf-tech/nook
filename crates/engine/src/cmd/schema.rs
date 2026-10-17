@@ -379,7 +379,41 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
             &table,
             &table.columns.clone(),
         )?;
-        return execute_ddl(session, index, &script);
+        // The plan's first and last statements are pragmas — SQLite ignores them inside a
+        // transaction — so they run outside; every step in between is atomic. A failure after
+        // DROP TABLE would otherwise leave the rows stranded in {table}_dc_new and the session
+        // without its pragma restore.
+        let (pre, body, post): (Vec<_>, Vec<_>, Vec<_>) = {
+            let mut pre = Vec::new();
+            let mut body = Vec::new();
+            let mut post = Vec::new();
+            for sql in script.into_iter() {
+                if sql.trim_start().to_ascii_lowercase().starts_with("pragma") {
+                    if body.is_empty() { pre.push(sql); } else { post.push(sql); }
+                } else {
+                    body.push(sql);
+                }
+            }
+            (pre, body, post)
+        };
+        for sql in &pre {
+            run_sql(session, index, sql, Some(1))?;
+        }
+        let outcome = (|| -> Result<()> {
+            session.driver_for(index)?.begin()?;
+            for sql in &body {
+                if let Err(e) = run_sql(session, index, sql, Some(1)) {
+                    let _ = session.driver_for(index)?.rollback();
+                    return Err(e);
+                }
+            }
+            session.driver_for(index)?.commit()
+        })();
+        for sql in &post {
+            run_sql(session, index, sql, Some(1))?;
+        }
+        outcome?;
+        return execute_ddl(session, index, &[]);
     }
     let sql = ddl::add_primary_key(
         reference.schema.as_deref(),
@@ -1016,7 +1050,10 @@ mod tests {
         )
         .expect("params");
         let out = set_primary_key(&mut session, &p).expect("the key is added");
-        assert!(out["statements"].as_array().expect("statements").len() > 1);
+        assert!(
+            out["statements"].as_array().expect("statements").is_empty(),
+            "the plan ran inside the transaction, not through the plain executor"
+        );
         let table = session.conns[0]
             .catalog
             .as_ref()
@@ -1034,5 +1071,121 @@ mod tests {
             "the rebuilt table declares its key: {}",
             rs.rows[0][0].as_text()
         );
+    }
+
+    /// A failure mid-plan must not strand the table: everything after BEGIN rolls back, the
+    /// original table keeps its rows, and the pragma restore still runs. The plan's pragma
+    /// statements sit outside the transaction (SQLite ignores them inside one).
+    #[test]
+    fn a_failed_rebuild_leaves_the_table_untouched() {
+        let mut session = Session::new();
+        let cfg = nook_core::ConnectionConfig::new("mem", nook_core::DriverKind::Sqlite);
+        let mut driver = nook_drivers::sqlite::Sqlite::memory().expect("memory db");
+        nook_drivers::Driver::run_script(
+            &mut driver,
+            "CREATE TABLE users (id INTEGER, email TEXT);\
+             INSERT INTO users (id, email) VALUES (1, 'a@b.c');",
+            10,
+        )
+        .expect("setup");
+        let mut conn = crate::Conn::new(cfg);
+        conn.driver = Some(Box::new(driver));
+        conn.catalog = Some(
+            conn.driver
+                .as_mut()
+                .expect("driver installed")
+                .catalog()
+                .expect("catalog"),
+        );
+        session.conns.push(conn);
+        let p = Params::from_json(
+            json!({"table": "users", "columns": ["id"], "conn": "mem"}),
+        )
+        .expect("params");
+        // Force a failure at the INSERT step — deterministically. Duplicated `id` values make
+        // `INSERT … SELECT` fail with a UNIQUE violation once `id` is the key of the scratch
+        // table. Without a transaction the scratch table would be stranded; with one, the plan
+        // rolls back and the original table keeps both rows.
+        nook_drivers::Driver::run_script(
+            session.driver_for(0).expect("driver"),
+            "INSERT INTO users (id, email) VALUES (2, 'd@e.f');",
+            1,
+        )
+        .expect("second row");
+        nook_drivers::Driver::run_script(
+            session.driver_for(0).expect("driver"),
+            "UPDATE users SET id = 1 WHERE email = 'd@e.f';",
+            1,
+        )
+        .expect("duplicate made");
+        let e = set_primary_key(&mut session, &p).expect_err("the plan fails on the INSERT");
+        assert!(
+            e.message().contains("UNIQUE"),
+            "the failure comes from the plan, not the harness: {e}"
+        );
+        // The original table is intact: still named `users`, still holding its row.
+        let driver = session.driver_for(0).expect("driver");
+        let rs = driver
+            .run("SELECT count(*) FROM users", 1)
+            .expect("the original table survived");
+        assert_eq!(rs.rows[0][0].as_text(), "2", "both rows are still there");
+        // The pragma restore ran even though the plan failed.
+        let rs = driver
+            .run("PRAGMA foreign_keys", 1)
+            .expect("pragma read");
+        assert_eq!(rs.rows[0][0].as_text(), "0", "enforcement is back where it started");
+        // No scratch table left behind by the rolled-back plan.
+        let rs = driver
+            .run("SELECT count(*) FROM sqlite_master WHERE name LIKE 'users_dc_new%'", 1)
+            .expect("scratch gone");
+        assert_eq!(rs.rows[0][0].as_text(), "0");
+    }
+
+    /// Rebuilding a parent with FK enforcement ON must not cascade child rows away: the plan's
+    /// `PRAGMA foreign_keys = OFF` runs before BEGIN (the pragma is a no-op inside one), so the
+    /// implicit DELETE behind DROP TABLE cannot fire ON DELETE CASCADE.
+    #[test]
+    fn rebuilding_a_parent_keeps_child_rows_with_enforcement_on() {
+        let mut session = Session::new();
+        let cfg = nook_core::ConnectionConfig::new("mem", nook_core::DriverKind::Sqlite);
+        let mut driver = nook_drivers::sqlite::Sqlite::memory().expect("memory db");
+        nook_drivers::Driver::run_script(
+            &mut driver,
+            "CREATE TABLE users (id INTEGER, email TEXT);\
+             CREATE TABLE posts (id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES users(id) ON DELETE CASCADE);\
+             INSERT INTO users (id, email) VALUES (1, 'a@b.c');\
+             INSERT INTO posts (id, author_id) VALUES (1, 1);",
+            10,
+        )
+        .expect("setup");
+        nook_drivers::Driver::run(&mut driver, "PRAGMA foreign_keys = ON", 1)
+            .expect("enforce");
+        let mut conn = crate::Conn::new(cfg);
+        conn.driver = Some(Box::new(driver));
+        conn.catalog = Some(
+            conn.driver
+                .as_mut()
+                .expect("driver installed")
+                .catalog()
+                .expect("catalog"),
+        );
+        session.conns.push(conn);
+        let p = Params::from_json(
+            json!({"table": "users", "columns": ["id"], "conn": "mem"}),
+        )
+        .expect("params");
+        set_primary_key(&mut session, &p).expect("the key is added");
+        let driver = session.driver_for(0).expect("driver");
+        let rs = driver
+            .run("SELECT count(*) FROM posts", 1)
+            .expect("child rows read");
+        assert_eq!(
+            rs.rows[0][0].as_text(),
+            "1",
+            "the cascade must not have deleted the child row during the rebuild"
+        );
+        // Enforcement is restored to ON — the session's own choice, not the plan's.
+        let rs = driver.run("PRAGMA foreign_keys", 1).expect("pragma read");
+        assert_eq!(rs.rows[0][0].as_text(), "1");
     }
 }

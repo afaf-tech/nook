@@ -391,6 +391,11 @@ pub fn split_script(sql: &str) -> Vec<String> {
                 current.push(c);
             }
             _ => {
+                // `END)` / `END,` / `END…` — the word is followed by punctuation, and this arm
+                // must still pop the depth before the word is dropped.
+                if word.eq_ignore_ascii_case("end") && begin_depth > 0 {
+                    begin_depth -= 1;
+                }
                 word.clear();
                 current.push(c);
             }
@@ -530,6 +535,20 @@ mod tests {
             parts[0].contains("WHEN NEW.id > 1") && parts[0].trim_end().ends_with("END;"),
             "the trigger body stays one statement: {parts:?}"
         );
+    }
+
+    /// `END` followed by punctuation — `END)` from a CASE in a parenthesised expression, or
+    /// `END,` — must still pop the depth: the `_` arm sees the word and must not drop it.
+    #[test]
+    fn end_before_punctuation_still_closes_its_block() {
+        let sql = "SELECT 0;\nCREATE TRIGGER t AFTER UPDATE ON posts BEGIN UPDATE posts SET total = (CASE WHEN NEW.id > 1 THEN 1 ELSE 2 END) + 1; END;\nSELECT 1;";
+        let parts = split_script(sql);
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(
+            parts[1].contains("END) + 1; END;"),
+            "the body with END) stays one statement: {parts:?}"
+        );
+        assert_eq!(parts[2], "SELECT 1;", "statements after the trigger split normally");
     }
 
     #[test]
