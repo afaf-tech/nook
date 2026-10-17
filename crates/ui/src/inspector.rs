@@ -912,6 +912,7 @@ fn preview(ui: &mut egui::Ui, inspector: &mut Inspector, tokens: &Tokens) {
             id: egui::Id::new("inspector-preview"),
             empty: "This object has no rows.",
             gutter: false,
+            row_menu: None,
         },
         preview_state,
     );

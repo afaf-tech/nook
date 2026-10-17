@@ -65,6 +65,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("schema.sequenceEditor", "Sequence editor", "Design", sequence_editor)
             .params(r#"{"action":"create","name":"user_ids","start":1,"increment":1}"#)
             .help("list/create/drop sequences via \"action\"; PostgreSQL only."),
+        CommandSpec::new("schema.setPrimaryKey", "Set primary key", "Design", set_primary_key)
+            .params(r#"{"table":"public.users","columns":["id"]}"#)
+            .help("Add the table's primary key with ALTER TABLE; refuses a table that already has one; SQLite refuses (needs a rebuild)."),
     ]
 }
 
@@ -336,6 +339,38 @@ fn add_column(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         &column,
         dialect,
     );
+    execute_ddl(session, index, &[sql])
+}
+
+fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let columns = {
+        let list = p.list("columns");
+        if list.is_empty() {
+            return Err(Error::config("pass \"columns\" — the key columns to add"));
+        }
+        list
+    };
+    let (index, reference, table) = table_from_params(session, p)?;
+    let existing = table.primary_key();
+    if !existing.is_empty() {
+        return Err(Error::config(format!(
+            "{} already has a primary key ({})",
+            reference.key(),
+            existing.join(", ")
+        )));
+    }
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .ok_or_else(|| Error::config("the connection is not open"))?;
+    let sql = ddl::add_primary_key(
+        reference.schema.as_deref(),
+        &reference.table,
+        &columns,
+        dialect,
+    )?;
     execute_ddl(session, index, &[sql])
 }
 
@@ -927,5 +962,13 @@ mod tests {
         assert!(column.nullable);
         let p = Params::from_json(json!({})).expect("params");
         assert!(column_from_params(&p).is_err());
+    }
+
+    #[test]
+    fn set_primary_key_needs_columns() {
+        let mut session = Session::new();
+        let p = Params::from_json(json!({"table": "users"})).expect("params");
+        let e = set_primary_key(&mut session, &p).expect_err("no columns");
+        assert!(e.message().contains("columns"), "{e}");
     }
 }

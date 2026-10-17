@@ -269,6 +269,12 @@ pub fn load_grid(session: &mut Session, tab_index: usize) -> Result<()> {
         .get(tab_index)
         .and_then(|t| t.conn)
         .ok_or_else(|| Error::config("this tab has no connection"))?;
+    // Re-bind the table shape first: the key and columns come from the catalog, which a schema edit
+    // (`schema.setPrimaryKey`, `schema.addColumn`, …) just changed behind this tab. Without the
+    // re-bind a grid that became editable would stay read-only until the tab was reopened.
+    if let Some(reference) = session.tabs[tab_index].grid.table.clone() {
+        bind_grid_table(session, tab_index, reference)?;
+    }
     let (sql, table) = grid_select(
         session
             .tabs

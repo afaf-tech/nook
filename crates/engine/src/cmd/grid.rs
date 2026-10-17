@@ -1071,6 +1071,41 @@ mod tests {
     }
 
     #[test]
+    fn load_grid_rebinds_the_key_after_set_primary_key() {
+        // The schema path of bug 2: the catalog gains a key, then a reload must pick it up —
+        // otherwise the grid the "Open design table" banner routes the user to fix stays read-only.
+        let (mut session, tab) = grid_tab();
+        // A table without a key, in both the catalog and the tab.
+        let table = session.conns[0]
+            .catalog
+            .as_mut()
+            .and_then(|c| c.schemas.get_mut(0))
+            .and_then(|s| s.tables.first_mut())
+            .expect("the fixture holds a table");
+        table.columns[0].primary_key = false;
+        session.tabs[tab].grid.primary_key.clear();
+        // The catalog edit that `schema.setPrimaryKey` performs through refresh_catalog.
+        session.conns[0].catalog.as_mut().unwrap().schemas[0].tables[0].columns[0]
+            .primary_key = true;
+        // A real in-memory SQLite behind the connection: the reload actually runs a page SELECT.
+        let mut db = nook_drivers::sqlite::Sqlite::memory().expect("memory db");
+        nook_drivers::Driver::run_script(
+            &mut db,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);\
+             INSERT INTO users (id, email) VALUES (1, 'a@b.c'), (2, 'd@e.f');",
+            10,
+        )
+        .expect("setup");
+        session.conns[0].driver = Some(Box::new(db));
+        crate::cmd::load_grid(&mut session, tab).expect("reload");
+        assert_eq!(session.tabs[tab].grid.primary_key, vec!["id".to_string()]);
+        assert!(
+            session.tabs[tab].grid.editable(),
+            "the grid must be editable again"
+        );
+    }
+
+    #[test]
     fn revert_and_pending_report_the_buffer() {
         let (mut session, tab) = grid_tab();
         let p =

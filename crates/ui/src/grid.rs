@@ -377,11 +377,27 @@ pub fn show(
             tab.grid.table.is_some(),
             tab.grid.columns.len(),
         );
+        // The no-primary-key case has a way out: the design tab, where the key can be set.
+        let keyless = tab.grid.table.is_some()
+            && error.is_none()
+            && !tab.grid.columns.is_empty()
+            && tab.grid.primary_key.is_empty();
+        let mut open_design = false;
         design::ro_banner(ui, tokens, title, text, |ui| {
+            if keyless && design::ghost_button(ui, tokens, "Open design table", true).clicked() {
+                open_design = true;
+            }
             if design::ghost_button(ui, tokens, "Reload", true).clicked() {
                 reload = true;
             }
         });
+        if open_design {
+            if let Some(reference) = tab.grid.table.clone() {
+                if let Some(conn_index) = tab.conn {
+                    crate::tree::open_design_tab(session, conn_index, reference);
+                }
+            }
+        }
     }
 
     // The table itself.
@@ -437,7 +453,7 @@ pub fn show(
     if !editable {
         state.table(tab_index).stop_edit();
     }
-    let view = TableView {
+    let mut view = TableView {
         columns: &specs,
         rows: &rows,
         pending: dirty_cells.clone(),
@@ -450,12 +466,13 @@ pub fn show(
         height: available,
         row_h: design::row_h(session.settings.density),
         empty_text: fallback.as_str(),
+        row_menu: None,
     };
     ui.add_space(2.0);
     let event = crate::table::show(
         ui,
         tokens,
-        &view,
+        &mut view,
         state.table(tab_index),
         egui::Id::new(("grid", tab_index)),
     );
@@ -1181,7 +1198,7 @@ mod tests {
                     marks.push(("toolbar_to_fchips", fchips.top() - toolbar.bottom(), 0.0));
 
                     ui.add_space(2.0);
-                    let view = TableView {
+                    let mut view = TableView {
                         columns: &columns,
                         rows: &rows,
                         pending: Vec::new(),
@@ -1195,13 +1212,14 @@ mod tests {
                         height: 0.0,
                         row_h: design::row_h(nook_engine::Density::Compact),
                         empty_text: "head-only",
+                        row_menu: None,
                     };
                     let mut state = crate::table::TableState::default();
                     let before = ui.cursor().top();
                     let _ = crate::table::show(
                         ui,
                         &tokens,
-                        &view,
+                        &mut view,
                         &mut state,
                         egui::Id::new("head-only"),
                     );

@@ -689,7 +689,7 @@ fn grid(
             )
         })
         .collect();
-    let view = TableView {
+    let mut view = TableView {
         columns: &columns,
         rows: &result.rows,
         pending: Vec::new(),
@@ -702,9 +702,10 @@ fn grid(
         height,
         row_h,
         empty_text: "no rows",
+        row_menu: None,
     };
     let before = ui.cursor();
-    if let TableEvent::Select(row, column) = table::show(ui, tokens, &view, table, id) {
+    if let TableEvent::Select(row, column) = table::show(ui, tokens, &mut view, table, id) {
         table.selected = Some((row, column));
     }
     let after = ui.cursor().top();

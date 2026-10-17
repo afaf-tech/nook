@@ -2065,19 +2065,7 @@ impl NookApp {
                 tree::open_data_tab(&mut self.session, index, reference);
             }
             TreeAction::OpenDesign(index, reference) => {
-                let table = self
-                    .session
-                    .conns
-                    .get(index)
-                    .and_then(|c| c.catalog.as_ref())
-                    .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
-                    .cloned();
-                let title = reference.key();
-                let tab = self.session.add_tab(TabKind::Design, title, Some(index));
-                if let Some(tab_ref) = self.session.tabs.get_mut(tab) {
-                    tab_ref.table = table;
-                    tab_ref.grid.table = Some(reference);
-                }
+                tree::open_design_tab(&mut self.session, index, reference);
             }
             TreeAction::OpenDdl(index, reference) => {
                 let id = self.session.conns[index].cfg.id.clone();

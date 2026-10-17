@@ -322,6 +322,33 @@ pub fn set_default(
     })
 }
 
+/// Give a keyless table its primary key. SQLite cannot ALTER a key in place — it needs the full
+/// table rebuild, which the designer does not drive yet — so it refuses with the reason.
+pub fn add_primary_key(
+    schema: Option<&str>,
+    table: &str,
+    columns: &[String],
+    dialect: Dialect,
+) -> Result<String> {
+    match dialect {
+        Dialect::Sqlite => Err(Error::unsupported(
+            "SQLite cannot add a primary key in place; rebuild the table with the columns marked as keys",
+        )),
+        _ => {
+            let cols = columns
+                .iter()
+                .map(|c| quote_ident(c, dialect))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!(
+                "ALTER TABLE {} ADD PRIMARY KEY ({});",
+                quote_qualified(schema, table, dialect),
+                cols
+            ))
+        }
+    }
+}
+
 pub fn drop_index(schema: Option<&str>, table: &str, index: &str, dialect: Dialect) -> String {
     match dialect {
         Dialect::MySql => format!(
@@ -493,6 +520,26 @@ mod tests {
         t.columns.push(a);
         t.columns.push(b);
         assert!(create_table(&t, Dialect::Postgres).contains("PRIMARY KEY (\"a\", \"b\")"));
+    }
+
+    #[test]
+    fn add_primary_key_per_dialect() {
+        assert_eq!(
+            add_primary_key(None, "users", &["id".into()], Dialect::Postgres).expect("pg"),
+            "ALTER TABLE \"users\" ADD PRIMARY KEY (\"id\");"
+        );
+        assert_eq!(
+            add_primary_key(Some("public"), "users", &["id".into()], Dialect::MySql)
+                .expect("mysql"),
+            "ALTER TABLE `public`.`users` ADD PRIMARY KEY (`id`);"
+        );
+        assert_eq!(
+            add_primary_key(None, "m", &["a".into(), "b".into()], Dialect::Postgres).expect("pg"),
+            "ALTER TABLE \"m\" ADD PRIMARY KEY (\"a\", \"b\");"
+        );
+        let err = add_primary_key(None, "t", &["id".into()], Dialect::Sqlite)
+            .expect_err("sqlite cannot alter a key in place");
+        assert!(err.to_string().contains("rebuild"));
     }
 
     #[test]

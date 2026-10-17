@@ -81,6 +81,9 @@ pub enum TableEvent {
     Sort(String),
 }
 
+/// Right-click handler for one table row: the row index in, menu items out.
+pub type RowMenu<'a> = &'a mut dyn FnMut(&mut egui::Ui, usize);
+
 pub struct TableView<'a> {
     // `editable` is the widget's read-only switch: false for the inspector's preview, for the results
     // of a statement, and for a grid whose table the engine would refuse to edit (no primary key).
@@ -104,6 +107,9 @@ pub struct TableView<'a> {
     /// Row height: the density setting through `theme::row_h`.
     pub row_h: f32,
     pub empty_text: &'a str,
+    /// Right-click menu for a row, as `Some(callback)` — called with the row index. `None` for the
+    /// default of no menu; the design tab's column list uses it to open the per-column editors.
+    pub row_menu: Option<RowMenu<'a>>,
 }
 
 fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
@@ -214,7 +220,7 @@ fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
 pub fn show(
     ui: &mut Ui,
     tokens: &Tokens,
-    view: &TableView<'_>,
+    view: &mut TableView<'_>,
     state: &mut TableState,
     id: egui::Id,
 ) -> TableEvent {
@@ -459,6 +465,9 @@ pub fn show(
                                 if view.editable && response.double_clicked() {
                                     event = TableEvent::BeginEdit(row_index, column_index);
                                 }
+                                if let Some(menu) = view.row_menu.as_deref_mut() {
+                                    response.context_menu(|ui| menu(ui, row_index));
+                                }
                             }
 
                             ui.painter().rect_stroke(
@@ -639,13 +648,14 @@ mod tests {
             height,
             row_h: design::row_h(nook_engine::Density::Compact),
             empty_text: "no rows",
+            row_menu: None,
         }
     }
 
     /// Double-click the cell at `(row, column)` and report the event the widget produced. The first
     /// frame only lays the table out, so the second one can be pointed at the cell's real rect.
     fn double_click_cell(
-        view: &TableView<'_>,
+        view: &mut TableView<'_>,
         id: egui::Id,
         row: usize,
         column: usize,
@@ -686,7 +696,7 @@ mod tests {
         ];
         let rows = vec![vec![Value::Int(1), Value::text("a@b.c")]];
         let id = egui::Id::new("read-only-table");
-        let event = double_click_cell(&view(&columns, &rows, false, 120.0), id, 0, 1);
+        let event = double_click_cell(&mut view(&columns, &rows, false, 120.0), id, 0, 1);
         assert_ne!(
             event,
             TableEvent::BeginEdit(0, 1),
@@ -708,8 +718,60 @@ mod tests {
         ];
         let rows = vec![vec![Value::Int(1), Value::text("a@b.c")]];
         let id = egui::Id::new("editable-table");
-        let event = double_click_cell(&view(&columns, &rows, true, 120.0), id, 0, 1);
+        let event = double_click_cell(&mut view(&columns, &rows, true, 120.0), id, 0, 1);
         assert_eq!(event, TableEvent::BeginEdit(0, 1));
+    }
+
+    /// Right-clicking a row of a view that carries a `row_menu` must reach the callback with that
+    /// row — the design tab's column menu is the only caller, and a wrong index there would edit
+    /// the wrong column.
+    #[test]
+    fn a_secondary_click_reaches_the_row_menu_with_the_row() {
+        let columns = [
+            TableColumn::new("id", "INTEGER").pk(true),
+            TableColumn::new("email", "TEXT"),
+        ];
+        let rows = vec![vec![Value::Int(1), Value::text("a@b.c")]];
+        let mut picked: Option<usize> = None;
+        let mut menu = |ui: &mut egui::Ui, row: usize| {
+            picked = Some(row);
+            ui.button("Rename column");
+        };
+        let mut table_view = view(&columns, &rows, false, 120.0);
+        table_view.row_menu = Some(&mut menu);
+        let id = egui::Id::new("menu-table");
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut state = TableState::default();
+        let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+            let _ = show(ui, &tokens, &mut table_view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        let cell = ctx
+            .read_response(id.with(("cell", 0, 1)))
+            .expect("the cell registered its rect in the first frame")
+            .rect;
+        let events = vec![
+            egui::Event::PointerMoved(cell.center()),
+            egui::Event::PointerButton {
+                pos: cell.center(),
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: cell.center(),
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        let mut second = ctx.run_ui(screen(events), |ui| {
+            let _ = show(ui, &tokens, &mut table_view, &mut state, id);
+        });
+        second.textures_delta.clear();
+        assert_eq!(picked, Some(0), "the menu opens for the right-clicked row");
     }
 
     /// An empty page asks for the head alone, and that head must still be laid out at its full width
@@ -744,10 +806,11 @@ mod tests {
                 // must be the head's, not the default spacing of a wrapped row.
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 let before = ui.cursor().top();
+                let mut inline = view(&columns, &rows, true, 0.0);
                 let event = show(
                     ui,
                     &tokens,
-                    &view(&columns, &rows, true, 0.0),
+                    &mut inline,
                     &mut state,
                     id,
                 );

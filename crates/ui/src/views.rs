@@ -51,6 +51,9 @@ pub(crate) struct List<'a> {
     pub empty: &'a str,
     /// The row-number column: the design gives it to the data lists and not to the inspector.
     pub(crate) gutter: bool,
+    /// Right-click menu for a row, forwarded to the widget: the design tab's column list uses it to
+    /// offer the per-column editors. `None` keeps the list plain read-only, as other callers want.
+    pub(crate) row_menu: Option<crate::table::RowMenu<'a>>,
 }
 
 /// Read-only table: the shape every list in this file uses.
@@ -60,7 +63,7 @@ pub(crate) fn list(
     spec: List<'_>,
     state: &mut table::TableState,
 ) -> table::TableEvent {
-    let view = TableView {
+    let mut view = TableView {
         columns: spec.columns,
         rows: spec.rows,
         pending: Vec::new(),
@@ -76,8 +79,9 @@ pub(crate) fn list(
         // `list` when an explore register needs comfortable rows.
         row_h: design::ROW_H,
         empty_text: spec.empty,
+        row_menu: spec.row_menu,
     };
-    table::show(ui, tokens, &view, state, spec.id)
+    table::show(ui, tokens, &mut view, state, spec.id)
 }
 
 /// The table the design tab draws: the catalog's copy, not the tab's. The tab's copy is taken when
@@ -128,12 +132,14 @@ pub fn design(
     // be cut in half by it. The buttons used to send no table at all, so every one of them opened a
     // dialog whose only possible Run failed with "no such table: ".
     let mut prefill: Vec<(&str, &str)> = Vec::new();
-    if let Some(conn) = session.tabs[tab_index]
+    // Owned: the column menu below is a closure holding `prefill` for the whole body, so a borrowed
+    // `&session.conns[...]` here would freeze `session` for every later `session.run` call.
+    let conn_id = session.tabs[tab_index]
         .conn
         .and_then(|index| session.conns.get(index))
-        .map(|c| c.cfg.id.as_str())
-    {
-        prefill.push(("conn", conn));
+        .map(|c| c.cfg.id.clone());
+    if let Some(conn) = &conn_id {
+        prefill.push(("conn", conn.as_str()));
     }
     let table_key = table_def.key();
     prefill.push(("table", &table_key));
@@ -186,6 +192,12 @@ pub fn design(
                 }
                 if design::ghost_button(ui, tokens, "+ Index", true).clicked() {
                     state.open_command_with("schema.createIndex", &prefill);
+                }
+                // A table without a key cannot be edited in the grid; this is the way out.
+                if table_def.primary_key().is_empty()
+                    && design::primary_button(ui, tokens, "Set primary key", true).clicked()
+                {
+                    state.open_command_with("schema.setPrimaryKey", &prefill);
                 }
                 if design::primary_button(ui, tokens, "+ Column", true).clicked() {
                     state.open_command_with("schema.addColumn", &prefill);
@@ -263,20 +275,52 @@ pub fn design(
                     ]
                 })
                 .collect();
+            // Right-click a column to edit it. The menu only records the pick — the callback
+            // cannot also hold `&mut state`, which the list call borrows for its editor state —
+            // and the dialog opens after `list` returns.
+            let mut picked: Option<(&'static str, String)> = None;
+            let mut column_menu = |ui: &mut egui::Ui, row: usize| {
+                let Some(name) = table_def.columns.get(row).map(|c| c.name.clone()) else {
+                    return;
+                };
+                if ui.button("Rename column").clicked() {
+                    picked = Some(("schema.renameColumn", name.clone()));
+                }
+                if ui.button("Change type").clicked() {
+                    picked = Some(("schema.changeColumnType", name.clone()));
+                }
+                if ui.button("Toggle nullability").clicked() {
+                    picked = Some(("schema.setNullable", name.clone()));
+                }
+                if ui.button("Change default").clicked() {
+                    picked = Some(("schema.setDefault", name.clone()));
+                }
+                ui.separator();
+                if ui.button("Drop column").clicked() {
+                    picked = Some(("schema.dropColumn", name.clone()));
+                }
+            };
             let height = (column_rows.len() as f32 * design::ROW_H + 34.0).min(360.0);
+            let columns_list = List {
+                gutter: true,
+                columns: &column_specs,
+                rows: &column_rows,
+                height,
+                id: egui::Id::new(("design-columns", tab_index)),
+                empty: "no columns",
+                row_menu: Some(&mut column_menu),
+            };
             list(
                 ui,
                 tokens,
-                List {
-                    gutter: true,
-                    columns: &column_specs,
-                    rows: &column_rows,
-                    height,
-                    id: egui::Id::new(("design-columns", tab_index)),
-                    empty: "no columns",
-                },
+                columns_list,
                 state.table(tab_index),
             );
+            if let Some((id, column)) = picked {
+                let mut pre = prefill.clone();
+                pre.push(("column", &column));
+                state.open_command_with(id, &pre);
+            }
 
             if !table_def.indexes.is_empty() {
                 ui.add_space(12.0);
@@ -362,19 +406,16 @@ pub fn design(
                 Some("what the server would run to rebuild this table"),
             );
             ui.add_space(4.0);
-            if let Some(ddl) = session.tabs[tab_index]
-                .payload
-                .get("ddl")
-                .and_then(|v| v.as_str())
+            if let Some(serde_json::Value::String(ddl)) =
+                session.tabs[tab_index].payload.get_mut("ddl")
             {
-                let mut text = ddl.to_string();
                 let frame = egui::Frame::new()
                     .fill(tokens.background)
                     .corner_radius(CornerRadius::same(6))
                     .inner_margin(egui::Margin::same(10));
                 frame.show(ui, |ui| {
                     ui.add(
-                        egui::TextEdit::multiline(&mut text)
+                        egui::TextEdit::multiline(ddl)
                             .code_editor()
                             .desired_rows(10)
                             .desired_width(f32::INFINITY),
@@ -776,6 +817,7 @@ pub fn report(
                 height,
                 id: egui::Id::new(("pivot", tab_index)),
                 empty: "nothing to pivot",
+                    row_menu: None,
             },
             state.table(tab_index),
         );
@@ -832,6 +874,7 @@ pub fn report(
                 height,
                 id: egui::Id::new(("report-table", tab_index)),
                 empty: "no rows",
+                    row_menu: None,
             },
             state.table(tab_index),
         );
@@ -1194,6 +1237,7 @@ pub fn monitor(
                     height,
                     id: egui::Id::new(("sessions", tab_index)),
                     empty: "no sessions reported by this server",
+                    row_menu: None,
                 },
                 state.table(tab_index),
             );
@@ -1274,6 +1318,7 @@ pub fn monitor(
                     height,
                     id: egui::Id::new(("monitor-list", tab_index)),
                     empty: "this server reports nothing here",
+                    row_menu: None,
                 },
                 state.table(tab_index),
             );
@@ -1851,6 +1896,7 @@ pub fn users(
             height,
             id: egui::Id::new(("users", tab_index)),
             empty: "SQLite has no users; Postgres and MySQL do",
+                    row_menu: None,
         },
         state.table(tab_index),
     );

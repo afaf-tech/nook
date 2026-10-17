@@ -425,6 +425,11 @@ pub fn show(
                         state.tree_expanded.insert(key.clone());
                         expanded = true;
                     }
+                    // One click is enough: a closed connection connects on the first click — the
+                    // old double-click gate made the common path two clicks for no reason.
+                    if !conn.is_open() {
+                        action = TreeAction::OpenConnection(index);
+                    }
                 }
                 if response.double_clicked() && !conn.is_open() {
                     action = TreeAction::OpenConnection(index);
@@ -735,6 +740,23 @@ pub fn open_data_tab(session: &mut Session, index: usize, reference: TableRef) {
     }
 }
 
+/// Open a design tab for a table: the tab carries the catalog copy when the connection has one, so
+/// the designer buttons act on what the user sees. Used by the tree's Design action and by the
+/// data grid's no-primary-key banner, which routes the user here to give the table a key.
+pub fn open_design_tab(session: &mut Session, index: usize, reference: TableRef) {
+    let table = session
+        .conns
+        .get(index)
+        .and_then(|c| c.catalog.as_ref())
+        .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
+        .cloned();
+    let tab = session.add_tab(TabKind::Design, reference.key(), Some(index));
+    if let Some(tab_ref) = session.tabs.get_mut(tab) {
+        tab_ref.table = table;
+        tab_ref.grid.table = Some(reference);
+    }
+}
+
 /// Colour for a cell value type, used by the results view.
 pub fn value_color(value: &nook_core::Value, tokens: &Tokens) -> Color32 {
     match value {
@@ -764,6 +786,61 @@ mod tests {
         assert!(Scope::Views.shows(TableKind::View));
         assert!(Scope::Views.shows(TableKind::MatView));
         assert!(!Scope::Views.shows(TableKind::Table));
+    }
+
+    /// One click on a disconnected connection card must ask to open it — the fix for "connect
+    /// needs two clicks". An already-open card keeps selecting instead of re-connecting.
+    #[test]
+    fn a_single_click_on_a_closed_connection_opens_it() {
+        let mut session = Session::new();
+        session
+            .conns
+            .push(nook_engine::Conn::new(nook_core::ConnectionConfig::new(
+                "mem",
+                nook_core::DriverKind::Sqlite,
+            )));
+        let mut state = UiState::default();
+        let tokens = Tokens::of("dark");
+        let ctx = egui::Context::default();
+        tokens.apply(&ctx);
+        let screen = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(300.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut action = TreeAction::None;
+        let mut frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(screen(events), |ui| {
+                action = show(ui, &session, &mut state, &tokens);
+            })
+            .drop_without_applying_deltas()
+        };
+        frame(Vec::new());
+        // The first connection card sits 46px under the header + 98px filter block; click its middle.
+        let card = egui::pos2(150.0, HEADER_H + 98.0 + 23.0);
+        frame(vec![
+            egui::Event::PointerMoved(card),
+            egui::Event::PointerButton {
+                pos: card,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: card,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]);
+        assert_eq!(
+            action,
+            TreeAction::OpenConnection(0),
+            "one click on a closed card is the connect gesture"
+        );
     }
 
     #[test]
