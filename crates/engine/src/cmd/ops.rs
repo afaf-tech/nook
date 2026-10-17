@@ -503,17 +503,24 @@ fn job_create(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 
 fn job_delete(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let id = p.str_arg("id")?;
+    // Resolve to the canonical id first: `then` entries and lookups match id *or* name, so a
+    // name-based delete must compare against the stored id, not the caller's raw string.
+    let canonical = session
+        .jobs
+        .get(&id)
+        .map(|j| j.id.clone())
+        .ok_or_else(|| Error::not_found(format!("no job named '{id}'")))?;
     // A dangling `then` edge would only explode at run time, so refuse while referenced.
     if let Some(holder) = session
         .jobs
         .ids()
         .into_iter()
-        .filter(|other| other != &id)
+        .filter(|other| other != &canonical)
         .find(|other| {
             session
                 .jobs
                 .get(other)
-                .is_some_and(|j| j.then.iter().any(|t| t == &id))
+                .is_some_and(|j| j.then.iter().any(|t| t == &canonical || t == &id))
         })
     {
         return Err(Error::config(format!(
@@ -994,6 +1001,30 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_edited_cycle_is_stopped_at_run_time_not_by_overflow() {
+        let (_guard, mut session) = live_session();
+        let mk = |session: &mut Session, id: &str| {
+            let p = Params::from_json(json!({
+                "id": id, "name": id, "kind": "query",
+                "params": {"sql": "select 1"}
+            }))
+            .expect("params");
+            job_create(session, &p).expect("create");
+        };
+        mk(&mut session, "a");
+        mk(&mut session, "b");
+        // Write the cycle straight into the store, bypassing create-time validation — the
+        // same shape a hand-edited jobs.json loads as. The runtime path guard must stop it.
+        session.jobs.get_mut("a").expect("job a").then = vec!["b".into()];
+        session.jobs.get_mut("b").expect("job b").then = vec!["a".into()];
+        let err = run_job(&mut session, "a").expect_err("the cycle must error");
+        assert!(
+            err.to_string().contains("chain into itself"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
     fn a_chain_diamond_is_legal_but_cycles_and_referenced_deletes_are_not() {
         let _guard = crate::test_support::scratch_config();
         let mut session = Session::new();
@@ -1014,7 +1045,27 @@ mod tests {
         // A referenced job cannot be deleted while someone chains into it.
         let p = Params::from_json(json!({"id": "d"})).expect("params");
         assert!(job_delete(&mut session, &p).is_err());
-        // Clearing the chain via job.chain frees it.
+        // Also by display name: lookups match id or name, so the guard must resolve the
+        // caller's string to the stored id before comparing `then` entries. Give d an alias
+        // by recreating it with a display name, then delete under that name.
+        let p = Params::from_json(json!({"id": "d"})).expect("params");
+        job_delete(&mut session, &p).expect_err("referenced");
+        let holder = session.jobs.get_mut("b").expect("job b");
+        holder.then = vec![];
+        session.jobs.save().expect("save");
+        let p = Params::from_json(json!({
+            "id": "d2", "name": "Dee", "kind": "query",
+            "params": {"sql": "select 1"}, "then": []
+        }))
+        .expect("params");
+        job_create(&mut session, &p).expect("create named");
+        let p = Params::from_json(json!({"id": "c", "then": ["d2"]})).expect("params");
+        job_chain(&mut session, &p).expect("chain c to d2");
+        let p = Params::from_json(json!({"id": "Dee"})).expect("params");
+        assert!(
+            job_delete(&mut session, &p).is_err(),
+            "name delete must be guarded too"
+        );
         let p = Params::from_json(json!({"id": "b", "then": []})).expect("params");
         let out = job_chain(&mut session, &p).expect("clear chain");
         assert_eq!(out["then"].as_array().map(Vec::len), Some(0));
