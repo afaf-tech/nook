@@ -34,10 +34,9 @@ and phase 7 below is written against what is actually left, not what was missing
 > handle both, or it will report 152 entries and a coverage number nobody can reproduce. The number to trust is
 > the one `cargo xtask parity` prints, which is why every phase ends by running it.
 
-**Toolchain note.** This machine has no `cargo` and no `rustup` (`command -v cargo` fails; no
-`~/.cargo`). So `cargo xtask ci`, `cargo test` and `cargo xtask parity` **cannot run here**. Every
-phase's definition of done assumes a machine with Rust 1.80+; the plan does not pretend a green gate
-that was never executed.
+**Toolchain note.** This machine runs `cargo 1.98.0` (`~/.cargo` present); `cargo xtask parity`
+executes and printed the numbers above on 2026-10-18. Every phase's definition of done therefore
+expects `cargo xtask ci` green in this checkout, not on a hypothetical machine.
 
 ## The rules every phase inherits
 
@@ -123,3 +122,4 @@ Recorded here so nobody re-opens it as an oversight — reasons in [`features.md
 |---|---|
 | 2026-10-17 | Plan written. Inventory harvested from `beekeeperstudio.io/features` (plus the eight feature subpages) and `tableplus.com` + `docs.tableplus.com` (interface, filter, code review/safe mode, open anything, query editor, streaming, split panes, parameters, metrics board). Baseline measured at `e8c6041`. No code changed. |
 | 2026-10-18 | Rebased onto `a66bcd2` after the push was rejected: `origin/main` had gained eight commits, three of which close ids this plan had listed as gaps. Re-measured (155 commands, 153/207, 450 tests) and rewrote phase 7, which had been built on the trigger/routine/sequence editors and the SQLite rebuild — both now shipped. Phases 1–6 and 8–9 were re-checked against the new HEAD and their premises still hold (`table.rs:53` is still one cell; no `hideColumns`, `quickLook`, `rowJson`, `copyTsv`, or partition support anywhere). |
+| 2026-10-18 | Adjusted to this checkout: toolchain note corrected (cargo 1.98 present, parity executed), baseline re-verified — 155 commands, 153/207 (73.9%), 450 tests, 50,754 lines, all matching the table. No code changed. |
