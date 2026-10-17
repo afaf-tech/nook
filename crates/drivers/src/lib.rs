@@ -230,6 +230,12 @@ pub fn split_script(sql: &str) -> Vec<String> {
     let mut in_line_comment = false;
     let mut in_block_comment = false;
     let mut dollar_tag: Option<String> = None;
+    // SQLite trigger bodies: `CREATE TRIGGER … BEGIN …; END;`. A `;` inside the body must not
+    // split, so depth counts unquoted `BEGIN` words. A `BEGIN` that *starts* a statement is the
+    // transaction keyword and closes itself at the following `;` — depth is reset for those.
+    let mut begin_depth: usize = 0;
+    let mut word: String = String::new();
+    let mut at_statement_start = true;
     while i < bytes.len() {
         let c = bytes[i];
         let next = bytes.get(i + 1).copied().unwrap_or('\0');
@@ -335,13 +341,51 @@ pub fn split_script(sql: &str) -> Vec<String> {
                 current.push(c);
             }
             ';' => {
-                let trimmed = current.trim();
-                if !trimmed.is_empty() && !is_comment_only(trimmed) {
-                    out.push(format!("{trimmed};"));
+                // A transaction `BEGIN …;` closes itself: its depth is not a trigger body.
+                if begin_depth == 1 && word.trim().eq_ignore_ascii_case("begin") {
+                    begin_depth = 0;
                 }
-                current.clear();
+                // `END;` may butt against the semicolon with no whitespace between.
+                if word.eq_ignore_ascii_case("end") && begin_depth > 0 {
+                    begin_depth -= 1;
+                }
+                if begin_depth == 0 {
+                    let trimmed = current.trim();
+                    if !trimmed.is_empty() && !is_comment_only(trimmed) {
+                        out.push(format!("{trimmed};"));
+                    }
+                    current.clear();
+                    word.clear();
+                    at_statement_start = true;
+                } else {
+                    current.push(c);
+                    word.clear();
+                }
             }
-            _ => current.push(c),
+            c if c.is_alphanumeric() || c == '_' => {
+                at_statement_start = false;
+                word.push(c);
+                current.push(c);
+            }
+            c if c.is_whitespace() => {
+                // A `BEGIN` that starts its statement is the transaction keyword; a `BEGIN`
+                // anywhere else opens (or nests) a trigger body.
+                if word.eq_ignore_ascii_case("begin") {
+                    if at_statement_start && begin_depth == 0 {
+                        at_statement_start = false;
+                    } else {
+                        begin_depth += 1;
+                    }
+                } else if word.eq_ignore_ascii_case("end") && begin_depth > 0 {
+                    begin_depth -= 1;
+                }
+                word.clear();
+                current.push(c);
+            }
+            _ => {
+                word.clear();
+                current.push(c);
+            }
         }
         i += 1;
     }
@@ -435,6 +479,20 @@ mod tests {
         let parts = split_script(sql);
         assert_eq!(parts.len(), 2, "{parts:?}");
         assert!(parts[0].contains("RETURN 1; END;"));
+    }
+
+    /// SQLite trigger bodies are `BEGIN … END;` with semicolons inside — the same shape a
+    /// rebuild plan re-emits from sqlite_master. Splitting at the body semicolons produces
+    /// fragments the engine rejects.
+    #[test]
+    fn trigger_bodies_stay_intact() {
+        let sql = "CREATE TRIGGER t AFTER UPDATE ON posts BEGIN UPDATE posts SET title = title WHERE id = NEW.id; END;\nSELECT 1;";
+        let parts = split_script(sql);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert!(
+            parts[0].contains("WHERE id = NEW.id; END;"),
+            "the trigger body must survive as one statement: {parts:?}"
+        );
     }
 
     #[test]

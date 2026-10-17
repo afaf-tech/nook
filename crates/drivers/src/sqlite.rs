@@ -481,6 +481,32 @@ impl Sqlite {
             name: tmp.clone(),
             ..rebuilt.clone()
         };
+        // Enforcement is per-connection state: restore whatever the session had, not a hardcoded
+        // ON that would flip unrelated later writes into failing on pre-existing orphans.
+        let fk_before = self
+            .pragma_rows("PRAGMA foreign_keys")?
+            .first()
+            .and_then(|r| r.first())
+            .map(|v| v.as_text())
+            .unwrap_or_else(|| "0".into());
+        let restore_pragma = format!(
+            "PRAGMA foreign_keys = {};",
+            if fk_before != "0" { "ON" } else { "OFF" }
+        );
+        // Triggers die with DROP TABLE and cannot be ALTERed back — re-run their CREATE after
+        // the rename. The DDL comes from sqlite_master, the server's own record of the trigger.
+        let trigger_rows = self.pragma_rows(
+            &format!(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = {}",
+                quote_pragma_arg(&table.name)
+            ),
+        )?;
+        let trigger_ddl: Vec<String> = (0..trigger_rows.len())
+            .filter_map(|i| {
+                let sql = Self::text_at(&trigger_rows, i, 0);
+                (!sql.is_empty()).then_some(sql)
+            })
+            .collect();
         let mut script = vec![
             "PRAGMA foreign_keys = OFF;".to_string(),
             // FKs ride inside the CREATE: SQLite cannot ALTER a constraint onto a table, so a
@@ -506,7 +532,8 @@ impl Sqlite {
             Dialect::Sqlite,
         ));
         script.extend(nook_model::ddl::create_indexes(&rebuilt, Dialect::Sqlite));
-        script.push("PRAGMA foreign_keys = ON;".to_string());
+        script.extend(trigger_ddl);
+        script.push(restore_pragma);
         Ok(script)
     }
 }
@@ -696,13 +723,83 @@ mod tests {
             "the foreign key must survive the rebuild"
         );
         assert_eq!(posts2.foreign_keys[0].ref_table, "users");
-        // And the constraint really is enforced by the server, not just in the catalog.
+        // And the constraint really is enforced by the server, not just in the catalog. The plan
+        // restores the session's pragma (possibly OFF), so the test opts in itself — the catalog
+        // assert above is the one that proves the FK survived.
+        db.run("PRAGMA foreign_keys = ON", 1).expect("enforce");
         let err = crate::Driver::run_script(
             &mut db,
             "INSERT INTO posts (id, author_id, title) VALUES (1, 99, 'orphan');",
             1,
         );
         assert!(err.is_err(), "the restored FK must reject an orphan row");
+    }
+
+    /// A rebuild must carry the table's triggers across: DROP TABLE destroys them and SQLite
+    /// cannot ALTER them back, so the plan has to re-run their CREATE after the rename.
+    #[test]
+    fn rebuild_plan_keeps_triggers() {
+        let mut db = db();
+        db.run_script(
+            "CREATE TRIGGER posts_touch AFTER UPDATE ON posts BEGIN UPDATE posts SET title = title WHERE id = NEW.id; END;",
+            1,
+        )
+        .expect("trigger");
+        let cat = db.catalog().expect("catalog");
+        let posts = cat.find_table(None, "posts").expect("posts").clone();
+        let plan = db
+            .rebuild_table_plan(None, &posts, &posts.columns.clone())
+            .expect("plan");
+        let joined = plan.join("\n");
+        assert!(
+            joined.contains("CREATE TRIGGER"),
+            "the plan must re-create the trigger: {joined}"
+        );
+        for stmt in &plan {
+            if stmt.starts_with("/*") {
+                continue;
+            }
+            db.run(stmt, 10).expect("run rebuild step");
+        }
+        let cat2 = db.catalog().expect("catalog again");
+        let triggers: Vec<&nook_model::Trigger> = cat2
+            .schemas
+            .iter()
+            .flat_map(|s| s.triggers.iter())
+            .filter(|t| t.table == "posts")
+            .collect();
+        assert_eq!(triggers.len(), 1, "the trigger must survive the rebuild");
+    }
+
+    /// The plan must restore the connection's foreign_keys pragma to what it was, not force it
+    /// on: a rebuild on a session that started with enforcement OFF must not switch unrelated
+    /// later writes into failing on pre-existing orphan rows.
+    #[test]
+    fn rebuild_plan_restores_the_foreign_keys_pragma() {
+        let mut db = db();
+        db.run("PRAGMA foreign_keys = OFF", 1).expect("off");
+        let cat = db.catalog().expect("catalog");
+        let posts = cat.find_table(None, "posts").expect("posts").clone();
+        let plan = db
+            .rebuild_table_plan(None, &posts, &posts.columns.clone())
+            .expect("plan");
+        let restore = plan.last().expect("restore step");
+        assert_eq!(
+            restore.trim().to_ascii_lowercase(),
+            "pragma foreign_keys = off;",
+            "the plan ends by restoring the pragma it changed"
+        );
+        for stmt in &plan {
+            if stmt.starts_with("/*") {
+                continue;
+            }
+            db.run(stmt, 10).expect("run rebuild step");
+        }
+        let state = db
+            .pragma_rows("PRAGMA foreign_keys")
+            .expect("read pragma")[0][0]
+            .clone();
+        assert_eq!(state, Value::Int(0), "enforcement stays off after the rebuild");
     }
 
     #[test]
