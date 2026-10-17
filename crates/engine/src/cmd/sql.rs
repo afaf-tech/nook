@@ -465,6 +465,11 @@ fn history(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 fn clear_history(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let n = session.history.len();
     session.history.clear();
+    // The store is the durable twin: clear it too, or the next start restores what the user just
+    // wiped. A failed clear is reported, not fatal — the in-memory history is already gone.
+    if let Err(e) = crate::store::clear_history() {
+        session.log(Level::Warn, format!("history clear: {}", e.message()));
+    }
     Ok(json!({ "cleared": n }))
 }
 

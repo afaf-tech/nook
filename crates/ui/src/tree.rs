@@ -312,7 +312,20 @@ pub fn show(
                 return;
             }
 
-            for (index, conn) in session.conns.iter().enumerate() {
+            // Pins first, then the rest in profile order. The pin set is the stored order; an id
+            // that names no connection (a deleted profile) is skipped, never painted as a ghost.
+            let pinned: Vec<&str> = session.pins.iter().map(|s| s.as_str()).collect();
+            let order: Vec<usize> = session
+                .pins
+                .iter()
+                .filter_map(|id| session.conns.iter().position(|c| &c.cfg.id == id))
+                .chain(
+                    (0..session.conns.len())
+                        .filter(|i| !pinned.contains(&session.conns[*i].cfg.id.as_str())),
+                )
+                .collect();
+            for index in order {
+                let conn = &session.conns[index];
                 let is_active = session.active_conn == Some(index);
                 let (state_color, state_label) = match conn.state {
                     ConnState::Connected => (tokens.ok, "connected"),
@@ -331,6 +344,21 @@ pub fn show(
                         CornerRadius::ZERO,
                         tokens.accent,
                     );
+                }
+                // The profile's palette colour, finally painted: a filled dot before the name when
+                // the field is set. The field has been carried since the profile editor shipped.
+                if !conn.cfg.color.is_empty() {
+                    let (color_ok, color) = {
+                        let c = egui::Color32::from_hex(&conn.cfg.color);
+                        (c.is_ok(), c.unwrap_or(tokens.text_faint))
+                    };
+                    if color_ok {
+                        ui.painter().circle_filled(
+                            egui::pos2(rect.left() + 18.0, rect.center().y),
+                            4.0,
+                            color,
+                        );
+                    }
                 }
                 if response.hovered() {
                     ui.painter()

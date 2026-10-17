@@ -18,6 +18,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use nook_ai::{AiConfig, Provider};
 use nook_core::{Error, Result};
 
+use crate::{HistoryEntry, Snippet};
+
 /// Applied on every open, so a file that exists without its table — hand-made, or left by an
 /// interrupted first write — is repaired instead of trusted.
 const SCHEMA: &str = "\
@@ -29,7 +31,34 @@ CREATE TABLE IF NOT EXISTS ai_config (
   max_tokens   INTEGER NOT NULL,
   temperature  REAL    NOT NULL,
   timeout_secs INTEGER NOT NULL
-)";
+);
+CREATE TABLE IF NOT EXISTS snippet (
+  name       TEXT PRIMARY KEY,
+  sql        TEXT NOT NULL,
+  tags       TEXT NOT NULL DEFAULT '[]',
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS history (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  conn       TEXT NOT NULL,
+  sql        TEXT NOT NULL,
+  ok         INTEGER NOT NULL,
+  elapsed_ms REAL NOT NULL,
+  rows       INTEGER NOT NULL,
+  at         INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ui_state (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pinned (
+  conn_id   TEXT PRIMARY KEY,
+  pin_order INTEGER NOT NULL
+);";
+
+/// Bumped when the schema grows. A file at a lower version — or at 0, meaning it predates the
+/// version column — gets the full `SCHEMA` applied on open, which is idempotent (`IF NOT EXISTS`).
+const USER_VERSION: i64 = 1;
 
 /// The columns of the single row, in the order `load_ai` reads them and `save_ai` writes them.
 const COLUMNS: &str = "provider, model, base_url, max_tokens, temperature, timeout_secs";
@@ -45,6 +74,13 @@ fn open() -> Result<Connection> {
     crate::profiles::restrict_permissions(&path);
     conn.execute_batch(SCHEMA)
         .map_err(|e| Error::config(format!("{}: {e}", path.display())))?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| Error::config(format!("{}: {e}", path.display())))?;
+    if version < USER_VERSION {
+        conn.pragma_update(None, "user_version", USER_VERSION)
+            .map_err(|e| Error::config(format!("{}: {e}", path.display())))?;
+    }
     Ok(conn)
 }
 
@@ -125,6 +161,181 @@ pub fn save_ai(cfg: &AiConfig) -> Result<()> {
     )
     .map_err(|e| Error::config(format!("{}: {e}", path.display())))?;
     Ok(())
+}
+
+// --- Snippets ---------------------------------------------------------------
+
+/// Every saved snippet, oldest first (rowid order — save order).
+pub fn load_snippets() -> Result<Vec<Snippet>> {
+    let conn = open()?;
+    let mut stmt = conn
+        .prepare("SELECT name, sql, tags FROM snippet ORDER BY rowid")
+        .map_err(db)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(db)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (name, sql, tags) = row.map_err(db)?;
+        out.push(Snippet {
+            name,
+            sql,
+            tags: serde_json::from_str(&tags).unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// Insert or update one snippet by name. Tags are stored as a JSON array.
+pub fn save_snippet(name: &str, sql: &str, tags: &[String]) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO snippet (name, sql, tags, updated_at) VALUES (?1, ?2, ?3, unixepoch()) \
+         ON CONFLICT(name) DO UPDATE SET sql = ?2, tags = ?3, updated_at = unixepoch()",
+        params![name, sql, serde_json::to_string(tags).unwrap_or_else(|_| "[]".into())],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+/// Remove one snippet. A name that is not there is a no-op, so the caller stays idempotent.
+pub fn delete_snippet(name: &str) -> Result<()> {
+    let conn = open()?;
+    conn.execute("DELETE FROM snippet WHERE name = ?1", params![name])
+        .map_err(db)?;
+    Ok(())
+}
+
+// --- History ----------------------------------------------------------------
+
+/// Append one history entry.
+pub fn push_history(entry: &HistoryEntry) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO history (conn, sql, ok, elapsed_ms, rows, at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            entry.conn,
+            entry.sql,
+            i64::from(entry.ok),
+            entry.elapsed_ms,
+            i64::try_from(entry.rows).unwrap_or(i64::MAX),
+            entry.at as i64,
+        ],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+/// Keep only the newest `keep` rows — the stored-file twin of the in-memory cap in `remember()`.
+pub fn trim_history(keep: usize) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "DELETE FROM history WHERE id NOT IN \
+         (SELECT id FROM history ORDER BY id DESC LIMIT ?1)",
+        params![i64::try_from(keep).unwrap_or(i64::MAX)],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+/// Every kept history entry, oldest first (the caller reverses for display, as `sql.history` does
+/// over the in-memory vec).
+pub fn load_history() -> Result<Vec<HistoryEntry>> {
+    let conn = open()?;
+    let mut stmt = conn
+        .prepare("SELECT conn, sql, ok, elapsed_ms, rows, at FROM history ORDER BY id")
+        .map_err(db)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(HistoryEntry {
+                conn: r.get(0)?,
+                sql: r.get(1)?,
+                ok: r.get::<_, i64>(2)? != 0,
+                elapsed_ms: r.get(3)?,
+                rows: r.get::<_, i64>(4)?.max(0) as usize,
+                at: r.get::<_, i64>(5)?.max(0) as u64,
+            })
+        })
+        .map_err(db)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(db)?);
+    }
+    Ok(out)
+}
+
+/// Drop every history row.
+pub fn clear_history() -> Result<()> {
+    let conn = open()?;
+    conn.execute("DELETE FROM history", []).map_err(db)?;
+    Ok(())
+}
+
+// --- UI state (tab snapshots) and pinned connections -------------------------
+
+/// Read one `ui_state` value by key.
+pub fn load_ui_state(key: &str) -> Result<Option<String>> {
+    let conn = open()?;
+    let value = conn
+        .query_row("SELECT value FROM ui_state WHERE key = ?1", params![key], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(db)?;
+    Ok(value)
+}
+
+/// Write one `ui_state` value by key. One writer per fact: the key is the whole contract.
+pub fn save_ui_state(key: &str, value: &str) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO ui_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = ?2",
+        params![key, value],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+/// Pinned connection ids, first-painted first.
+pub fn load_pins() -> Result<Vec<String>> {
+    let conn = open()?;
+    let mut stmt = conn
+        .prepare("SELECT conn_id FROM pinned ORDER BY pin_order")
+        .map_err(db)?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(db)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(db)?);
+    }
+    Ok(out)
+}
+
+/// Replace the pin set with `ids`, in the given order. Passing the current ids reorders.
+pub fn save_pins(ids: &[String]) -> Result<()> {
+    let conn = open()?;
+    conn.execute("DELETE FROM pinned", []).map_err(db)?;
+    for (order, id) in ids.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO pinned (conn_id, pin_order) VALUES (?1, ?2)",
+            params![id, order as i64],
+        )
+        .map_err(db)?;
+    }
+    Ok(())
+}
+
+fn db(e: rusqlite::Error) -> Error {
+    Error::config(format!("{}: {e}", crate::profiles::ai_db_path().display()))
 }
 
 #[cfg(test)]
@@ -216,5 +427,106 @@ mod tests {
         Connection::open(&path).expect("create an empty database");
         save_ai(&cfg()).expect("save into a database with no table");
         assert_eq!(load_ai().expect("load").as_ref(), Some(&cfg()));
+    }
+
+    #[test]
+    fn a_snippet_round_trips_through_the_database() {
+        let _guard = crate::test_support::scratch_config();
+        save_snippet("Count rows", "select count(*) from t", &["stats".into()])
+            .expect("save");
+        save_snippet("Top 100", "select * from t limit 100", &[]).expect("save");
+        let first = load_snippets().expect("load");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].name, "Count rows");
+        assert_eq!(first[0].sql, "select count(*) from t");
+        assert_eq!(first[0].tags, vec!["stats".to_string()]);
+        // An update to an existing name replaces the row, never adds one.
+        save_snippet("Count rows", "select count(*) from t2", &[]).expect("resave");
+        let second = load_snippets().expect("load");
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].sql, "select count(*) from t2");
+    }
+
+    #[test]
+    fn a_snippet_survives_a_reopen_of_the_file() {
+        let _guard = crate::test_support::scratch_config();
+        save_snippet("x", "select 1", &[]).expect("save");
+        // A second open of the database is the process-shaped boundary: the same code path a new
+        // process takes, without forking in a unit test.
+        let conn = open().expect("reopen");
+        drop(conn);
+        let loaded = load_snippets().expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "x");
+    }
+
+    #[test]
+    fn delete_snippet_removes_the_row() {
+        let _guard = crate::test_support::scratch_config();
+        save_snippet("x", "select 1", &[]).expect("save");
+        delete_snippet("x").expect("delete");
+        assert!(load_snippets().expect("load").is_empty());
+        // Deleting what is not there is a no-op, not an error: the caller is idempotent.
+        delete_snippet("x").expect("delete again");
+    }
+
+    #[test]
+    fn history_round_trips_and_trims_to_the_limit() {
+        let _guard = crate::test_support::scratch_config();
+        for i in 0..10 {
+            push_history(&HistoryEntry {
+                conn: "local".into(),
+                sql: format!("select {i}"),
+                ok: true,
+                elapsed_ms: 1.0,
+                rows: i,
+                at: i as u64,
+            })
+            .expect("push");
+        }
+        trim_history(3).expect("trim");
+        let kept = load_history().expect("load");
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept[kept.len() - 1].sql, "select 9", "newest kept");
+        assert_eq!(kept[0].sql, "select 7");
+        clear_history().expect("clear");
+        assert!(load_history().expect("load").is_empty());
+    }
+
+    #[test]
+    fn ui_state_and_pins_round_trip() {
+        let _guard = crate::test_support::scratch_config();
+        assert_eq!(load_ui_state("tabs").expect("load"), None);
+        save_ui_state("tabs", r#"{"tabs":[],"active":0}"#).expect("save");
+        assert_eq!(
+            load_ui_state("tabs").expect("load").as_deref(),
+            Some(r#"{"tabs":[],"active":0}"#)
+        );
+        save_pins(&["stage".to_string(), "local".to_string()]).expect("save");
+        assert_eq!(load_pins().expect("load"), vec!["stage".to_string(), "local".to_string()]);
+        save_pins(&[]).expect("clear pins");
+        assert!(load_pins().expect("load").is_empty());
+    }
+
+    #[test]
+    fn user_version_migrates_a_file_that_has_only_ai_config() {
+        let _guard = crate::test_support::scratch_config();
+        // A file written by the pre-phase-1 build: the ai_config table, nothing else, user_version 0.
+        let path = crate::profiles::ai_db_path();
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS ai_config (id INTEGER PRIMARY KEY CHECK (id = 1), \
+                 provider TEXT NOT NULL, model TEXT NOT NULL, base_url TEXT NOT NULL, \
+                 max_tokens INTEGER NOT NULL, temperature REAL NOT NULL, timeout_secs INTEGER NOT NULL)",
+            )
+            .expect("create the old schema");
+        }
+        assert!(load_snippets().expect("migrate on open").is_empty());
+        let version: i64 = Connection::open(&path)
+            .expect("open")
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("user_version");
+        assert!(version >= 1, "user_version {version}");
     }
 }

@@ -38,6 +38,10 @@ pub use tunnel::{SshSecret, Tunnel, ASKPASS_CONN_ENV};
 pub struct Params(serde_json::Map<String, serde_json::Value>);
 
 impl Params {
+    /// The raw parameter map, for handlers that pass a whole subtree through.
+    pub fn raw(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.0
+    }
     pub fn none() -> Self {
         Params(serde_json::Map::new())
     }
@@ -598,6 +602,8 @@ pub struct Session {
     pub jobs: JobStore,
     pub history: Vec<HistoryEntry>,
     pub snippets: Vec<Snippet>,
+    /// Connection ids pinned in the tree, first-painted first. Persisted in the store.
+    pub pins: Vec<String>,
     pub messages: Vec<Message>,
     pub settings: Settings,
     next_tab_id: u64,
@@ -636,6 +642,7 @@ impl Session {
             jobs,
             history: Vec::new(),
             snippets: default_snippets(),
+            pins: Vec::new(),
             messages: Vec::new(),
             settings,
             next_tab_id: 1,
@@ -644,8 +651,43 @@ impl Session {
         // The AI configuration lives in the app's own database, not in the profile file. See
         // `load_ai_configuration` for how an install that predates it is carried over.
         session.load_ai_configuration();
+        // Snippets, history and pins live in the same database. A start reads what a previous run
+        // wrote; anything that fails leaves the in-memory defaults and says so, because a broken
+        // state file is not worth refusing to start over.
+        session.load_persisted_state();
         session.log(Level::Info, "Nook ready");
         session
+    }
+
+    /// Read snippets, history and pins from the store, replacing the in-memory defaults. A saved
+    /// snippet with the same name as a built-in wins: the user edited it.
+    fn load_persisted_state(&mut self) {
+        match store::load_snippets() {
+            Ok(saved) if !saved.is_empty() => {
+                for snippet in saved {
+                    match self.snippets.iter_mut().find(|s| s.name == snippet.name) {
+                        Some(builtin) => *builtin = snippet,
+                        None => self.snippets.push(snippet),
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => self.log(Level::Warn, format!("snippets: {}", e.message())),
+        }
+        match store::load_history() {
+            Ok(saved) if !saved.is_empty() => {
+                // Load directly, not through `remember`: remember is the write path for *new*
+                // entries and pushes into the store, which would re-append every loaded row.
+                self.history = saved;
+                self.history.sort_by_key(|h| h.at);
+            }
+            Ok(_) => {}
+            Err(e) => self.log(Level::Warn, format!("history: {}", e.message())),
+        }
+        match store::load_pins() {
+            Ok(saved) => self.pins = saved,
+            Err(e) => self.log(Level::Warn, format!("pins: {}", e.message())),
+        }
     }
 
     /// Put the AI configuration in place at start-up.
@@ -873,6 +915,127 @@ impl Session {
             let drop = self.history.len() - self.settings.keep_history.max(10);
             self.history.drain(0..drop);
         }
+        // The store is the durable twin of this vec. A failed write costs history rows, not data:
+        // say so and keep going.
+        if let Err(e) = store::push_history(self.history.last().expect("just pushed")) {
+            self.log(Level::Warn, format!("history write: {}", e.message()));
+        }
+        if let Err(e) = store::trim_history(self.settings.keep_history.max(10)) {
+            self.log(Level::Warn, format!("history trim: {}", e.message()));
+        }
+    }
+
+    /// The pinned connection ids, first-painted first.
+    pub fn pinned(&self) -> &[String] {
+        &self.pins
+    }
+
+    /// Snapshot the open tabs into the store: kind, title, editor text and the connection id.
+    /// Deliberately not the grid edits, result rows or scroll position — a restored tab is a place
+    /// to work, not a replay of a run.
+    pub fn persist_tabs(&mut self) {
+        #[derive(serde::Serialize)]
+        struct SnapshotTab<'a> {
+            kind: &'static str,
+            title: &'a str,
+            conn: Option<String>,
+            sql: &'a str,
+        }
+        let kind_name = |kind: TabKind| match kind {
+            TabKind::Query => "Query",
+            TabKind::Data => "Data",
+            TabKind::Design => "Design",
+            TabKind::Diagram => "Diagram",
+            TabKind::Monitor => "Monitor",
+            TabKind::Transfer => "Transfer",
+            TabKind::Jobs => "Jobs",
+            TabKind::Report => "Report",
+            TabKind::Users => "Users",
+            TabKind::Welcome => "Welcome",
+        };
+        let tabs: Vec<SnapshotTab> = self
+            .tabs
+            .iter()
+            .map(|t| SnapshotTab {
+                kind: kind_name(t.kind),
+                title: &t.title,
+                conn: t.conn.and_then(|i| self.conns.get(i)).map(|c| c.cfg.id.clone()),
+                sql: &t.sql.text,
+            })
+            .collect();
+        let snap = json!({ "tabs": tabs, "active": self.active_tab });
+        if let Err(e) = store::save_ui_state("tabs", &snap.to_string()) {
+            self.log(Level::Warn, format!("tab snapshot: {}", e.message()));
+        }
+    }
+
+    /// Rebuild tabs from the last snapshot, replacing the default Welcome tab. Rules: at most 20
+    /// tabs (the rest are logged away — a 400-tab snapshot is a bug in the caller); a tab whose
+    /// connection id is unknown restores with no connection and names it, never a silent drop.
+    pub fn restore_tabs(&mut self) {
+        let Some(raw) = store::load_ui_state("tabs").unwrap_or(None) else {
+            return;
+        };
+        let Ok(snap) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            self.log(Level::Warn, "tab snapshot is not valid JSON; starting fresh");
+            return;
+        };
+        let Some(entries) = snap["tabs"].as_array() else {
+            return;
+        };
+        let kind_of = |name: &str| match name {
+            "Data" => TabKind::Data,
+            "Design" => TabKind::Design,
+            "Diagram" => TabKind::Diagram,
+            "Monitor" => TabKind::Monitor,
+            "Transfer" => TabKind::Transfer,
+            "Jobs" => TabKind::Jobs,
+            "Report" => TabKind::Report,
+            "Users" => TabKind::Users,
+            _ => TabKind::Query,
+        };
+        let mut restored = 0usize;
+        for entry in entries {
+            if restored >= 20 {
+                self.log(
+                    Level::Warn,
+                    format!(
+                        "tab snapshot holds {} tabs; keeping the first 20",
+                        entries.len()
+                    ),
+                );
+                break;
+            }
+            let title = entry["title"].as_str().unwrap_or("Query").to_string();
+            let conn_id = entry["conn"].as_str();
+            let conn = conn_id.and_then(|id| {
+                let found = self.conns.iter().position(|c| c.cfg.id == id);
+                if found.is_none() {
+                    self.log(
+                        Level::Warn,
+                        format!("tab '{title}': connection '{id}' no longer exists"),
+                    );
+                }
+                found
+            });
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            let mut tab = Tab::new(id, kind_of(entry["kind"].as_str().unwrap_or("Query")), title);
+            tab.conn = conn;
+            if let Some(sql) = entry["sql"].as_str() {
+                tab.sql.text = sql.to_string();
+            }
+            self.tabs.push(tab);
+            restored += 1;
+        }
+        // Replace the default Welcome tab when anything was restored.
+        if restored > 0 {
+            let first_welcome = self.tabs.iter().position(|t| t.kind == TabKind::Welcome);
+            if let Some(i) = first_welcome {
+                self.tabs.remove(i);
+            }
+            self.active_tab = Some(0);
+        }
     }
 
     /// Run a command by id. Unknown ids and unavailable commands are errors, never panics.
@@ -937,6 +1100,16 @@ pub fn ok() -> serde_json::Value {
     json!({ "ok": true })
 }
 
+/// A lock serializing every test that points `NOOK_CONFIG_DIR` at a scratch directory — the
+/// integration tests under `tests/` share the one static mutex with the unit tests. Public
+/// because the integration tests cannot see `#[cfg(test)]` items.
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+    LOCK.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Helpers shared by the tests that touch the filesystem.
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -947,10 +1120,7 @@ pub(crate) mod test_support {
     /// Point the config directory at a scratch path and hold the lock that keeps the job-store tests
     /// from writing over each other. The guard has to stay alive for the whole test.
     pub fn scratch_config() -> MutexGuard<'static, ()> {
-        let guard = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = super::test_lock();
         let dir = std::env::temp_dir().join("nook-test-config");
         let _ = std::fs::create_dir_all(&dir);
         // Start from an empty store every time: a leftover jobs.json or nook.db from a previous run

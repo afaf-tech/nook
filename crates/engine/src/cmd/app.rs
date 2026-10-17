@@ -4,6 +4,7 @@ use nook_core::{Error, Result};
 use serde_json::json;
 
 use crate::sqltext::KeywordCase;
+use crate::store;
 use crate::{CommandSpec, Density, Level, Session, Snippet, TabKind};
 
 pub fn commands() -> Vec<CommandSpec> {
@@ -39,7 +40,38 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("snippet.save", "Save a snippet", "App", save_snippet)
             .params(r#"{"name":"Count rows","sql":"select count(*) from t"}"#),
         CommandSpec::new("snippet.delete", "Delete a snippet", "App", delete_snippet),
+        CommandSpec::new("state.persist", "Snapshot the open tabs", "App", state_persist),
+        CommandSpec::new("state.restore", "Restore tabs from the last snapshot", "App", state_restore),
     ]
+}
+
+fn state_persist(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    // An explicit `tabs` array overrides the live tabs — the shape a script (or a test) uses to
+    // write a snapshot directly. Anything else snapshots the real session.
+    if let Some(tabs) = p.raw().get("tabs") {
+        let snap = json!({ "tabs": tabs, "active": p.int_opt("active", 0) });
+        crate::store::save_ui_state("tabs", &snap.to_string())?;
+    } else {
+        session.persist_tabs();
+    }
+    Ok(json!({ "ok": true }))
+}
+
+fn state_restore(session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    session.restore_tabs();
+    let tabs: Vec<serde_json::Value> = session
+        .tabs
+        .iter()
+        .map(|t| {
+            json!({
+                "kind": format!("{:?}", t.kind),
+                "title": t.title,
+                "conn": t.conn.and_then(|i| session.conns.get(i)).map(|c| c.cfg.id.clone()),
+                "sql": t.sql.text,
+            })
+        })
+        .collect();
+    Ok(json!({ "tabs": tabs }))
 }
 
 fn get_settings(session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
@@ -354,10 +386,25 @@ fn save_snippet(session: &mut Session, p: &crate::Params) -> Result<serde_json::
         return Err(Error::config("refusing to save an empty snippet"));
     }
     let tags = p.list("tags");
-    match session.snippets.iter_mut().find(|s| s.name == name) {
-        Some(existing) => existing.sql = sql,
-        None => session.snippets.push(Snippet { name, sql, tags }),
-    }
+    // The store is the durable twin; the vec is a cache of its rows. Capture the final value from
+    // whichever arm ran — an update edits in place, so `last()` would be some other snippet.
+    let saved = match session.snippets.iter_mut().find(|s| s.name == name) {
+        Some(existing) => {
+            existing.sql = sql;
+            existing.tags = tags;
+            existing.clone()
+        }
+        None => {
+            let s = Snippet {
+                name: name.clone(),
+                sql,
+                tags,
+            };
+            session.snippets.push(s.clone());
+            s
+        }
+    };
+    store::save_snippet(&saved.name, &saved.sql, &saved.tags)?;
     Ok(json!({ "snippets": session.snippets.len() }))
 }
 
@@ -368,6 +415,7 @@ fn delete_snippet(session: &mut Session, p: &crate::Params) -> Result<serde_json
     if session.snippets.len() == before {
         return Err(Error::not_found(format!("no snippet named '{name}'")));
     }
+    store::delete_snippet(&name)?;
     Ok(json!({ "removed": name }))
 }
 

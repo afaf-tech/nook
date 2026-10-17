@@ -3,6 +3,7 @@
 use nook_core::{ConnectionConfig, DriverKind, Error, Result, SslMode};
 use serde_json::json;
 
+use crate::store;
 use crate::tunnel::{tunnel_facts, SshSecret};
 use crate::{CommandSpec, Conn, ConnState, Level, Session};
 
@@ -47,7 +48,66 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("conn.groups", "Connection groups", "Connection", groups),
         CommandSpec::new("conn.parseUri", "Parse a connection string", "Connection", parse_uri)
             .params(r#"{"uri":"postgres://user:pass@host:5432/db"}"#),
+        CommandSpec::new("conn.pin", "Pin connection in the tree", "Connection", pin)
+            .params(r#"{"conn":"local","pinned":true}"#),
+        CommandSpec::new("conn.reorder", "Set the tree order", "Connection", reorder)
+            .params(r#"{"order":["local","stage"]}"#),
+        CommandSpec::new("conn.setColor", "Set the tree colour", "Connection", set_color)
+            .params(r##"{"conn":"local","color":"#7aa2f7"}"##),
     ]
+}
+
+/// Pin or unpin a connection. The store holds the pin set; the tree paints pins first.
+fn pin(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let id = p.str_arg("conn")?;
+    // Resolve against the profiles so a typo is a named error, not a silent no-op.
+    session.profiles.get(&id).ok_or_else(|| Error::not_found(format!("no connection named '{id}'")))?;
+    let pinned = p.bool_opt("pinned", true);
+    let mut pins: Vec<String> =
+        session.pins.iter().filter(|x| *x != &id).cloned().collect();
+    if pinned {
+        pins.push(id.clone());
+    }
+    store::save_pins(&pins)?;
+    session.pins = pins;
+    Ok(json!({ "conn": id, "pinned": pinned }))
+}
+
+/// Replace the whole tree order. Every named id must exist; nothing named keeps its relative
+/// position at the end. This is the data behind drag-and-drop later.
+fn reorder(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let order = p.list("order");
+    if order.is_empty() {
+        return Err(Error::config("order names at least one connection"));
+    }
+    for id in &order {
+        session
+            .profiles
+            .get(id)
+            .ok_or_else(|| Error::not_found(format!("no connection named '{id}'")))?;
+    }
+    store::save_pins(&order)?;
+    session.pins = order.clone();
+    Ok(json!({ "order": order }))
+}
+
+/// Set the palette colour painted beside a connection in the tree. Empty clears it.
+fn set_color(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let id = p.str_arg("conn")?;
+    let color = p.str_arg("color")?;
+    if !color.is_empty() && !color.starts_with('#') {
+        return Err(Error::config(format!("'{color}' is not a hex colour")));
+    }
+    let cfg = session
+        .profiles
+        .get(&id)
+        .ok_or_else(|| Error::not_found(format!("no connection named '{id}'")))?
+        .clone();
+    session.profiles.upsert(ConnectionConfig {
+        color: color.clone(),
+        ..cfg
+    })?;
+    Ok(json!({ "conn": id, "color": color }))
 }
 
 fn list(session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {

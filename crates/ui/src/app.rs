@@ -734,7 +734,11 @@ impl NookApp {
         let mut session = if options.demo {
             crate::demo_session()
         } else {
-            Session::with_profiles()
+            let mut session = Session::with_profiles();
+            // Phase 1: a start rebuilds the tabs the last run left open. Before any UI paints, so
+            // the first frame already shows the restored session.
+            session.restore_tabs();
+            session
         };
         let tokens = Tokens::of(&session.settings.theme);
         tokens.apply(&cc.egui_ctx);
@@ -2578,6 +2582,12 @@ impl NookApp {
 }
 
 impl eframe::App for NookApp {
+    /// The last write: a clean close snapshots the tabs even if the two-second idle window never
+    /// came.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.session.persist_tabs();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let tokens = self.tokens();
@@ -2593,6 +2603,16 @@ impl eframe::App for NookApp {
         self.drain_ai_outcomes(&ctx);
         self.shortcuts(&ctx);
         self.tick_jobs();
+
+        // Phase 1: snapshot the tabs when the session has been quiet for two seconds. A crash
+        // loses at most that much typing — the recorded ceiling, not a bug. `time_since_last` is
+        // the time since the last input event, so this fires only during a genuinely idle frame;
+        // no second flag is needed.
+        if ctx.input(|i| i.pointer.time_since_last_movement()) > 2.0
+            && ctx.input(|i| i.pointer.time_since_last_click()) > 2.0
+        {
+            self.session.persist_tabs();
+        }
 
         if self.state.want_demo {
             self.state.want_demo = false;

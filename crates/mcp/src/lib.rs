@@ -125,17 +125,27 @@ pub fn call_tool(
             )))
         }
     };
-    // Point the command at a connection, opening a saved profile on demand.
-    if !map.contains_key("conn") && !map.contains_key("from") {
-        if let Some(default) = session.active_conn.map(|i| session.conns[i].cfg.id.clone()) {
-            map.insert("conn".into(), json!(default));
+    // Point the command at a connection, opening a saved profile on demand. Commands that never
+    // touch a server — snippet/state/pin housekeeping — skip the pre-open: `conn.pin` must be able
+    // to reject an unknown id itself, and `state.*` runs with no connection at all.
+    let local = name.starts_with("snippet.")
+        || name.starts_with("state.")
+        || name == "conn.pin"
+        || name == "conn.reorder";
+    if !local {
+        if !map.contains_key("conn") && !map.contains_key("from") {
+            if let Some(default) = session.active_conn.map(|i| session.conns[i].cfg.id.clone()) {
+                map.insert("conn".into(), json!(default));
+            }
         }
     }
     let mut needed: Vec<String> = Vec::new();
-    for key in ["conn", "from", "to"] {
-        if let Some(id) = map.get(key).and_then(|v| v.as_str()) {
-            if !id.is_empty() {
-                needed.push(id.to_string());
+    if !local {
+        for key in ["conn", "from", "to"] {
+            if let Some(id) = map.get(key).and_then(|v| v.as_str()) {
+                if !id.is_empty() {
+                    needed.push(id.to_string());
+                }
             }
         }
     }
