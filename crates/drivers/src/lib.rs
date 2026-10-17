@@ -363,21 +363,29 @@ pub fn split_script(sql: &str) -> Vec<String> {
                 }
             }
             c if c.is_alphanumeric() || c == '_' => {
-                at_statement_start = false;
                 word.push(c);
                 current.push(c);
             }
             c if c.is_whitespace() => {
                 // A `BEGIN` that starts its statement is the transaction keyword; a `BEGIN`
-                // anywhere else opens (or nests) a trigger body.
+                // anywhere else opens (or nests) a trigger body. `CASE` opens a balanced block
+                // that its `END` closes, so it must count as a depth opener too — otherwise the
+                // body's `END` is consumed by the CASE and the split lands early.
                 if word.eq_ignore_ascii_case("begin") {
                     if at_statement_start && begin_depth == 0 {
-                        at_statement_start = false;
+                        // stays the transaction keyword: not counted
                     } else {
                         begin_depth += 1;
                     }
+                } else if word.eq_ignore_ascii_case("case") && begin_depth > 0 {
+                    begin_depth += 1;
                 } else if word.eq_ignore_ascii_case("end") && begin_depth > 0 {
                     begin_depth -= 1;
+                }
+                // Leading whitespace between statements must not end the "statement start"
+                // window — only a word does. `;` resets it, `word` tracking decides the rest.
+                if !word.is_empty() {
+                    at_statement_start = false;
                 }
                 word.clear();
                 current.push(c);
@@ -492,6 +500,35 @@ mod tests {
         assert!(
             parts[0].contains("WHERE id = NEW.id; END;"),
             "the trigger body must survive as one statement: {parts:?}"
+        );
+    }
+
+    /// `BEGIN IMMEDIATE;` starts a statement, so it is the transaction keyword, not a trigger
+    /// body: it must close at its own semicolon and every statement after it must split normally.
+    #[test]
+    fn transaction_begin_immediate_closes_at_its_semicolon() {
+        let sql = "BEGIN IMMEDIATE;\nSELECT 1;\nSELECT 2;\nCOMMIT;";
+        let parts = split_script(sql);
+        assert_eq!(parts.len(), 4, "{parts:?}");
+        assert!(parts[0].contains("BEGIN IMMEDIATE"));
+        // The same with the BEGIN mid-script: leading whitespace/newline after a prior `;` must
+        // not hide the statement start from the keyword check.
+        let mid = "SELECT 0;\nBEGIN IMMEDIATE;\nSELECT 1;\nCOMMIT;";
+        let parts = split_script(mid);
+        assert_eq!(parts.len(), 4, "{parts:?}");
+        assert!(parts[1].contains("BEGIN IMMEDIATE"));
+    }
+
+    /// `CASE … END` inside a trigger body must not close the body early: the body's own END is
+    /// what ends it.
+    #[test]
+    fn case_end_inside_a_trigger_body_does_not_close_it() {
+        let sql = "CREATE TRIGGER t AFTER UPDATE ON posts BEGIN UPDATE posts SET title = CASE WHEN NEW.id > 1 THEN 'a' ELSE 'b' END WHERE id = NEW.id; END;\nSELECT 1;";
+        let parts = split_script(sql);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert!(
+            parts[0].contains("WHEN NEW.id > 1") && parts[0].trim_end().ends_with("END;"),
+            "the trigger body stays one statement: {parts:?}"
         );
     }
 
