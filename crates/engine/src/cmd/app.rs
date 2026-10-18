@@ -52,7 +52,7 @@ fn state_persist(session: &mut Session, p: &crate::Params) -> Result<serde_json:
         let snap = json!({ "tabs": tabs, "active": p.int_opt("active", 0) });
         crate::store::save_ui_state("tabs", &snap.to_string())?;
     } else {
-        session.persist_tabs();
+        session.persist_tabs()?;
     }
     Ok(json!({ "ok": true }))
 }
