@@ -453,6 +453,9 @@ pub struct UiState {
     pub settings_open: bool,
     pub palette_open: bool,
     pub palette_query: String,
+    /// Which palette is open: commands (Cmd K) or objects (Cmd P). `>` and `#` prefixes switch
+    /// mode from the field itself.
+    pub palette_objects: bool,
     pub diagram_offset: egui::Vec2,
     pub diagram_zoom: f32,
     pub monitor_filter: String,
@@ -521,6 +524,7 @@ impl Default for UiState {
             settings_open: false,
             palette_open: false,
             palette_query: String::new(),
+            palette_objects: false,
             diagram_offset: egui::vec2(0.0, 0.0),
             diagram_zoom: 1.0,
             monitor_filter: String::new(),
@@ -1072,6 +1076,30 @@ impl NookApp {
                     "count": nook_engine::registry().len(),
                     "ids": nook_engine::registry().iter().map(|c| c.id).collect::<Vec<_>>(),
                 }),
+                "ui.quickOpen" => {
+                    // Open the palette in a chosen mode with a typed query — scriptable, so the
+                    // overlay can be driven and screenshot-verified.
+                    let mode = request
+                        .params
+                        .get("mode")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("objects");
+                    let query = request
+                        .params
+                        .get("query")
+                        .and_then(|q| q.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    self.state.palette_objects = mode != "commands";
+                    self.state.palette_query = query;
+                    self.state.palette_open = true;
+                    ctx.request_repaint();
+                    serde_json::json!({
+                        "ok": true,
+                        "objects": self.state.palette_objects,
+                        "query": self.state.palette_query,
+                    })
+                }
                 "ui.shot" => {
                     let path = request
                         .params
@@ -2541,6 +2569,13 @@ impl NookApp {
         });
         if palette {
             self.state.palette_open = true;
+            self.state.palette_objects = false;
+            self.state.palette_query.clear();
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::P)) {
+            self.state.palette_open = true;
+            self.state.palette_objects = true;
+            self.state.palette_query.clear();
         }
         if run_query {
             if let Err(e) = self.session.run("sql.run", serde_json::json!({})) {

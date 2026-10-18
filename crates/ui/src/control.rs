@@ -203,6 +203,7 @@ pub const METHODS: &[&str] = &[
     "ui.openConnection",
     "ui.setConnectionTab",
     "ui.setConnectionField",
+    "ui.quickOpen",
     "ui.quit",
 ];
 

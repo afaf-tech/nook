@@ -28,6 +28,14 @@ pub fn commands() -> Vec<CommandSpec> {
             .params(r#"{"path":"~/data/seed.sql"}"#),
         CommandSpec::new("tools.exportExcel", "Export a query result to Excel", "Tools", export_excel)
             .params(r#"{"sql":"select * from users","path":"~/exports/users.xlsx"}"#),
+        CommandSpec::new("quickOpen.search", "Quick-open search", "Tools", quick_open_search)
+            .params(r#"{"query":"cust","limit":40}"#)
+            .help("One query, ranked hits across every open catalog plus saved queries and open tabs. This is what Cmd+P runs."),
+        CommandSpec::new("quickOpen.open", "Open a quick-open hit", "Tools", quick_open_open)
+            .params(r#"{"kind":"table","conn":"local","schema":"main","name":"customers"}"#),
+        CommandSpec::new("tools.serverSearch", "Search the server's objects", "Tools", server_search)
+            .params(r#"{"pattern":"order"}"#)
+            .help("The catalog-wide object search: tables and views whose name, columns, schema or connection match."),
         CommandSpec::new("tools.exportQuery", "Export a query result", "Tools", export_query)
             .params(r#"{"sql":"select * from users","path":"~/exports/users.csv","format":"csv"}"#),
         CommandSpec::new("tools.queryBuilder", "Query builder", "Tools", query_builder)
@@ -819,9 +827,331 @@ pub fn generator_hint(_generator: &Generator) -> &'static str {
     "auto|int:1-100|pick:a|b|pattern:INV-####|email|sentence|uuid|date:365|null"
 }
 
+// --- Open Anything (Cmd+P) ----------------------------------------------------
+
+/// One searchable thing: a table or view, a saved query, or an open tab.
+#[derive(Debug, Clone, PartialEq)]
+struct IndexEntry {
+    kind: &'static str,
+    conn: String,
+    schema: Option<String>,
+    name: String,
+    /// `schema.name` plus the table's column names, lowercased — one pass at build time so the
+    /// scorer only does substring/`starts_with` checks.
+    haystack: String,
+}
+
+/// The index, built per query from what is already in memory. No cache, no invalidation: a cache
+/// needs a hook in every `conn.refresh`, and this costs one pass over parsed catalogs.
+/// ponytail: rebuilt per query; move to a cached index when a user's catalog is big enough to
+/// notice, and add the invalidation hook then.
+fn build_index<'a>(catalogs: &[(&str, &'a nook_model::Catalog)]) -> Vec<IndexEntry> {
+    let mut out = Vec::new();
+    for (conn, catalog) in catalogs {
+        for schema in &catalog.schemas {
+            for t in &schema.tables {
+                let columns: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
+                out.push(IndexEntry {
+                    kind: match t.kind {
+                        nook_model::TableKind::View => "view",
+                        _ => "table",
+                    },
+                    conn: (*conn).to_string(),
+                    schema: Some(schema.name.clone()),
+                    name: t.name.clone(),
+                    haystack: format!(
+                        "{}.{} {}",
+                        schema.name,
+                        t.name,
+                        columns.join(" ")
+                    )
+                    .to_ascii_lowercase(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Score one entry against one query. Substring-only matching buries `customers` under
+/// `customer_audit_log`; the ladder below is the ranking. No fuzzy crate: every rung is a
+/// `to_ascii_lowercase` and a comparison, and a real fuzzy matcher is the upgrade path.
+fn entry_score(entry: &IndexEntry, query: &str) -> Option<i64> {
+    let name = entry.name.to_ascii_lowercase();
+    let schema_conn = format!(
+        "{} {}",
+        entry.schema.as_deref().unwrap_or_default(),
+        entry.conn
+    )
+    .to_ascii_lowercase();
+    let mut score: i64 = 0;
+    let mut matched = false;
+    if name == query {
+        return Some(100);
+    }
+    if name.starts_with(query) {
+        score = score.max(60);
+        matched = true;
+    }
+    if !matched && name.contains(query) {
+        score = score.max(40);
+        matched = true;
+    }
+    if !matched
+        && name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word.starts_with(query))
+    {
+        score = score.max(30);
+        matched = true;
+    }
+    if !matched && entry.haystack.contains(&format!(" {query}")) {
+        score = score.max(15);
+        matched = true;
+    }
+    if !matched && schema_conn.contains(query) {
+        score = score.max(10);
+        matched = true;
+    }
+    matched.then_some(score)
+}
+
+/// The ranked hits for a query, best first, at most `limit`. An empty query returns nothing: the
+/// list is a search result, not a browser.
+fn score(entries: &[IndexEntry], query: &str, limit: usize) -> Vec<IndexEntry> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<(i64, &IndexEntry)> = entries
+        .iter()
+        .filter_map(|e| entry_score(e, query).map(|s| (s, e)))
+        .collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    hits.into_iter()
+        .take(limit)
+        .map(|(_, e)| e.clone())
+        .collect()
+}
+
+/// The session's quick-open index: every open connection's catalog, the saved snippets, the open
+/// tabs. A closed connection contributes nothing — its catalog is `None`.
+fn session_index(session: &Session) -> Vec<IndexEntry> {
+    let catalogs: Vec<(&str, &nook_model::Catalog)> = session
+        .conns
+        .iter()
+        .filter_map(|c| c.catalog.as_ref().map(|cat| (c.cfg.id.as_str(), cat)))
+        .collect();
+    let mut entries = build_index(&catalogs);
+    for s in &session.snippets {
+        entries.push(IndexEntry {
+            kind: "saved",
+            conn: String::new(),
+            schema: None,
+            name: s.name.clone(),
+            haystack: s.name.to_ascii_lowercase(),
+        });
+    }
+    for (i, tab) in session.tabs.iter().enumerate() {
+        entries.push(IndexEntry {
+            kind: "tab",
+            conn: tab
+                .conn
+                .and_then(|c| session.conns.get(c))
+                .map(|c| c.cfg.id.clone())
+                .unwrap_or_default(),
+            schema: None,
+            name: tab.title.clone(),
+            haystack: format!("{} {}", tab.title, tab.sql.text).to_ascii_lowercase(),
+        });
+        let _ = i;
+    }
+    entries
+}
+
+/// One query, ranked hits across every open catalog plus saved queries and open tabs.
+fn quick_open_search(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let query = p.str_arg("query")?.to_ascii_lowercase();
+    let limit = p.int_opt("limit", 40).clamp(1, 200) as usize;
+    let hits = score(&session_index(session), &query, limit);
+    Ok(json!({
+        "hits": hits.iter().map(|h| json!({
+            "kind": h.kind, "conn": h.conn, "schema": h.schema, "name": h.name
+        })).collect::<Vec<_>>(),
+        "total": hits.len(),
+    }))
+}
+
+/// The Navicat catalog id: the same index, server-wide, under a `pattern` param — kept for parity
+/// and for scripts.
+fn server_search(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    // `pattern` is optional but typed: a junk value must be a named error, not a silent empty
+    // search.
+    let query = match p.0.get("pattern").or_else(|| p.0.get("query")) {
+        Some(serde_json::Value::String(s)) => s.to_ascii_lowercase(),
+        Some(other) => {
+            return Err(Error::config(format!(
+                "parameter 'pattern' must be a string, got {}",
+                crate::json_kind(other)
+            )))
+        }
+        None => String::new(),
+    };
+    let limit = p.int_opt("limit", 100).clamp(1, 500) as usize;
+    let entries = session_index(session);
+    // Objects only: server search is a catalog search, not a tab search.
+    let objects: Vec<IndexEntry> =
+        entries.into_iter().filter(|e| e.kind == "table" || e.kind == "view").collect();
+    let hits = score(&objects, &query, limit);
+    Ok(json!({
+        "hits": hits.iter().map(|h| json!({
+            "kind": h.kind, "conn": h.conn, "schema": h.schema, "name": h.name
+        })).collect::<Vec<_>>(),
+        "total": hits.len(),
+    }))
+}
+
+/// Open one hit: a table/view becomes a Data tab, a saved query a Query tab with its SQL, a tab
+/// becomes active.
+fn quick_open_open(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let kind = p.str_arg("kind")?;
+    let name = p.str_arg("name")?;
+    match kind.as_str() {
+        "table" | "view" => {
+            let conn = p.str_arg("conn")?;
+            let index = session.conn_index(&conn)?;
+            let schema = p.str_opt("schema");
+            // The lookup is the guard: a name that is not in the catalog is a named error, and a
+            // real Table is bound the same way the tree binds it.
+            session.table_of(index, schema.as_deref(), &name)?;
+            let reference = TableRef {
+                schema: schema.clone(),
+                table: name.clone(),
+            };
+            let tab = session.add_tab(crate::TabKind::Data, name.clone(), Some(index));
+            crate::cmd::bind_grid_table(session, tab, reference)?;
+            crate::cmd::load_grid(session, tab)?;
+            Ok(json!({ "opened": name, "kind": kind, "conn": conn }))
+        }
+        "saved" => {
+            let snippet = session
+                .snippets
+                .iter()
+                .find(|s| s.name == name)
+                .ok_or_else(|| Error::not_found(format!("no saved query named '{name}'")))?;
+            let sql = snippet.sql.clone();
+            let id = session.next_tab_id;
+            session.next_tab_id += 1;
+            let mut tab = crate::Tab::new(id, crate::TabKind::Query, name.clone());
+            tab.sql.text = sql;
+            session.tabs.push(tab);
+            session.active_tab = Some(session.tabs.len() - 1);
+            Ok(json!({ "opened": name, "kind": kind }))
+        }
+        "tab" => {
+            let index = session
+                .tabs
+                .iter()
+                .position(|t| t.title == name)
+                .ok_or_else(|| Error::not_found(format!("no open tab named '{name}'")))?;
+            session.active_tab = Some(index);
+            Ok(json!({ "opened": name, "kind": kind, "index": index }))
+        }
+        other => Err(Error::config(format!("unknown quick-open kind '{other}'"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn table(name: &str, columns: Vec<nook_model::Column>) -> nook_model::Table {
+        nook_model::Table {
+            schema: Some("main".into()),
+            name: name.into(),
+            kind: nook_model::TableKind::Table,
+            columns,
+            indexes: vec![],
+            foreign_keys: vec![],
+            row_estimate: None,
+            size_bytes: None,
+            comment: String::new(),
+        }
+    }
+
+    fn catalog(tables: Vec<nook_model::Table>) -> nook_model::Catalog {
+        nook_model::Catalog {
+            driver: "SQLite 3".into(),
+            database: None,
+            databases: vec![],
+            schemas: vec![nook_model::Schema {
+                name: "main".into(),
+                tables,
+                triggers: vec![],
+                routines: vec![],
+                sequences: vec![],
+            }],
+            fetched_ms: 0,
+        }
+    }
+
+    #[test]
+    fn exact_name_outranks_prefix_outranks_contains() {
+        let entries = build_index(&[(
+            "local",
+            &catalog(vec![
+                table("customer_audit_log", vec![]),
+                table("customers", vec![]),
+                table("customer_standards", vec![]),
+            ]),
+        )]);
+        // Exact beats both: `customers` must be first even though it was indexed second.
+        let hits = score(&entries, "customers", 40);
+        assert_eq!(hits[0].name, "customers", "exact must be first: {hits:?}");
+        // `customer_audit_log` does not contain `customers`; it must be absent.
+        assert!(
+            hits.iter().all(|h| h.name != "customer_audit_log"),
+            "substring must not match: {hits:?}"
+        );
+        // Prefix ties break alphabetically — all three start with `customer`.
+        let hits2 = score(&entries, "customer", 40);
+        assert_eq!(
+            hits2.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            vec!["customer_audit_log", "customer_standards", "customers"],
+            "all prefix, alphabetical tiebreak: {hits2:?}"
+        );
+    }
+
+    #[test]
+    fn a_column_name_finds_its_table() {
+        let entries = build_index(&[(
+            "local",
+            &catalog(vec![table(
+                "users",
+                vec![nook_model::Column {
+                    name: "email".into(),
+                    type_name: "text".into(),
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    default: None,
+                    comment: String::new(),
+                    ordinal: 1,
+                    max_len: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    enum_values: vec![],
+                }],
+            )]),
+        )]);
+        let hits = score(&entries, "email", 40);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "users");
+    }
+
+    #[test]
+    fn an_empty_query_returns_nothing() {
+        let entries = build_index(&[]);
+        assert!(score(&entries, "", 40).is_empty());
+    }
 
     #[test]
     fn csv_parsing_handles_quotes_and_newlines() {

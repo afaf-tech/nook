@@ -1786,7 +1786,9 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
     }
 }
 
-/// Cmd+K palette: type to filter every command by id or label, Enter runs the first match.
+/// The palette overlay: one overlay, two modes. `Cmd K` (or a `>` prefix) searches commands;
+/// `Cmd P` (or a `#` prefix, or plain typing) searches objects, saved queries and tabs through
+/// `quickOpen.search`. Enter runs the first match in either mode.
 fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
     if !state.palette_open {
         return;
@@ -1796,6 +1798,7 @@ fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens
     let mut open = true;
     let mut close = false;
     let mut run: Option<&'static str> = None;
+    let mut open_hit: Option<serde_json::Value> = None;
     let screen = ctx.viewport_rect();
     egui::Window::new("Command palette")
         .open(&mut open)
@@ -1807,85 +1810,173 @@ fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens
         .default_width(560.0)
         .show(&ctx, |ui| {
             ui.set_min_width(520.0);
+            // The `>` and `#` prefixes switch mode from the field — the convention every editor
+            // already taught the user.
+            if state.palette_query.starts_with('>') {
+                state.palette_objects = false;
+            } else if state.palette_query.starts_with('#') {
+                state.palette_objects = true;
+            }
+            let field_query = state
+                .palette_query
+                .trim_start_matches(['>', '#'])
+                .to_string();
+            let hint = if state.palette_objects {
+                "search tables, saved queries, tabs…  (  # objects   > commands )"
+            } else {
+                "search a command by id or label…  (  > commands   # objects )"
+            };
             let response = ui.add(
                 egui::TextEdit::singleline(&mut state.palette_query)
-                    .hint_text("search a command by id or label…")
+                    .hint_text(hint)
                     .desired_width(f32::INFINITY)
                     .margin(egui::Margin::symmetric(8, 4)),
             );
             response.request_focus();
             ui.add_space(4.0);
-            let needle = state.palette_query.to_ascii_lowercase();
-            let matches: Vec<&'static nook_engine::CommandSpec> = nook_engine::registry()
-                .iter()
-                .filter(|spec| {
-                    needle.is_empty()
-                        || spec.id.to_ascii_lowercase().contains(&needle)
-                        || spec.label.to_ascii_lowercase().contains(&needle)
-                        || spec.group.to_ascii_lowercase().contains(&needle)
-                })
-                .collect();
+            let mut obj_hits: Vec<serde_json::Value> = Vec::new();
+            if state.palette_objects {
+                // The search is the engine's, not a reimplementation: one source of ranking.
+                if let Ok(out) = session.run(
+                    "quickOpen.search",
+                    serde_json::json!({"query": field_query, "limit": 60}),
+                ) {
+                    if let Some(list) = out["hits"].as_array() {
+                        obj_hits = list.clone();
+                    }
+                }
+            }
+            let needle = field_query.to_ascii_lowercase();
+            let matches: Vec<&'static nook_engine::CommandSpec> = if state.palette_objects {
+                Vec::new()
+            } else {
+                nook_engine::registry()
+                    .iter()
+                    .filter(|spec| {
+                        needle.is_empty()
+                            || spec.id.to_ascii_lowercase().contains(&needle)
+                            || spec.label.to_ascii_lowercase().contains(&needle)
+                            || spec.group.to_ascii_lowercase().contains(&needle)
+                    })
+                    .collect()
+            };
             let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
             if entered {
                 if let Some(first) = matches.first() {
                     run = Some(first.id);
+                } else if let Some(first) = obj_hits.first() {
+                    open_hit = Some(first.clone());
                 }
             }
+            let one_conn = session.conns.iter().filter(|c| c.catalog.is_some()).count() <= 1;
             egui::ScrollArea::vertical()
                 .id_salt("palette-list")
                 .max_height(360.0)
                 .show(ui, |ui| {
-                    let mut group = "";
-                    for spec in matches.iter().take(60) {
-                        if spec.group != group {
-                            group = spec.group;
-                            ui.add_space(2.0);
-                            ui.label(RichText::new(group).size(10.5).color(tokens.text_faint));
+                    if state.palette_objects {
+                        for hit in obj_hits.iter().take(60) {
+                            let name = hit["name"].as_str().unwrap_or_default().to_string();
+                            let kind = hit["kind"].as_str().unwrap_or_default().to_string();
+                            let conn = hit["conn"].as_str().unwrap_or_default().to_string();
+                            let schema = hit["schema"].as_str().unwrap_or_default();
+                            let label = if schema.is_empty() {
+                                name.clone()
+                            } else {
+                                format!("{schema}.{name}")
+                            };
+                            // The connection chip: with more than one open catalog, the same
+                            // table name in three databases must not be a coin flip.
+                            let text = if one_conn || conn.is_empty() {
+                                format!("{kind}  ·  {label}")
+                            } else {
+                                format!("{kind}  ·  {label}  ·  {conn}")
+                            };
+                            let response = ui.add(
+                                egui::Button::new(
+                                    RichText::new(text).size(12.0).color(tokens.text),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(Stroke::NONE)
+                                .min_size(egui::Vec2::new(ui.available_width(), 22.0)),
+                            );
+                            if response.hovered() {
+                                let rect = response.rect;
+                                ui.painter().rect_filled(
+                                    rect,
+                                    CornerRadius::same(4),
+                                    tokens.panel_high,
+                                );
+                            }
+                            if response.clicked() {
+                                open_hit = Some(hit.clone());
+                            }
                         }
-                        let response = ui.add(
-                            egui::Button::new(
-                                RichText::new(format!("{}  ·  {}", spec.id, spec.label))
+                        if obj_hits.is_empty() {
+                            ui.label(
+                                RichText::new("nothing matches")
                                     .size(12.0)
-                                    .color(tokens.text),
-                            )
-                            .fill(egui::Color32::TRANSPARENT)
-                            .stroke(Stroke::NONE)
-                            .min_size(egui::Vec2::new(ui.available_width(), 22.0)),
-                        );
-                        if response.hovered() {
-                            let rect = response.rect;
-                            ui.painter().rect_filled(
-                                rect,
-                                CornerRadius::same(4),
-                                tokens.panel_high,
+                                    .color(tokens.text_faint),
                             );
                         }
-                        if response.clicked() {
-                            run = Some(spec.id);
+                    } else {
+                        let mut group = "";
+                        for spec in matches.iter().take(60) {
+                            if spec.group != group {
+                                group = spec.group;
+                                ui.add_space(2.0);
+                                ui.label(
+                                    RichText::new(group).size(10.5).color(tokens.text_faint),
+                                );
+                            }
+                            let response = ui.add(
+                                egui::Button::new(
+                                    RichText::new(format!("{}  ·  {}", spec.id, spec.label))
+                                        .size(12.0)
+                                        .color(tokens.text),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(Stroke::NONE)
+                                .min_size(egui::Vec2::new(ui.available_width(), 22.0)),
+                            );
+                            if response.hovered() {
+                                let rect = response.rect;
+                                ui.painter().rect_filled(
+                                    rect,
+                                    CornerRadius::same(4),
+                                    tokens.panel_high,
+                                );
+                            }
+                            if response.clicked() {
+                                run = Some(spec.id);
+                            }
                         }
-                    }
-                    if matches.is_empty() {
-                        ui.label(
-                            RichText::new("no command matches")
-                                .size(12.0)
-                                .color(tokens.text_faint),
-                        );
+                        if matches.is_empty() {
+                            ui.label(
+                                RichText::new("no command matches")
+                                    .size(12.0)
+                                    .color(tokens.text_faint),
+                            );
+                        }
                     }
                 });
             ui.separator();
+            let count = if state.palette_objects {
+                obj_hits.len()
+            } else {
+                matches.len()
+            };
             ui.horizontal(|ui| {
                 design::keycap(ui, tokens, "Enter");
                 ui.label(
-                    RichText::new("run the first match")
-                        .size(11.0)
-                        .color(tokens.text_faint),
+                    RichText::new(if state.palette_objects {
+                        "open the first match"
+                    } else {
+                        "run the first match"
+                    })
+                    .size(11.0)
+                    .color(tokens.text_faint),
                 );
-                design::chip(
-                    ui,
-                    tokens,
-                    &format!("{} matches", matches.len()),
-                    tokens.text_dim,
-                );
+                design::chip(ui, tokens, &format!("{count} matches"), tokens.text_dim);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     design::keycap(ui, tokens, "Esc");
                 });
@@ -1895,10 +1986,29 @@ fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens
         state.open_command(id.to_string());
         close = true;
     }
+    if let Some(hit) = open_hit {
+        let mut params = serde_json::json!({
+            "kind": hit["kind"].clone(),
+            "name": hit["name"].clone(),
+        });
+        if let Some(conn) = hit["conn"].as_str() {
+            if !conn.is_empty() {
+                params["conn"] = serde_json::json!(conn);
+            }
+        }
+        if let Some(schema) = hit["schema"].as_str() {
+            if !schema.is_empty() {
+                params["schema"] = serde_json::json!(schema);
+            }
+        }
+        if let Err(e) = session.run("quickOpen.open", params) {
+            session.log(Level::Warn, e.to_string());
+        }
+        close = true;
+    }
     if close || !open {
         state.palette_open = false;
     }
-    let _ = session;
 }
 
 #[cfg(test)]
