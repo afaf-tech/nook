@@ -423,3 +423,75 @@ fn row_json_reports_a_dangling_foreign_key_as_data() {
         "the sentence names the value that matched nothing: {out:?}"
     );
 }
+
+#[test]
+fn follow_foreign_key_resolves_the_target_row_and_says_where() {
+    let mut f = Fixture::new("follow-fk");
+    f.sql("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)");
+    f.sql("CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id))");
+    f.sql("INSERT INTO customers (id, name) VALUES (7, 'Ada')");
+    f.sql("INSERT INTO orders (id, customer_id) VALUES (10, 7)");
+    f.open_grid("orders");
+
+    let out = f
+        .session
+        .run(
+            "grid.followForeignKey",
+            json!({"row": 0, "column": "customer_id"}),
+        )
+        .expect("a keyed target resolves");
+    assert_eq!(out["table"], json!("customers"), "{out:?}");
+    // Quoted, because a column name is an identifier and the filter is raw SQL.
+    assert_eq!(out["where"], json!("\"id\" = 7"), "{out:?}");
+    assert_eq!(out["conn"], json!(f.conn));
+    assert_eq!(out["schema"], json!(null));
+
+    // A column that is not a foreign key is a named error, not a silent no-op.
+    let err = f
+        .session
+        .run("grid.followForeignKey", json!({"row": 0, "column": "id"}))
+        .expect_err("id is not a foreign key");
+    assert!(
+        err.to_string().contains("foreign key"),
+        "the refusal must name the reason: {err}"
+    );
+
+    // A NULL key has nowhere to go, and says so rather than opening an empty filter.
+    f.sql("INSERT INTO orders (id, customer_id) VALUES (11, NULL)");
+    f.open_grid("orders");
+    let err = f
+        .session
+        .run(
+            "grid.followForeignKey",
+            json!({"row": 1, "column": "customer_id"}),
+        )
+        .expect_err("a NULL key points nowhere");
+    assert!(err.to_string().contains("NULL"), "{err}");
+}
+
+#[test]
+fn follow_foreign_key_falls_back_to_every_column_without_a_primary_key() {
+    let mut f = Fixture::new("follow-fk-nokey");
+    // A keyless table: the command still resolves the row, but its WHERE names every column.
+    f.sql("CREATE TABLE tags (name TEXT, color TEXT)");
+    f.sql("CREATE TABLE notes (id INTEGER PRIMARY KEY, tag TEXT REFERENCES tags(name))");
+    f.sql("INSERT INTO tags (name, color) VALUES ('urgent', 'red')");
+    f.sql("INSERT INTO notes (id, tag) VALUES (1, 'urgent')");
+    f.open_grid("notes");
+
+    let out = f
+        .session
+        .run("grid.followForeignKey", json!({"row": 0, "column": "tag"}))
+        .expect("a keyless target still resolves");
+    assert_eq!(out["table"], json!("tags"), "{out:?}");
+    let where_clause = out["where"].as_str().expect("a WHERE clause");
+    assert!(
+        where_clause.contains("name") && where_clause.contains("color"),
+        "the fallback names every column: {where_clause}"
+    );
+    assert_eq!(
+        out["note"],
+        json!("tags has no primary key — matching on every column"),
+        "the fallback must say so: {out:?}"
+    );
+}

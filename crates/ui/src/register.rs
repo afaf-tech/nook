@@ -697,6 +697,7 @@ fn grid(
     let mut view = TableView {
         columns: &columns,
         hidden: NO_HIDDEN,
+        foreign_keys: &[],
         rows: &result.rows,
         pending: Vec::new(),
         inserted: Vec::new(),

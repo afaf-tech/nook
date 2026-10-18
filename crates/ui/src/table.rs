@@ -88,6 +88,8 @@ pub enum TableEvent {
     HideColumn(String),
     /// Un-hide every hidden column of this table (the head's context menu).
     ShowAllColumns,
+    /// Follow the foreign key in this cell: (row, column).
+    FollowForeignKey(usize, usize),
 }
 
 /// Right-click handler for one table row: the row index in, menu items out.
@@ -98,6 +100,9 @@ pub struct TableView<'a> {
     // of a statement, and for a grid whose table the engine would refuse to edit (no primary key).
     // It gates the inline editor and the dirty stripe, so a read-only view cannot look editable.
     pub columns: &'a [TableColumn],
+    /// Columns whose value points at another table. Their cells paint as links (accent, underlined)
+    /// and a click asks the caller to follow the reference instead of selecting the cell.
+    pub foreign_keys: &'a [String],
     /// Column names hidden from view. They keep their slot at width zero — indices into
     /// `rows` stay result indices, so painting and commits land on the right cell.
     pub hidden: &'a [String],
@@ -482,9 +487,14 @@ pub fn show(
                                 }
                             } else {
                                 let display = value.display();
+                                // A foreign key that holds a value is a link: it points at a row
+                                // the user can go to. A NULL key points nowhere and stays plain.
+                                let is_link = !matches!(value, Value::Null)
+                                    && view.foreign_keys.iter().any(|fk| fk == &column.name);
                                 let colour = match &value {
                                     Value::Null => tokens.text_faint,
                                     Value::Bytes(_) => tokens.info,
+                                    _ if is_link => tokens.accent,
                                     _ if dirty => tokens.dirty_text,
                                     _ => tokens.text,
                                 };
@@ -505,6 +515,23 @@ pub fn show(
                                     )
                                 };
                                 let painter = ui.painter().with_clip_rect(cell);
+                                if is_link {
+                                    let underline_y = position.y + font.size * 0.62;
+                                    let width = painter
+                                        .layout_no_wrap(text.clone(), font.clone(), colour)
+                                        .size()
+                                        .x
+                                        .min(max);
+                                    let x0 = match anchor {
+                                        Align2::RIGHT_CENTER => position.x - width,
+                                        _ => position.x,
+                                    };
+                                    painter.hline(
+                                        x0..=(x0 + width),
+                                        underline_y,
+                                        Stroke::new(1.0, colour),
+                                    );
+                                }
                                 painter.text(position, anchor, text, font, colour);
                                 if response.hovered() && display.len() > 60 {
                                     response.clone().on_hover_text(display);
@@ -521,6 +548,14 @@ pub fn show(
                                     && view.anchor.is_some()
                                 {
                                     event = TableEvent::SelectExtend(row_index, column_index);
+                                } else if response.clicked()
+                                    && is_link
+                                    && ui.input(|i| i.modifiers.command)
+                                {
+                                    // A plain click still selects (and copies, and edits on
+                                    // double-click); following is the deliberate gesture, so a
+                                    // link never costs the cell its ordinary behaviour.
+                                    event = TableEvent::FollowForeignKey(row_index, column_index);
                                 } else if response.clicked() {
                                     event = TableEvent::Select(row_index, column_index);
                                 }
@@ -760,6 +795,7 @@ mod tests {
         TableView {
             columns,
             hidden,
+            foreign_keys: &[],
             rows,
             pending: Vec::new(),
             inserted: Vec::new(),
@@ -802,6 +838,48 @@ mod tests {
             events.push(press(cell.center(), true));
             events.push(press(cell.center(), false));
         }
+        let mut event = TableEvent::None;
+        let mut out = ctx.run_ui(screen(events), |ui| {
+            event = show(ui, &tokens, view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        event
+    }
+
+    /// One click on the cell at `(row, column)` with the given modifiers, reporting the event.
+    fn click_cell(
+        view: &mut TableView<'_>,
+        id: egui::Id,
+        row: usize,
+        column: usize,
+        modifiers: egui::Modifiers,
+    ) -> TableEvent {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut state = TableState::default();
+        let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+            let _ = show(ui, &tokens, view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        let cell = ctx
+            .read_response(id.with(("cell", row, column)))
+            .expect("the cell registered its rect in the first frame")
+            .rect;
+        let press_at = |pressed: bool| egui::Event::PointerButton {
+            pos: cell.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        // `input.modifiers` is the frame's state, and egui learns it from the `Modifiers` event,
+        // not from the per-button copy: without it the widget reads a bare click.
+        let events = vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::PointerMoved(cell.center()),
+            press_at(true),
+            press_at(false),
+        ];
         let mut event = TableEvent::None;
         let mut out = ctx.run_ui(screen(events), |ui| {
             event = show(ui, &tokens, view, &mut state, id);
@@ -1044,6 +1122,51 @@ mod tests {
             "the third column overlapped the first: {} then {}",
             first.right(),
             third.left()
+        );
+    }
+
+    #[test]
+    fn a_foreign_key_cell_still_selects_on_a_plain_click_and_follows_on_a_command_click() {
+        let columns = [
+            TableColumn::new("id", "INTEGER").pk(true),
+            TableColumn::new("customer_id", "INTEGER"),
+        ];
+        let rows = vec![vec![Value::Int(10), Value::Int(7)]];
+        let foreign_keys = [String::from("customer_id")];
+        let build = || {
+            let mut view = view(&columns, &rows, true, 300.0);
+            view.foreign_keys = &foreign_keys;
+            view
+        };
+        // A plain click is the cell's ordinary behaviour: it selects, so copy and the inline
+        // editor keep working on a link column.
+        let event = click_cell(
+            &mut build(),
+            egui::Id::new("fk-plain-click"),
+            0,
+            1,
+            egui::Modifiers::default(),
+        );
+        assert!(
+            matches!(event, TableEvent::Select(0, 1)),
+            "a plain click must still select the cell, got {event:?}"
+        );
+        // Following is the deliberate gesture.
+        let command = egui::Modifiers {
+            command: true,
+            mac_cmd: true,
+            ..egui::Modifiers::default()
+        };
+        let event = click_cell(
+            &mut build(),
+            egui::Id::new("fk-command-click"),
+            0,
+            1,
+            command,
+        );
+        assert!(
+            matches!(event, TableEvent::FollowForeignKey(0, 1)),
+            "a command-click must follow the key, got {event:?}"
         );
     }
 }

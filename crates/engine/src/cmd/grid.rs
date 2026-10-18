@@ -75,10 +75,20 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.hideColumns", "Hide columns of this table", "Data", hide_columns)
             .params(r#"{"hidden":["password_hash"]}"#)
             .help("Hiding is a view concern: the query and `grid.fetchPage` still return every column. The list persists per connection and table, and an empty list clears it."),
-        CommandSpec::new("grid.quickLook", "Inspect one cell", "Data", quick_look),
-    CommandSpec::new("grid.rowJson", "Row as JSON, one FK level", "Data", row_json)
+        CommandSpec::new("grid.quickLook", "Inspect one cell", "Data", quick_look)
             .params(r#"{"row":0,"column":"payload"}"#)
             .help("One cell as readable text: JSON is re-indented (invalid JSON stays verbatim with a note), bytes are hex with an offset column and an ASCII gutter, NULL says so. Never an error for bad content — a json column holding bad text is exactly when you need to look at it."),
+        CommandSpec::new("grid.rowJson", "Row as JSON, one FK level", "Data", row_json)
+            .params(r#"{"row":0,"expand":["customer_id"]}"#)
+            .help("The row as a document: every column as a scalar, except the foreign keys in `expand`, which become {\"__ref__\": table, \"row\": {...}} with their target row nested one level. Omit `expand` to expand the table's own single-column keys. A dangling key is {\"__error__\": ...} inside the document, never a failed command."),
+        CommandSpec::new(
+            "grid.followForeignKey",
+            "Where a foreign key points",
+            "Data",
+            follow_foreign_key,
+        )
+        .params(r#"{"row":0,"column":"customer_id"}"#)
+        .help("Resolves a foreign-key cell to {conn, schema, table, where}: the target's primary key as a WHERE clause, or every column when the target has none (with a note saying so). A column that is not a foreign key, or a NULL value, is a named error."),
     ]
 }
 
@@ -1359,6 +1369,124 @@ fn value_of(json: &serde_json::Value) -> Value {
         serde_json::Value::String(s) => Value::Text(s.clone()),
         other => Value::Text(other.to_string()),
     }
+}
+
+/// Where a foreign-key cell points: the target table, and a `WHERE` that selects the one row.
+///
+/// The target's primary key is the WHERE when it has one. A keyless target gets every column
+/// instead, with a note saying so — a filter that silently matched nothing would look like a
+/// broken link rather than a table without a key.
+fn follow_foreign_key(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let row = p.int_opt("row", 0).max(0) as usize;
+    let column = p.str_arg("column")?;
+    let (conn, table, value) = {
+        let tab = &session.tabs[index];
+        let row_count = tab.grid.result.rows.len();
+        if row >= row_count {
+            return Err(Error::not_found(format!(
+                "no row {row} on this page (it holds {row_count} rows)"
+            )));
+        }
+        let conn = tab
+            .conn
+            .ok_or_else(|| Error::config("this data tab is not bound to a connection"))?;
+        let table = tab
+            .grid
+            .table
+            .clone()
+            .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
+        let value = tab
+            .grid
+            .result
+            .value_at(row, &column)
+            .cloned()
+            .ok_or_else(|| {
+                Error::not_found(format!(
+                    "no column '{column}': this table holds {}",
+                    tab.grid.result.columns.join(", ")
+                ))
+            })?;
+        (conn, table, value)
+    };
+    let source = session.table_of(conn, table.schema.as_deref(), &table.table)?;
+    let fk = source
+        .foreign_keys
+        .iter()
+        .find(|fk| fk.columns.iter().any(|c| c == &column))
+        .ok_or_else(|| {
+            Error::config(format!("{column} is not a foreign key of {}", table.key()))
+        })?;
+    if value == Value::Null {
+        return Err(Error::config(format!(
+            "{column} is NULL on row {row}: there is no row to follow"
+        )));
+    }
+    let target = session.table_of(conn, fk.ref_schema.as_deref(), &fk.ref_table)?;
+    let dialect = session.driver_for(conn)?.dialect();
+    let key_columns = target.primary_key();
+    let reference_column = fk
+        .ref_columns
+        .first()
+        .ok_or_else(|| Error::internal("a foreign key with no referenced column"))?
+        .clone();
+    let mut out = json!({
+        "conn": session.conns.get(conn).map(|c| c.cfg.id.clone()).unwrap_or_default(),
+        "schema": fk.ref_schema,
+        "table": fk.ref_table,
+    });
+    if !key_columns.is_empty() {
+        // A compound key needs every column's value and a page row holds one, so only a
+        // single-column key resolves; anything else says why instead of guessing.
+        if key_columns.len() != 1 || fk.columns.len() != 1 {
+            return Err(Error::unsupported(format!(
+                "{} is part of a compound key; Nook would need every column's value",
+                fk.name
+            )));
+        }
+        out["where"] = json!(format!(
+            "{} = {}",
+            nook_core::quote_ident(&key_columns[0], dialect),
+            nook_core::sql_literal(&value, dialect)
+        ));
+        return Ok(out);
+    }
+    // No key on the target: match on every column of the one row the reference names. The row is
+    // read first, because a WHERE built from column names alone would match nothing.
+    let sql = format!(
+        "SELECT * FROM {} WHERE {} = {} LIMIT 1",
+        nook_core::quote_qualified(fk.ref_schema.as_deref(), &fk.ref_table, dialect),
+        nook_core::quote_ident(&reference_column, dialect),
+        nook_core::sql_literal(&value, dialect)
+    );
+    let found = session.driver_for(conn)?.run(&sql, 1)?;
+    let Some(row) = found.rows.first() else {
+        return Err(Error::not_found(format!(
+            "no row in {} with {} = {}",
+            fk.ref_table,
+            reference_column,
+            value.display()
+        )));
+    };
+    let where_clause = found
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            format!(
+                "{} = {}",
+                nook_core::quote_ident(name, dialect),
+                nook_core::sql_literal(row.get(i).unwrap_or(&Value::Null), dialect)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    out["where"] = json!(where_clause);
+    out["note"] = json!(format!(
+        "{} has no primary key — matching on every column",
+        fk.ref_table
+    ));
+    Ok(out)
 }
 
 #[cfg(test)]

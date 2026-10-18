@@ -947,6 +947,9 @@ impl NookApp {
                 "ui.rowJson" => {
                     NookApp::row_json(&mut self.session, &mut self.state, &request.params)
                 }
+                "ui.followForeignKey" => {
+                    NookApp::follow_foreign_key(&mut self.session, &mut self.state, &request.params)
+                }
                 "ui.setResultView" => {
                     NookApp::set_result_view(&self.session, &mut self.state, &request.params)
                 }
@@ -2296,6 +2299,38 @@ impl NookApp {
             "rows": anchor.0.abs_diff(cursor.0) + 1,
             "columns": anchor.1.abs_diff(cursor.1) + 1,
         })
+    }
+
+    /// `ui.followForeignKey`: follow the foreign key in one cell of the active data grid — the
+    /// same path a click on the link takes, so a screenshot can prove the target tab.
+    fn follow_foreign_key(session: &mut Session, state: &mut UiState, params: &Value) -> Value {
+        let Some(index) = session.active_tab else {
+            return serde_json::json!({"ok": false, "error": "no active tab"});
+        };
+        if !matches!(session.tabs[index].kind, TabKind::Data) {
+            return serde_json::json!({"ok": false, "error": "the active tab is not a data tab"});
+        }
+        let row = params.get("row").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let Some(column) = params.get("column").and_then(Value::as_str) else {
+            return serde_json::json!({"ok": false, "error": "pass \"column\""});
+        };
+        let target = match session.run(
+            "grid.followForeignKey",
+            serde_json::json!({"row": row, "column": column}),
+        ) {
+            Ok(target) => target,
+            Err(e) => return serde_json::json!({"ok": false, "error": e.to_string()}),
+        };
+        let table = target["table"].as_str().unwrap_or_default().to_owned();
+        let schema = target["schema"].as_str().map(str::to_owned);
+        let where_clause = target["where"].as_str().unwrap_or_default().to_owned();
+        let reference = nook_engine::TableRef { schema, table };
+        let Some(conn_index) = session.tabs[index].conn else {
+            return serde_json::json!({"ok": false, "error": "the tab has no connection"});
+        };
+        let _ = state;
+        crate::grid::follow_open(session, conn_index, reference, where_clause.clone());
+        serde_json::json!({"ok": true, "where": where_clause, "tab": session.active_tab})
     }
 
     /// `ui.rowJson`: open or close the JSON panel on the active data grid's selected record.

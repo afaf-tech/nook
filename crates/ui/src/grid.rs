@@ -504,9 +504,30 @@ pub fn show(
     if !editable {
         state.table(tab_index).stop_edit();
     }
+    // The catalog knows which columns point elsewhere; the grid paints those as links.
+    let foreign_keys: Vec<String> = session
+        .tabs
+        .get(tab_index)
+        .and_then(|tab| tab.conn)
+        .and_then(|conn| {
+            let tab = &session.tabs[tab_index];
+            let table = tab.grid.table.clone()?;
+            session
+                .table_of(conn, table.schema.as_deref(), &table.table)
+                .ok()
+        })
+        .map(|table| {
+            table
+                .foreign_keys
+                .iter()
+                .flat_map(|fk| fk.columns.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut view = TableView {
         columns: &specs,
         hidden: &hidden,
+        foreign_keys: &foreign_keys,
         rows: &rows,
         pending: dirty_cells.clone(),
         inserted: inserted_rows.clone(),
@@ -544,6 +565,41 @@ pub fn show(
             }
             state.table(tab_index).selected = Some((row, column));
             state.table(tab_index).stop_edit();
+        }
+        TableEvent::FollowForeignKey(row, column) => {
+            // The engine resolves where the cell points; the UI opens the target and filters it to
+            // the one row. A refusal (a compound key, a dangling value) is an honest error, not a
+            // tab that opens onto nothing.
+            let name = columns.get(column).cloned().unwrap_or_default();
+            state.table(tab_index).selected = Some((row, column));
+            match session.run(
+                "grid.followForeignKey",
+                serde_json::json!({"row": row, "column": name}),
+            ) {
+                Ok(target) => {
+                    let table = target["table"].as_str().unwrap_or_default().to_owned();
+                    let schema = target["schema"].as_str().map(str::to_owned);
+                    let where_clause = target["where"].as_str().unwrap_or_default().to_owned();
+                    if let Some(note) = target["note"].as_str() {
+                        session.log(Level::Info, note.to_owned());
+                    }
+                    let reference = match schema {
+                        Some(schema) => nook_engine::TableRef {
+                            schema: Some(schema),
+                            table,
+                        },
+                        None => nook_engine::TableRef {
+                            schema: None,
+                            table,
+                        },
+                    };
+                    let conn_index = session.tabs[tab_index].conn;
+                    if let Some(conn_index) = conn_index {
+                        follow_open(session, conn_index, reference, where_clause);
+                    }
+                }
+                Err(e) => session.log(Level::Error, e.to_string()),
+            }
         }
         TableEvent::BeginEdit(row, column) => {
             // A grid that became read-only under the pointer — a reload that failed clears the
@@ -967,6 +1023,31 @@ fn form_cell<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -
 /// Read one cell through `grid.quickLook` and keep the answer, so the band paints a stored
 /// string instead of re-running the formatter every frame. A refusal becomes the record the band
 /// shows as an error: the cell is gone, and the look says so rather than showing nothing.
+/// Open a data tab on the target of a foreign key, filtered to the one row it points at.
+///
+/// The filter is the engine's `WHERE`, so a keyless target matches on every column and a keyed one
+/// on its key: the UI never builds SQL. The tab opens even when the filter finds nothing — an empty
+/// grid under a named filter says more than a refused click.
+pub(crate) fn follow_open(
+    session: &mut Session,
+    conn_index: usize,
+    reference: nook_engine::TableRef,
+    where_clause: String,
+) {
+    crate::tree::open_data_tab(session, conn_index, reference);
+    let Some(index) = session.active_tab else {
+        return;
+    };
+    if let Some(tab) = session.tabs.get_mut(index) {
+        tab.grid.filter = where_clause;
+        tab.grid.page = 0;
+        tab.grid.total_rows = None;
+    }
+    if let Err(e) = nook_engine::cmd::load_grid(session, index) {
+        session.log(Level::Error, e.to_string());
+    }
+}
+
 /// Capture the selected record as a row document, or `None` when the read fails (the caller then
 /// keeps the panel it had, or leaves it closed — a failed read is not worth an empty panel).
 fn row_json_record(
@@ -1513,6 +1594,7 @@ mod tests {
                     ui.add_space(2.0);
                     let mut view = TableView {
                         columns: &columns,
+                        foreign_keys: &[],
                         hidden: &[],
                         rows: &rows,
                         pending: Vec::new(),

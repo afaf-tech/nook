@@ -66,6 +66,7 @@ pub(crate) fn list(
     let mut view = TableView {
         columns: spec.columns,
         hidden: &[],
+        foreign_keys: &[],
         rows: spec.rows,
         pending: Vec::new(),
         inserted: Vec::new(),
