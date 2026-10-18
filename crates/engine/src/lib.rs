@@ -971,11 +971,13 @@ impl Session {
 
     /// Write the tab snapshot unconditionally — the on-exit path, where the write must happen even
     /// if the content is unchanged (it also covers a first run whose store does not exist yet).
-    pub fn persist_tabs(&mut self) {
+    /// The Result is the idle path's retry signal: a failed write must not advance the caller's
+    /// "last snapshot" marker, or the same content is never retried.
+    pub fn persist_tabs(&mut self) -> Result<()> {
         let snap = self.tab_snapshot();
-        if let Err(e) = store::save_ui_state("tabs", &snap) {
+        store::save_ui_state("tabs", &snap).inspect_err(|e| {
             self.log(Level::Warn, format!("tab snapshot: {}", e.message()));
-        }
+        })
     }
 
     /// Rebuild tabs from the last snapshot, replacing the default Welcome tab. Rules: at most 20

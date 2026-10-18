@@ -2626,7 +2626,8 @@ impl eframe::App for NookApp {
     /// The last write: a clean close snapshots the tabs even if the two-second idle window never
     /// came.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.session.persist_tabs();
+        // The failure path already logs; exit must not panic on it.
+        let _ = self.session.persist_tabs();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2653,9 +2654,12 @@ impl eframe::App for NookApp {
         if self.tab_persist_at.unwrap().elapsed() >= std::time::Duration::from_secs(2) {
             self.tab_persist_at = Some(std::time::Instant::now());
             let snap = self.session.tab_snapshot();
-            if Some(&snap) != self.last_tab_snapshot.as_ref() {
-                self.last_tab_snapshot = Some(snap.clone());
-                self.session.persist_tabs();
+            if Some(&snap) != self.last_tab_snapshot.as_ref()
+                && self.session.persist_tabs().is_ok()
+            {
+                // Advance the marker only when the write landed: a failed write (locked nook.db)
+                // must be retried on the next tick, not swallowed until the tabs change again.
+                self.last_tab_snapshot = Some(snap);
             }
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
