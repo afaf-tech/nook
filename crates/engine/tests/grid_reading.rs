@@ -334,3 +334,92 @@ fn quick_look_invalid_json_stays_verbatim_with_a_note() {
         .unwrap_err();
     assert!(err.message().contains("9"), "{err:?}");
 }
+
+#[test]
+fn row_json_expands_one_foreign_key_level_and_stops() {
+    let mut f = Fixture::new("row-json");
+    f.sql("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)");
+    // A self-referencing FK: the expansion must stop after one level, or it recurses forever.
+    f.sql("CREATE TABLE nodes (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES nodes(id), label TEXT)");
+    f.sql("CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id), total REAL)");
+    f.sql("INSERT INTO customers (id, name) VALUES (1, 'Ada'), (2, 'Grace')");
+    f.sql("INSERT INTO nodes (id, parent_id, label) VALUES (1, NULL, 'root'), (2, 1, 'child')");
+    f.sql("INSERT INTO orders (id, customer_id, total) VALUES (10, 1, 9.5), (11, NULL, 1.0)");
+    f.open_grid("orders");
+
+    let out = f
+        .session
+        .run("grid.rowJson", json!({"row": 0, "expand": ["customer_id"]}))
+        .expect("row as json");
+    let row = &out["row"];
+    assert_eq!(row["id"], json!(10), "{out:?}");
+    assert_eq!(row["total"], json!(9.5));
+    // The FK column becomes a reference document, not the bare scalar.
+    let reference = &row["customer_id"];
+    assert_eq!(reference["__ref__"], json!("customers"), "{out:?}");
+    assert_eq!(reference["row"]["name"], json!("Ada"));
+    // One level: the nested row carries its own columns and no expansions of its own.
+    assert!(
+        reference["row"].get("__ref__").is_none(),
+        "the nested row must not expand further: {out:?}"
+    );
+
+    // A NULL FK expands to nothing at all: there is no row to point at.
+    let out = f
+        .session
+        .run("grid.rowJson", json!({"row": 1, "expand": ["customer_id"]}))
+        .expect("row as json");
+    assert_eq!(out["row"]["customer_id"], json!(null), "{out:?}");
+
+    // No `expand` list means the row's own keys: the UI has no catalog to name them from.
+    let out = f
+        .session
+        .run("grid.rowJson", json!({"row": 0}))
+        .expect("row as json");
+    assert_eq!(
+        out["row"]["customer_id"]["__ref__"],
+        json!("customers"),
+        "{out:?}"
+    );
+
+    // Self-reference: one level, and the nested row's own parent_id stays the bare scalar.
+    f.open_grid("nodes");
+    let out = f
+        .session
+        .run("grid.rowJson", json!({"row": 1, "expand": ["parent_id"]}))
+        .expect("row as json");
+    let parent = &out["row"]["parent_id"];
+    assert_eq!(parent["__ref__"], json!("nodes"), "{out:?}");
+    assert_eq!(parent["row"]["label"], json!("root"));
+    // The nested row is root, whose own parent is NULL: it stays a scalar, never a second
+    // expansion. That is what "one level" means.
+    assert!(
+        !parent["row"]["parent_id"].is_object(),
+        "the nested row must not expand again: {out:?}"
+    );
+}
+
+#[test]
+fn row_json_reports_a_dangling_foreign_key_as_data() {
+    let mut f = Fixture::new("row-json-dangling");
+    f.sql("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)");
+    f.sql("CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id))");
+    // A row whose FK points at a customer that is not there.
+    f.sql("PRAGMA foreign_keys = OFF");
+    f.sql("INSERT INTO orders (id, customer_id) VALUES (10, 99)");
+    f.open_grid("orders");
+
+    let out = f
+        .session
+        .run("grid.rowJson", json!({"row": 0, "expand": ["customer_id"]}))
+        .expect("a dangling key must not fail the command");
+    let reference = &out["row"]["customer_id"];
+    assert!(
+        reference["__error__"].is_string(),
+        "a dangling key is data, not an error: {out:?}"
+    );
+    assert!(
+        reference["__error__"].as_str().unwrap().contains("99"),
+        "the sentence names the value that matched nothing: {out:?}"
+    );
+}

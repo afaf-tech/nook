@@ -496,11 +496,27 @@ pub struct UiState {
     /// Form view on the data tab: the selected record as a vertical form. A flag on the UI state,
     /// not the engine's — the engine command is stateless and reads whatever row it is handed.
     pub form_view: bool,
+    /// Row JSON panel: the selected record as a document with its foreign keys expanded one level.
+    /// `None` is closed. The document is captured when the panel opens or the selection moves —
+    /// the engine command runs one `SELECT` per expanded key, so re-running it every frame would
+    /// query the server sixty times a second to paint the same bytes.
+    pub row_json: Option<RowJson>,
     /// Quick Look on one cell of the data grid. The tab is part of the key because the band reads
     /// whatever grid is painting — a look left over from another tab would inspect a cell that tab
     /// never selected. The record is the engine's answer, captured once when the look opens: a
     /// 1 MB blob re-hex-dumped every frame would block the UI thread.
     pub quick_look: Option<QuickLook>,
+}
+
+/// One captured row document, with the tab and row it belongs to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowJson {
+    pub tab: usize,
+    pub row: usize,
+    /// The document as the engine returned it, ready to walk and to copy.
+    pub doc: serde_json::Value,
+    /// The same document as indented text, built once for the Copy button.
+    pub text: String,
 }
 
 /// The cell a Quick Look band shows and the text it paints, as `grid.quickLook` returned it.
@@ -564,6 +580,7 @@ impl Default for UiState {
             ai_providers: None,
             ai_request: None,
             form_view: false,
+            row_json: None,
             quick_look: None,
         }
     }
@@ -600,6 +617,14 @@ impl UiState {
                 look.tab -= 1;
                 Some(look)
             }
+            _ => None,
+        };
+        self.row_json = match self.row_json.take() {
+            Some(mut panel) if panel.tab > index => {
+                panel.tab -= 1;
+                Some(panel)
+            }
+            Some(panel) if panel.tab < index => Some(panel),
             _ => None,
         };
     }
@@ -918,6 +943,9 @@ impl NookApp {
                 }
                 "ui.quickLook" => {
                     NookApp::quick_look(&mut self.session, &mut self.state, &request.params)
+                }
+                "ui.rowJson" => {
+                    NookApp::row_json(&mut self.session, &mut self.state, &request.params)
                 }
                 "ui.setResultView" => {
                     NookApp::set_result_view(&self.session, &mut self.state, &request.params)
@@ -2268,6 +2296,36 @@ impl NookApp {
             "rows": anchor.0.abs_diff(cursor.0) + 1,
             "columns": anchor.1.abs_diff(cursor.1) + 1,
         })
+    }
+
+    /// `ui.rowJson`: open or close the JSON panel on the active data grid's selected record.
+    /// `{"open": false}` closes it; anything else opens it on the current selection, so a
+    /// screenshot can prove the panel without synthesising a toolbar click.
+    fn row_json(session: &mut Session, state: &mut UiState, params: &Value) -> Value {
+        let Some(index) = session.active_tab else {
+            return serde_json::json!({"ok": false, "error": "no active tab"});
+        };
+        if !matches!(session.tabs[index].kind, TabKind::Data) {
+            return serde_json::json!({"ok": false, "error": "the active tab is not a data tab"});
+        }
+        if params.get("open").and_then(Value::as_bool) == Some(false) {
+            state.row_json = None;
+            return serde_json::json!({"ok": true, "open": false});
+        }
+        let row = state.table(index).selected.map(|(r, _)| r).unwrap_or(0);
+        let reply = match session.run("grid.rowJson", serde_json::json!({"row": row})) {
+            Ok(out) => out,
+            Err(e) => return serde_json::json!({"ok": false, "error": e.to_string()}),
+        };
+        let doc = reply["row"].clone();
+        let text = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| doc.to_string());
+        state.row_json = Some(RowJson {
+            tab: index,
+            row,
+            doc: doc.clone(),
+            text,
+        });
+        serde_json::json!({"ok": true, "tab": index, "row": row, "doc": doc})
     }
 
     /// `ui.quickLook`: open the Quick Look band on one cell of the active data grid, so the band

@@ -75,7 +75,8 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.hideColumns", "Hide columns of this table", "Data", hide_columns)
             .params(r#"{"hidden":["password_hash"]}"#)
             .help("Hiding is a view concern: the query and `grid.fetchPage` still return every column. The list persists per connection and table, and an empty list clears it."),
-        CommandSpec::new("grid.quickLook", "Inspect one cell", "Data", quick_look)
+        CommandSpec::new("grid.quickLook", "Inspect one cell", "Data", quick_look),
+    CommandSpec::new("grid.rowJson", "Row as JSON, one FK level", "Data", row_json)
             .params(r#"{"row":0,"column":"payload"}"#)
             .help("One cell as readable text: JSON is re-indented (invalid JSON stays verbatim with a note), bytes are hex with an offset column and an ASCII gutter, NULL says so. Never an error for bad content — a json column holding bad text is exactly when you need to look at it."),
     ]
@@ -1218,6 +1219,146 @@ fn quick_look(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         }),
         other => json!({"kind": other.type_name(), "text": other.display()}),
     })
+}
+
+/// The row as a JSON document, with the requested foreign keys expanded one level.
+///
+/// One level only: a self-referencing key would otherwise recurse forever, and the nested row is
+/// what the UI's "follow" chevron is for. A failed expansion is data, not an error — a dangling key
+/// must not blank the panel — so the reference carries `__error__` instead of a row.
+fn row_json(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let row = p.int_opt("row", 0).max(0) as usize;
+    let requested = p.list("expand");
+    let (conn, table, columns, values) = {
+        let tab = &session.tabs[index];
+        let row_count = tab.grid.result.rows.len();
+        if row >= row_count {
+            return Err(Error::not_found(format!(
+                "no row {row} on this page (it holds {row_count} rows)"
+            )));
+        }
+        let conn = tab
+            .conn
+            .ok_or_else(|| Error::config("this data tab is not bound to a connection"))?;
+        let table = tab
+            .grid
+            .table
+            .clone()
+            .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
+        let columns = tab.grid.result.columns.clone();
+        let values = tab.grid.result.rows[row].clone();
+        (conn, table, columns, values)
+    };
+    // The keys come from the catalog, not the page: a page shows values, not constraints.
+    let foreign_keys = session
+        .table_of(conn, table.schema.as_deref(), &table.table)?
+        .foreign_keys;
+    // No list means "expand the row's own keys": the UI has no catalog, so asking it to name the
+    // foreign keys would be asking it to guess.
+    let expand: Vec<String> = if requested.is_empty() {
+        foreign_keys
+            .iter()
+            .filter(|fk| fk.columns.len() == 1 && fk.ref_columns.len() == 1)
+            .map(|fk| fk.columns[0].clone())
+            .collect()
+    } else {
+        requested
+    };
+    // Every requested name must be a column of this table: a typo would silently expand nothing.
+    for name in &expand {
+        if !columns.iter().any(|c| c == name) {
+            return Err(Error::not_found(format!(
+                "no column '{name}': this table holds {}",
+                columns.join(", ")
+            )));
+        }
+    }
+    let mut doc = serde_json::Map::new();
+    for (i, name) in columns.iter().enumerate() {
+        let value = values.get(i).cloned().unwrap_or(Value::Null);
+        doc.insert(name.clone(), value.to_json());
+    }
+    for name in &expand {
+        // Only a column the catalog calls a foreign key expands; a plain column stays a scalar.
+        // A compound key needs every one of its columns to resolve, and the page hands us one at
+        // a time, so only a single-column key expands. Skipping beats inventing the other values.
+        let Some(fk) = foreign_keys.iter().find(|fk| {
+            fk.columns.len() == 1 && fk.ref_columns.len() == 1 && fk.columns[0] == *name
+        }) else {
+            continue;
+        };
+        let Some(value) = doc.get(name).cloned() else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        doc.insert(name.clone(), expand_reference(session, conn, fk, &value)?);
+    }
+    Ok(json!({ "table": table.key(), "row": doc }))
+}
+
+/// One foreign key expansion: the referenced row as a document, or a `__error__` when the key
+/// matches nothing. The nested row is *not* expanded again — one level, by design.
+fn expand_reference(
+    session: &mut Session,
+    conn: usize,
+    fk: &nook_model::ForeignKey,
+    key: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let sql = {
+        let driver = session.driver_for(conn)?;
+        let dialect = driver.dialect();
+        let column = fk
+            .ref_columns
+            .first()
+            .ok_or_else(|| Error::internal("a foreign key with no referenced column"))?;
+        format!(
+            "SELECT * FROM {} WHERE {} = {} LIMIT 1",
+            nook_core::quote_qualified(fk.ref_schema.as_deref(), &fk.ref_table, dialect),
+            nook_core::quote_ident(column, dialect),
+            nook_core::sql_literal(&value_of(key), dialect)
+        )
+    };
+    let result = {
+        let driver = session.driver_for(conn)?;
+        driver.run(&sql, 1)?
+    };
+    let Some(row) = result.rows.first() else {
+        return Ok(json!({
+            "__error__": format!(
+                "no row in {} with {} = {}",
+                fk.ref_table,
+                fk.ref_columns.join(", "),
+                key
+            ),
+        }));
+    };
+    let mut doc = serde_json::Map::new();
+    for (i, name) in result.columns.iter().enumerate() {
+        let value = row.get(i).cloned().unwrap_or(Value::Null);
+        doc.insert(name.clone(), value.to_json());
+    }
+    Ok(json!({
+        "__ref__": fk.ref_table,
+        "row": doc,
+    }))
+}
+
+/// The `Value` a JSON scalar came from. Only used to render a literal back into SQL, so the
+/// scalar kinds the grid produces are enough.
+fn value_of(json: &serde_json::Value) -> Value {
+    match json {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => Value::Int(i),
+            None => Value::Float(n.as_f64().unwrap_or_default()),
+        },
+        serde_json::Value::String(s) => Value::Text(s.clone()),
+        other => Value::Text(other.to_string()),
+    }
 }
 
 #[cfg(test)]

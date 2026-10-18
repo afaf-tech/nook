@@ -3,7 +3,7 @@
 use egui::RichText;
 use nook_engine::{Level, Session};
 
-use crate::app::{QuickLook, UiState};
+use crate::app::{QuickLook, RowJson, UiState};
 use crate::table::{TableColumn, TableEvent, TableView};
 use crate::theme::{self as design, Tokens};
 
@@ -20,6 +20,9 @@ const FORM_HEAD_H: f32 = 40.0;
 const FORM_MIN_H: f32 = 112.0;
 /// The Quick Look band's reservation: its header row plus the 200px scroll body it caps itself at.
 const QUICK_LOOK_H: f32 = 232.0;
+/// The row-JSON panel's reservation: its header plus a body tall enough for a record and one
+/// expanded reference. The tree scrolls for the rest.
+const ROW_JSON_H: f32 = 300.0;
 
 /// The cells the table paints as dirty: one per pending `SetCell` edit, on the row its record is on
 /// *now*.
@@ -111,6 +114,9 @@ pub fn show(
     let counts = tab.grid.pending_counts();
 
     let mut reload = false;
+    // The toolbar only records the click: the capture runs one `SELECT` per expanded key, and the
+    // band closure holds `session` only immutably.
+    let mut capture_json = false;
     let mut command: Option<(&str, serde_json::Value)> = None;
 
     let next_sort = |name: &str| {
@@ -243,6 +249,17 @@ pub fn show(
                 .clicked()
             {
                 state.form_view = !state.form_view;
+            }
+            // Row JSON: the same record as a document, with its foreign keys expanded one level.
+            if design::ghost_button(ui, tokens, "JSON", true)
+                .on_hover_text("Show the selected record as JSON, with its foreign keys expanded")
+                .clicked()
+            {
+                if state.row_json.is_some() {
+                    state.row_json = None;
+                } else {
+                    capture_json = true;
+                }
             }
             design::divider(ui, tokens);
 
@@ -407,6 +424,12 @@ pub fn show(
         }
     }
 
+    // The toolbar asked for a capture: the read needs `session` mutably, so it happens here,
+    // once, rather than inside the band's closure.
+    if capture_json {
+        state.row_json = row_json_record(session, tab_index, state);
+    }
+
     // The table itself.
     // Specs stay complete: every index the widget sees is a result index, so painting and
     // commits keep landing on the right cell. Hidden columns keep their slot at width zero.
@@ -458,8 +481,14 @@ pub fn show(
     } else {
         0.0
     };
+    // The JSON panel takes the same slot, so the table reserves one or the other, never both.
+    let json_h = if state.row_json.is_some() {
+        ROW_JSON_H
+    } else {
+        0.0
+    };
     let available = match empty {
-        EmptyState::None => (ui.available_height() - 96.0 - form_h - look_h).max(140.0),
+        EmptyState::None => (ui.available_height() - 96.0 - form_h - look_h - json_h).max(140.0),
         _ => 0.0,
     };
     let (title, body) = empty_copy(&empty, &table_name);
@@ -676,6 +705,48 @@ pub fn show(
         egui::Stroke::new(1.0, tokens.stroke),
     );
 
+    // Row JSON: the selected record as a collapsible tree, with its foreign keys expanded one
+    // level. Read once per frame while the panel is open — the panel is a view of the row the
+    // pointer sits on, so it follows the selection rather than pinning a record.
+    if let Some(panel) = state.row_json.clone() {
+        // The panel follows the selection: a click on another record re-reads it, so the panel
+        // never shows the row the pointer has left.
+        let selected = state.table(tab_index).selected.map(|(r, _)| r);
+        let panel = match selected {
+            Some(row) if row != panel.row => match row_json_record(session, tab_index, state) {
+                Some(fresh) => {
+                    state.row_json = Some(fresh.clone());
+                    fresh
+                }
+                None => panel,
+            },
+            _ => panel,
+        };
+        design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("JSON · record {}", panel.row))
+                    .size(design::T_MD)
+                    .color(tokens.text),
+            );
+            design::tag_lite(ui, tokens, "one level");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                    state.row_json = None;
+                }
+                if design::ghost_button(ui, tokens, "Copy", true).clicked() {
+                    ui.ctx().copy_text(panel.text.clone());
+                }
+            });
+        });
+        egui::ScrollArea::vertical()
+            .id_salt(("row-json-scroll", tab_index))
+            .auto_shrink([false, false])
+            .max_height(ROW_JSON_H - 40.0)
+            .show(ui, |ui| json_tree(ui, tokens, "", &panel.doc, 0));
+    }
+
     // Quick Look: the selected cell pretty-printed, in a band under the hint. The engine owns
     // the formatting and did it once, when the look opened; this only paints what it returned.
     // Only the tab that opened the look paints it: switching tabs must not show a cell the new
@@ -823,6 +894,8 @@ pub fn show(
                             | "grid.revert"
                     ) {
                         state.quick_look = None;
+                        // The panel named a record, and the page under it moved.
+                        state.row_json = None;
                     }
                     if id == "grid.editCell" && state.apply_after_edit {
                         state.apply_after_edit = false;
@@ -894,6 +967,27 @@ fn form_cell<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -
 /// Read one cell through `grid.quickLook` and keep the answer, so the band paints a stored
 /// string instead of re-running the formatter every frame. A refusal becomes the record the band
 /// shows as an error: the cell is gone, and the look says so rather than showing nothing.
+/// Capture the selected record as a row document, or `None` when the read fails (the caller then
+/// keeps the panel it had, or leaves it closed — a failed read is not worth an empty panel).
+fn row_json_record(
+    session: &mut Session,
+    tab_index: usize,
+    state: &mut UiState,
+) -> Option<RowJson> {
+    let row = state.table(tab_index).selected.map(|(r, _)| r).unwrap_or(0);
+    let out = session
+        .run("grid.rowJson", serde_json::json!({"row": row}))
+        .ok()?;
+    let doc = out["row"].clone();
+    let text = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| doc.to_string());
+    Some(RowJson {
+        tab: tab_index,
+        row,
+        doc,
+        text,
+    })
+}
+
 fn quick_look_record(
     session: &mut Session,
     tab_index: usize,
@@ -924,6 +1018,73 @@ fn quick_look_record(
         }
     }
     look
+}
+
+/// One node of the row's JSON tree: a scalar as `name: value`, an object or an array as a
+/// collapsing header whose children recurse. The depth is the only thing carried down — the
+/// document itself already stopped at one foreign-key level, so this walk never needs a limit.
+fn json_tree(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    name: &str,
+    value: &serde_json::Value,
+    depth: usize,
+) {
+    let label = |text: &str, color: egui::Color32| {
+        RichText::new(text)
+            .size(design::T_SM)
+            .monospace()
+            .color(color)
+    };
+    match value {
+        serde_json::Value::Object(map) if !map.is_empty() => {
+            // A reference document is the interesting node: name the table it points at.
+            let title = match map.get("__ref__").and_then(|v| v.as_str()) {
+                Some(table) => format!("{name} → {table}"),
+                None => match map.get("__error__").and_then(|v| v.as_str()) {
+                    Some(error) => format!("{name} ✗ {error}"),
+                    None => format!("{name} {{{}}}", map.len()),
+                },
+            };
+            let color = if map.contains_key("__error__") {
+                tokens.warn
+            } else if map.contains_key("__ref__") {
+                tokens.accent
+            } else {
+                tokens.text
+            };
+            egui::CollapsingHeader::new(label(&title, color))
+                .id_salt(("json-node", depth, name))
+                .default_open(depth < 2)
+                .show(ui, |ui| {
+                    for (key, child) in map {
+                        json_tree(ui, tokens, key, child, depth + 1);
+                    }
+                });
+        }
+        serde_json::Value::Array(items) if !items.is_empty() => {
+            egui::CollapsingHeader::new(label(&format!("{name} [{}]", items.len()), tokens.text))
+                .id_salt(("json-node", depth, name))
+                .show(ui, |ui| {
+                    for (i, child) in items.iter().enumerate() {
+                        json_tree(ui, tokens, &i.to_string(), child, depth + 1);
+                    }
+                });
+        }
+        other => {
+            let text = match other {
+                serde_json::Value::String(s) => format!("{name}: {s}"),
+                serde_json::Value::Null => format!("{name}: NULL"),
+                scalar => format!("{name}: {scalar}"),
+            };
+            let color = if other.is_null() {
+                tokens.text_faint
+            } else {
+                tokens.text_dim
+            };
+            ui.label(label(&text, color));
+        }
+    }
 }
 
 fn form_band(
