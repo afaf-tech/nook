@@ -501,11 +501,24 @@ pub struct UiState {
     /// the engine command runs one `SELECT` per expanded key, so re-running it every frame would
     /// query the server sixty times a second to paint the same bytes.
     pub row_json: Option<RowJson>,
+    /// The BLOB editor band: the cell it edits and the hex buffer being typed into it. `None` is
+    /// closed. The buffer is UI state, not the engine's — nothing is staged until Save runs.
+    pub blob_editor: Option<BlobEditor>,
     /// Quick Look on one cell of the data grid. The tab is part of the key because the band reads
     /// whatever grid is painting — a look left over from another tab would inspect a cell that tab
     /// never selected. The record is the engine's answer, captured once when the look opens: a
     /// 1 MB blob re-hex-dumped every frame would block the UI thread.
     pub quick_look: Option<QuickLook>,
+}
+
+/// The BLOB editor band's state: which cell, and the hex the user is typing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlobEditor {
+    pub tab: usize,
+    pub row: usize,
+    pub column: String,
+    /// The cell's bytes as hex, seeded from the value the grid holds.
+    pub hex: String,
 }
 
 /// One captured row document, with the tab and row it belongs to.
@@ -581,6 +594,7 @@ impl Default for UiState {
             ai_request: None,
             form_view: false,
             row_json: None,
+            blob_editor: None,
             quick_look: None,
         }
     }
@@ -617,6 +631,14 @@ impl UiState {
                 look.tab -= 1;
                 Some(look)
             }
+            _ => None,
+        };
+        self.blob_editor = match self.blob_editor.take() {
+            Some(mut editor) if editor.tab > index => {
+                editor.tab -= 1;
+                Some(editor)
+            }
+            Some(editor) if editor.tab < index => Some(editor),
             _ => None,
         };
         self.row_json = match self.row_json.take() {
@@ -949,6 +971,9 @@ impl NookApp {
                 }
                 "ui.followForeignKey" => {
                     NookApp::follow_foreign_key(&mut self.session, &mut self.state, &request.params)
+                }
+                "ui.blobEditor" => {
+                    NookApp::blob_editor(&mut self.session, &mut self.state, &request.params)
                 }
                 "ui.setResultView" => {
                     NookApp::set_result_view(&self.session, &mut self.state, &request.params)
@@ -2301,6 +2326,57 @@ impl NookApp {
         })
     }
 
+    /// `ui.blobEditor`: open the hex band on one BLOB cell, seeding it from the bytes the page
+    /// holds. `{"hex": "..."}` also stages an edit, so a test can drive the whole path without
+    /// synthesising typing into the band.
+    fn blob_editor(session: &mut Session, state: &mut UiState, params: &Value) -> Value {
+        let Some(index) = session.active_tab else {
+            return serde_json::json!({"ok": false, "error": "no active tab"});
+        };
+        if !matches!(session.tabs[index].kind, TabKind::Data) {
+            return serde_json::json!({"ok": false, "error": "the active tab is not a data tab"});
+        }
+        let row = params.get("row").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let Some(column) = params.get("column").and_then(Value::as_str) else {
+            return serde_json::json!({"ok": false, "error": "pass \"column\""});
+        };
+        let Some(hex) = params.get("hex").and_then(Value::as_str) else {
+            // Opening without a buffer seeds the band from the cell, which is what the Edit
+            // button does: the user edits what is there, not a blank slate.
+            let seeded = session.tabs[index]
+                .grid
+                .result
+                .value_at(row, column)
+                .and_then(|value| match value {
+                    nook_core::Value::Bytes(bytes) => {
+                        Some(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    }
+                    _ => None,
+                });
+            let Some(hex) = seeded else {
+                return serde_json::json!({
+                    "ok": false,
+                    "error": format!("{column} on row {row} is not a BLOB"),
+                });
+            };
+            state.blob_editor = Some(BlobEditor {
+                tab: index,
+                row,
+                column: column.to_owned(),
+                hex: hex.clone(),
+            });
+            return serde_json::json!({"ok": true, "hex": hex});
+        };
+        let reply = session.run(
+            "grid.blobEditor",
+            serde_json::json!({"row": row, "column": column, "hex": hex}),
+        );
+        match reply {
+            Ok(out) => serde_json::json!({"ok": true, "bytes": out["bytes"]}),
+            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        }
+    }
+
     /// `ui.followForeignKey`: follow the foreign key in one cell of the active data grid — the
     /// same path a click on the link takes, so a screenshot can prove the target tab.
     fn follow_foreign_key(session: &mut Session, state: &mut UiState, params: &Value) -> Value {
@@ -3268,6 +3344,65 @@ mod tests {
         state.quick_look = Some(look(0));
         state.forget_tab(2);
         assert_eq!(state.quick_look.map(|look| look.tab), Some(0));
+    }
+
+    #[test]
+    fn blob_editor_seeds_from_the_cell_and_stages_the_typed_hex() {
+        let mut session = crate::demo_session();
+        let mut state = UiState::default();
+        session
+            .run(
+                "grid.open",
+                serde_json::json!({"conn": session.conns[0].cfg.id, "table": "files"}),
+            )
+            .expect("the data tab opens");
+        let index = session.active_tab.unwrap();
+
+        // Opening seeds the band from the bytes the page holds.
+        let reply = NookApp::blob_editor(
+            &mut session,
+            &mut state,
+            &serde_json::json!({"row": 0, "column": "body"}),
+        );
+        assert_eq!(reply["ok"], serde_json::json!(true), "{reply:?}");
+        let editor = state.blob_editor.clone().expect("the band is open");
+        assert_eq!(editor.tab, index);
+        assert_eq!(
+            editor.hex, "89504e470d0a1a0a",
+            "the band seeds from the cell"
+        );
+
+        // Saving stages an edit through the same pending path the inline editor uses.
+        let reply = NookApp::blob_editor(
+            &mut session,
+            &mut state,
+            &serde_json::json!({"row": 0, "column": "body", "hex": "cafe"}),
+        );
+        assert_eq!(reply["ok"], serde_json::json!(true), "{reply:?}");
+        assert_eq!(reply["bytes"], serde_json::json!(2));
+        let pending = session
+            .run("grid.pending", serde_json::json!({}))
+            .expect("the pending list reads");
+        assert_eq!(
+            pending["pending"].as_array().map(Vec::len),
+            Some(1),
+            "the blob edit is staged, not written: {pending:?}"
+        );
+
+        // Junk never reaches the engine as a panic: it is a named error in the reply.
+        let reply = NookApp::blob_editor(
+            &mut session,
+            &mut state,
+            &serde_json::json!({"row": 0, "column": "body", "hex": "\u{e9}0"}),
+        );
+        assert_eq!(reply["ok"], serde_json::json!(false), "{reply:?}");
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ASCII"),
+            "the refusal names the alphabet: {reply:?}"
+        );
     }
 
     #[test]

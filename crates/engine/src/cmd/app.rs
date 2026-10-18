@@ -14,7 +14,7 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("Report the current preferences."),
         CommandSpec::new("app.setSetting", "Change a preference", "App", set_setting)
             .params(r#"{"key":"theme","value":"light"}"#)
-            .help("Set one preference: theme, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout."),
+            .help("Set one preference: theme, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects, max_blob_bytes, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout."),
         CommandSpec::new("app.log", "Message log", "App", get_log)
             .params(r#"{"limit":50}"#)
             .help("Recent messages, oldest first."),
@@ -86,6 +86,7 @@ fn get_settings(session: &mut Session, _p: &crate::Params) -> Result<serde_json:
         "auto_commit_edits": s.auto_commit_edits,
         "keyword_case": match s.keyword_case { KeywordCase::Upper => "upper", KeywordCase::Lower => "lower", KeywordCase::Preserve => "preserve" },
         "show_system_objects": s.show_system_objects,
+        "max_blob_bytes": s.max_blob_bytes,
         "ai": {
             "provider": s.ai.provider.as_str(),
             "model": s.ai.model(),
@@ -133,6 +134,9 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
         "confirm_destructive" => session.settings.confirm_destructive = truthy(&value),
         "auto_commit_edits" => session.settings.auto_commit_edits = truthy(&value),
         "show_system_objects" => session.settings.show_system_objects = truthy(&value),
+        "max_blob_bytes" => {
+            session.settings.max_blob_bytes = clamp_usize(&value, 0, 1 << 30)?;
+        }
         "keyword_case" => {
             session.settings.keyword_case = KeywordCase::parse(&value)
                 .ok_or_else(|| Error::config("keyword_case must be upper, lower or preserve"))?;
@@ -186,7 +190,7 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
         }
         other => {
             return Err(Error::config(format!(
-                "unknown preference '{other}'; try theme, density, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout"
+                "unknown preference '{other}'; try theme, density, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects, max_blob_bytes, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout"
             )))
         }
     }

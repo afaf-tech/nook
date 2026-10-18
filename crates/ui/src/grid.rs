@@ -3,7 +3,7 @@
 use egui::RichText;
 use nook_engine::{Level, Session};
 
-use crate::app::{QuickLook, RowJson, UiState};
+use crate::app::{BlobEditor, QuickLook, RowJson, UiState};
 use crate::table::{TableColumn, TableEvent, TableView};
 use crate::theme::{self as design, Tokens};
 
@@ -117,6 +117,9 @@ pub fn show(
     // The toolbar only records the click: the capture runs one `SELECT` per expanded key, and the
     // band closure holds `session` only immutably.
     let mut capture_json = false;
+    // The Quick Look band's Edit button only records the click: seeding the buffer reads the page,
+    // which the band's closure cannot borrow mutably.
+    let mut open_blob: Option<(usize, String)> = None;
     let mut command: Option<(&str, serde_json::Value)> = None;
 
     let next_sort = |name: &str| {
@@ -481,8 +484,8 @@ pub fn show(
     } else {
         0.0
     };
-    // The JSON panel takes the same slot, so the table reserves one or the other, never both.
-    let json_h = if state.row_json.is_some() {
+    // The JSON panel and the blob editor take the same slot, so the table reserves one of them.
+    let json_h = if state.row_json.is_some() || state.blob_editor.is_some() {
         ROW_JSON_H
     } else {
         0.0
@@ -761,6 +764,97 @@ pub fn show(
         egui::Stroke::new(1.0, tokens.stroke),
     );
 
+    // The BLOB editor: hex in, bytes staged. It shares the slot Quick Look and the JSON panel
+    // use, so only one band is ever open.
+    if let Some((row, column)) = open_blob.take() {
+        let hex = rows
+            .get(row)
+            .and_then(|values| {
+                columns
+                    .iter()
+                    .position(|c| c == &column)
+                    .and_then(|i| values.get(i))
+            })
+            .and_then(|value| match value {
+                nook_core::Value::Bytes(bytes) => {
+                    Some(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        state.blob_editor = Some(BlobEditor {
+            tab: tab_index,
+            row,
+            column,
+            hex,
+        });
+        state.quick_look = None;
+        state.row_json = None;
+    }
+    if let Some(editor) = state.blob_editor.clone() {
+        design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
+        ui.add_space(4.0);
+        let mut buffer = editor.hex.clone();
+        let mut save = false;
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("BLOB · {} · record {}", editor.column, editor.row))
+                    .size(design::T_MD)
+                    .color(tokens.text),
+            );
+            design::chip(
+                ui,
+                tokens,
+                &format!("{} bytes", buffer.len() / 2),
+                tokens.info,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                    close = true;
+                }
+                if design::primary_button(ui, tokens, "Save", true).clicked() {
+                    save = true;
+                }
+            });
+        });
+        egui::ScrollArea::vertical()
+            .id_salt(("blob-editor", editor.tab, editor.row))
+            .auto_shrink([false, false])
+            .max_height(ROW_JSON_H - 40.0)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut buffer)
+                        .font(tokens.mono(12.5))
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(6)
+                        .hint_text("hex bytes, e.g. deadbeef"),
+                );
+            });
+        // The buffer lives in the widget's own state, so a frame that changed nothing does not
+        // overwrite what was typed.
+        if buffer != editor.hex {
+            if let Some(current) = state.blob_editor.as_mut() {
+                current.hex = buffer;
+            }
+        }
+        if save {
+            let hex = state
+                .blob_editor
+                .as_ref()
+                .map(|e| e.hex.clone())
+                .unwrap_or_default();
+            command = Some((
+                "grid.blobEditor",
+                serde_json::json!({"row": editor.row, "column": editor.column, "hex": hex}),
+            ));
+            state.blob_editor = None;
+        }
+        if close {
+            state.blob_editor = None;
+        }
+    }
+
     // Row JSON: the selected record as a collapsible tree, with its foreign keys expanded one
     // level. Read once per frame while the panel is open — the panel is a view of the row the
     // pointer sits on, so it follows the selection rather than pinning a record.
@@ -832,6 +926,12 @@ pub fn show(
                 }
                 if design::ghost_button(ui, tokens, "Copy", true).clicked() {
                     ui.ctx().copy_text(look.text.clone());
+                }
+                // A BLOB is the one value the inline editor cannot type: hex is the way in.
+                if look.kind == "bytes"
+                    && design::ghost_button(ui, tokens, "Edit hex", true).clicked()
+                {
+                    open_blob = Some((look.row, look.column.clone()));
                 }
             });
         });
@@ -950,8 +1050,9 @@ pub fn show(
                             | "grid.revert"
                     ) {
                         state.quick_look = None;
-                        // The panel named a record, and the page under it moved.
+                        // The panel and the hex band named a record, and the page under them moved.
                         state.row_json = None;
+                        state.blob_editor = None;
                     }
                     if id == "grid.editCell" && state.apply_after_edit {
                         state.apply_after_edit = false;

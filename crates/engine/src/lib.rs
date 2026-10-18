@@ -597,6 +597,9 @@ pub struct Settings {
     pub keyword_case: sqltext::KeywordCase,
     pub keep_history: usize,
     pub show_system_objects: bool,
+    /// The largest BLOB the hex editor will load. A 2 GB `bytea` painted as hex is how a database
+    /// client eats all the RAM; the refusal names the size instead.
+    pub max_blob_bytes: usize,
     /// The AI provider, model and endpoint behind `ai.generate`. The key is not here: it lives in
     /// the keychain, so the profile file never holds a secret.
     pub ai: nook_ai::AiConfig,
@@ -615,6 +618,7 @@ impl Default for Settings {
             keyword_case: sqltext::KeywordCase::Upper,
             keep_history: 500,
             show_system_objects: false,
+            max_blob_bytes: 1024 * 1024,
             ai: nook_ai::AiConfig::default(),
         }
     }

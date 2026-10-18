@@ -495,3 +495,83 @@ fn follow_foreign_key_falls_back_to_every_column_without_a_primary_key() {
         "the fallback must say so: {out:?}"
     );
 }
+
+#[test]
+fn blob_editor_decodes_hex_into_a_pending_edit() {
+    let mut f = Fixture::new("blob-editor");
+    f.sql("CREATE TABLE files (id INTEGER PRIMARY KEY, body BLOB)");
+    f.sql("INSERT INTO files (id, body) VALUES (1, x'00ff10')");
+    f.open_grid("files");
+
+    let out = f
+        .session
+        .run(
+            "grid.blobEditor",
+            json!({"row": 0, "column": "body", "hex": "deadbeef"}),
+        )
+        .expect("valid hex stages an edit");
+    assert_eq!(out["ok"], json!(true), "{out:?}");
+    assert_eq!(out["bytes"], json!(4), "four bytes decoded: {out:?}");
+
+    // The edit is staged like any other, so nothing is written until `grid.apply`.
+    let pending = f
+        .session
+        .run("grid.pending", json!({}))
+        .expect("the pending list reads");
+    assert_eq!(
+        pending["pending"].as_array().map(Vec::len),
+        Some(1),
+        "the blob edit must be one pending statement: {pending:?}"
+    );
+    let applied = f.session.run("grid.apply", json!({})).expect("apply runs");
+    assert_eq!(applied["applied"], json!(1), "{applied:?}");
+    let read = f.sql("SELECT hex(body) AS body FROM files WHERE id = 1");
+    assert_eq!(
+        read["objects"][0]["body"],
+        json!("DEADBEEF"),
+        "the applied bytes round-trip: {read:?}"
+    );
+}
+
+#[test]
+fn blob_editor_rejects_junk_hex_and_oversized_blobs() {
+    let mut f = Fixture::new("blob-editor-junk");
+    f.sql("CREATE TABLE files (id INTEGER PRIMARY KEY, body BLOB)");
+    f.sql("INSERT INTO files (id, body) VALUES (1, x'00')");
+    f.open_grid("files");
+
+    // Odd length and a non-hex pair are both named errors, never a silent truncation. Whitespace
+    // is not junk: it is stripped first, so a dump pasted with spaces still decodes.
+    for bad in ["abc", "zz", "de gg", "\u{e9}0"] {
+        let err = f
+            .session
+            .run(
+                "grid.blobEditor",
+                json!({"row": 0, "column": "body", "hex": bad}),
+            )
+            .expect_err("junk hex is refused");
+        assert!(
+            err.to_string().to_lowercase().contains("hex"),
+            "the refusal must name hex, got {err} for {bad:?}"
+        );
+    }
+
+    // The cap is a setting, and the refusal names the size it would have loaded.
+    f.session
+        .run(
+            "app.setSetting",
+            json!({"key": "max_blob_bytes", "value": "2"}),
+        )
+        .expect("the cap is a preference");
+    let err = f
+        .session
+        .run(
+            "grid.blobEditor",
+            json!({"row": 0, "column": "body", "hex": "00112233"}),
+        )
+        .expect_err("an oversized blob is refused");
+    assert!(
+        err.to_string().contains("4") && err.to_string().contains("2"),
+        "the refusal names both sizes, got {err}"
+    );
+}

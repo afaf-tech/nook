@@ -70,6 +70,8 @@ pub fn demo_session() -> nook_engine::Session {
         CREATE TABLE customers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT, city TEXT, joined TEXT);\
         CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers(id), total REAL, status TEXT);\
         CREATE INDEX ix_orders_customer ON orders(customer_id);\
+        CREATE TABLE files (id INTEGER PRIMARY KEY, name TEXT, body BLOB);\
+        INSERT INTO files (id, name, body) VALUES (1, 'logo.bin', x'89504e470d0a1a0a');\
         INSERT INTO customers (name, email, city, joined) VALUES \
           ('Ada Lovelace','ada@example.com','London','2026-01-04'),\
           ('Grace Hopper','grace@example.com','New York','2026-01-19'),\

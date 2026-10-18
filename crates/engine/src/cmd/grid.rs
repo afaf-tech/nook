@@ -75,6 +75,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.hideColumns", "Hide columns of this table", "Data", hide_columns)
             .params(r#"{"hidden":["password_hash"]}"#)
             .help("Hiding is a view concern: the query and `grid.fetchPage` still return every column. The list persists per connection and table, and an empty list clears it."),
+        CommandSpec::new("grid.blobEditor", "Edit a BLOB from hex", "Data", blob_editor)
+            .params(r#"{"row":0,"column":"body","hex":"deadbeef"}"#)
+            .help("Decodes hex (whitespace ignored) into the same pending edit the inline editor stages; nothing is written until grid.apply. Junk hex and a blob over max_blob_bytes are named errors."),
         CommandSpec::new("grid.quickLook", "Inspect one cell", "Data", quick_look)
             .params(r#"{"row":0,"column":"payload"}"#)
             .help("One cell as readable text: JSON is re-indented (invalid JSON stays verbatim with a note), bytes are hex with an offset column and an ASCII gutter, NULL says so. Never an error for bad content — a json column holding bad text is exactly when you need to look at it."),
@@ -1140,6 +1143,56 @@ fn hide_columns(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
         return Ok(json!({ "hidden": wanted }));
     }
     Ok(json!({ "hidden": current }))
+}
+
+/// Stage a BLOB edit from hex text.
+///
+/// The write path is the same `record_edit` the inline editor uses: the blob editor only decodes
+/// the text and hands over a `Value::Bytes`, so `plan_edits` and `grid.apply` need no new case.
+/// The cap exists because a 2 GB `bytea` painted as hex is how a database client eats all the RAM.
+fn blob_editor(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    sync_grid_table(session, index)?;
+    let row = p.int_arg("row").unwrap_or(0).max(0) as usize;
+    let column = p.str_arg("column")?;
+    let hex = p.str_arg("hex")?;
+    let compact: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+    // Byte-slicing a `String` panics mid-character, so the alphabet is checked before the pairs
+    // are cut: a caller sending "é0" gets a named error, not a crashed app.
+    if !compact.is_ascii() {
+        return Err(Error::config("hex must be ASCII: only 0-9 and a-f"));
+    }
+    if compact.len() % 2 != 0 {
+        return Err(Error::config(format!(
+            "hex must have an even number of digits, got {}",
+            compact.len()
+        )));
+    }
+    let bytes = (0..compact.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&compact[i..i + 2], 16)
+                .map_err(|_| Error::config(format!("'{}' is not hex", &compact[i..i + 2])))
+        })
+        .collect::<Result<Vec<u8>>>()?;
+    let cap = session.settings.max_blob_bytes;
+    if bytes.len() > cap {
+        return Err(Error::config(format!(
+            "that blob is {} bytes; the editor stops at max_blob_bytes ({cap})",
+            bytes.len()
+        )));
+    }
+    // The staged edit carries the bytes; the response only reports what was decoded.
+    record_edit(
+        session,
+        index,
+        EditKind::SetCell,
+        row,
+        Some(column),
+        Some(Value::Bytes(bytes.clone())),
+        vec![],
+    )?;
+    Ok(json!({ "ok": true, "bytes": bytes.len() }))
 }
 
 /// Bytes as a hex dump: 16 per line, an eight-digit offset column, and an ASCII gutter where a
