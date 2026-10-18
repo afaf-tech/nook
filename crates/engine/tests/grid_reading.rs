@@ -257,3 +257,69 @@ fn hide_columns_rejects_unknown_names() {
         .unwrap_err();
     assert!(err.message().contains("hidden"), "{err:?}");
 }
+
+#[test]
+fn quick_look_formats_json_hex_and_text() {
+    let mut f = Fixture::new("quick-look");
+    f.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, doc TEXT, data BLOB, note TEXT, extra TEXT)");
+    f.sql(
+        "INSERT INTO t VALUES (1, '{\"a\": 1, \"b\": [2, 3]}', x'00ff10deadbeef', 'plain', NULL)",
+    );
+    f.open_grid("t");
+
+    // Valid JSON is re-indented and says so.
+    let out = f
+        .session
+        .run("grid.quickLook", json!({"row": 0, "column": "doc"}))
+        .expect("json");
+    let text = out["text"].as_str().unwrap();
+    assert!(text.contains("{\n  \"a\": 1"), "{out:?}");
+    assert_eq!(out["kind"], json!("json"));
+
+    // A BLOB is hex, 16 bytes per line, with an offset column and an ASCII gutter.
+    let out = f
+        .session
+        .run("grid.quickLook", json!({"row": 0, "column": "data"}))
+        .expect("hex");
+    let text = out["text"].as_str().unwrap();
+    assert_eq!(out["kind"], json!("bytes"));
+    assert!(text.contains("00000000  00 ff 10 de ad be ef"), "{text:?}");
+    assert!(text.ends_with(".......\n"), "the ASCII gutter: {text:?}");
+
+    // Plain text and a NULL both come back readable, never an error.
+    let out = f
+        .session
+        .run("grid.quickLook", json!({"row": 0, "column": "note"}))
+        .expect("text");
+    assert_eq!(out["text"], json!("plain"));
+    let out = f
+        .session
+        .run("grid.quickLook", json!({"row": 0, "column": "extra"}))
+        .expect("null column reads fine");
+    assert_eq!(out["kind"], json!("null"));
+}
+
+#[test]
+fn quick_look_invalid_json_stays_verbatim_with_a_note() {
+    let mut f = Fixture::new("quick-look-bad");
+    f.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, doc TEXT)");
+    f.sql("INSERT INTO t VALUES (1, '{not json')");
+    f.open_grid("t");
+    let out = f
+        .session
+        .run("grid.quickLook", json!({"row": 0, "column": "doc"}))
+        .expect("bad json is still a look, not an error");
+    // Verbatim text with the note, because a json column holding bad text is
+    // exactly when you need to look at it.
+    assert_eq!(out["text"], json!("{not json"));
+    assert!(
+        out["note"].as_str().unwrap().contains("invalid JSON"),
+        "{out:?}"
+    );
+    // Out-of-range coordinates are named errors.
+    let err = f
+        .session
+        .run("grid.quickLook", json!({"row": 9, "column": "doc"}))
+        .unwrap_err();
+    assert!(err.message().contains("9"), "{err:?}");
+}

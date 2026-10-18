@@ -65,6 +65,7 @@ pub(crate) fn list(
 ) -> table::TableEvent {
     let mut view = TableView {
         columns: spec.columns,
+        hidden: &[],
         rows: spec.rows,
         pending: Vec::new(),
         inserted: Vec::new(),

@@ -98,6 +98,9 @@ pub struct TableView<'a> {
     // of a statement, and for a grid whose table the engine would refuse to edit (no primary key).
     // It gates the inline editor and the dirty stripe, so a read-only view cannot look editable.
     pub columns: &'a [TableColumn],
+    /// Column names hidden from view. They keep their slot at width zero — indices into
+    /// `rows` stay result indices, so painting and commits land on the right cell.
+    pub hidden: &'a [String],
     pub rows: &'a [Vec<Value>],
     /// Cells with an unsaved edit, as (row, column).
     pub pending: Vec<(usize, usize)>,
@@ -206,6 +209,10 @@ fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
         .iter()
         .enumerate()
         .map(|(index, column)| {
+            if view.hidden.contains(&column.name) {
+                // Hidden keeps the slot but not the space: width zero, nothing painted.
+                return 0.0;
+            }
             let mut width =
                 text_width(ui, &column.name, header_font.clone()) + CELL_PAD * 2.0 + 18.0;
             if column.primary_key {
@@ -373,6 +380,11 @@ pub fn show(
 
                         let mut x = row_rect.left() + gutter_w;
                         for (column_index, column) in view.columns.iter().enumerate() {
+                            // Hidden: advance the slot, paint and interact nothing. The x
+                            // cursor moves by zero, so the next visible column stays put.
+                            if widths[column_index] <= 0.0 {
+                                continue;
+                            }
                             let cell = Rect::from_min_size(
                                 egui::pos2(x, row_rect.top()),
                                 Vec2::new(widths[column_index], view.row_h),
@@ -584,6 +596,9 @@ fn head(
     );
     let mut x = header_rect.left() + gutter_w;
     for (index, column) in view.columns.iter().enumerate() {
+        if widths[index] <= 0.0 {
+            continue;
+        }
         let cell = Rect::from_min_size(
             egui::pos2(x, header_rect.top()),
             Vec2::new(widths[index], HEAD_H),
@@ -689,6 +704,7 @@ mod tests {
     ) -> TableView<'a> {
         TableView {
             columns,
+            hidden: &[],
             rows,
             pending: Vec::new(),
             inserted: Vec::new(),

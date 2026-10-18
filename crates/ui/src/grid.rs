@@ -412,10 +412,11 @@ pub fn show(
                 .collect()
         })
         .unwrap_or_default();
+    // Specs stay complete: every index the widget sees is a result index, so painting and
+    // commits keep landing on the right cell. Hidden columns keep their slot at width zero.
     let specs: Vec<TableColumn> = columns
         .iter()
         .enumerate()
-        .filter(|(_, name)| !hidden.contains(name))
         .map(|(index, name)| {
             TableColumn::new(name.clone(), types.get(index).cloned().unwrap_or_default())
                 .pk(primary_key.contains(name))
@@ -468,6 +469,7 @@ pub fn show(
     }
     let mut view = TableView {
         columns: &specs,
+        hidden: &hidden,
         rows: &rows,
         pending: dirty_cells.clone(),
         inserted: inserted_rows.clone(),
@@ -616,6 +618,10 @@ pub fn show(
                     } else {
                         design::tag_lite(ui, tokens, "read-only");
                     }
+                    // Quick Look is read-only, so every grid offers it.
+                    if design::ghost_button(ui, tokens, "Quick Look", true).clicked() {
+                        state.quick_look = Some((row, name));
+                    }
                 }
                 None => {
                     // The same refusal: there is no editor to open on a read-only grid.
@@ -659,6 +665,65 @@ pub fn show(
         hint.top() + 0.5,
         egui::Stroke::new(1.0, tokens.stroke),
     );
+
+    // Quick Look: the selected cell pretty-printed, in a band under the hint. The engine owns
+    // the formatting; this only paints the text it returned.
+    if let Some((row, column)) = state.quick_look.clone() {
+        let record = session.run(
+            "grid.quickLook",
+            serde_json::json!({"row": row, "column": column}),
+        );
+        match record {
+            Ok(out) => {
+                let text = out["text"].as_str().unwrap_or_default().to_owned();
+                let kind = out["kind"].as_str().unwrap_or_default().to_owned();
+                let note = out["note"].as_str().map(String::from);
+                let look = design::band(ui, tokens, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.label(
+                            RichText::new(format!("Quick Look · {column}"))
+                                .size(design::T_MD)
+                                .color(tokens.text),
+                        );
+                        design::chip(ui, tokens, &kind, tokens.info);
+                        if let Some(note) = &note {
+                            ui.label(RichText::new(note).size(11.5).color(tokens.warn));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                                state.quick_look = None;
+                            }
+                            if design::ghost_button(ui, tokens, "Copy", true).clicked() {
+                                ui.ctx().copy_text(text.clone());
+                            }
+                        });
+                    });
+                    egui::ScrollArea::vertical()
+                        .id_salt(("quick-look-scroll", tab_index))
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(text)
+                                    .size(design::T_SM)
+                                    .monospace()
+                                    .color(tokens.text_dim),
+                            );
+                        });
+                });
+                ui.painter().hline(
+                    look.left()..=look.right(),
+                    look.top() + 0.5,
+                    egui::Stroke::new(1.0, tokens.stroke),
+                );
+            }
+            Err(e) => {
+                // A deleted row or a dropped column is an honest error band, and the look
+                // does not linger over a cell that no longer exists.
+                state.quick_look = None;
+                design::error_band(ui, tokens, "Quick Look failed", &e.to_string(), |_ui| {});
+            }
+        }
+    }
 
     // Pending statements, exactly as they will be sent, and the drawer's `.dfoot`.
     if pending > 0 {
@@ -1235,6 +1300,7 @@ mod tests {
                     ui.add_space(2.0);
                     let mut view = TableView {
                         columns: &columns,
+                        hidden: &[],
                         rows: &rows,
                         pending: Vec::new(),
                         inserted: Vec::new(),

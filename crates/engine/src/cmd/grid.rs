@@ -75,6 +75,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.hideColumns", "Hide columns of this table", "Data", hide_columns)
             .params(r#"{"hidden":["password_hash"]}"#)
             .help("Hiding is a view concern: the query and `grid.fetchPage` still return every column. The list persists per connection and table, and an empty list clears it."),
+        CommandSpec::new("grid.quickLook", "Inspect one cell", "Data", quick_look)
+            .params(r#"{"row":0,"column":"payload"}"#)
+            .help("One cell as readable text: JSON is re-indented (invalid JSON stays verbatim with a note), bytes are hex with an offset column and an ASCII gutter, NULL says so. Never an error for bad content — a json column holding bad text is exactly when you need to look at it."),
     ]
 }
 
@@ -1124,6 +1127,95 @@ fn hide_columns(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
         return Ok(json!({ "hidden": wanted }));
     }
     Ok(json!({ "hidden": current }))
+}
+
+/// Bytes as a hex dump: 16 per line, an eight-digit offset column, and an ASCII gutter where a
+/// printable byte is itself and anything else is a dot — the layout every hex editor taught.
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (i, chunk) in bytes.chunks(16).enumerate() {
+        let offset = i * 16;
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = chunk
+            .iter()
+            .map(|b| {
+                if (0x20..0x7f).contains(b) {
+                    *b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        out.push_str(&format!("{offset:08x}  {:<47}  {ascii}\n", hex.join(" ")));
+    }
+    out
+}
+
+/// One cell as readable text: the formatting rules live here, the UI paints the string it gets —
+/// the same split as `grid.formView`. Bad content is never an error: an invalid-JSON cell or a
+/// binary blob is exactly what Quick Look exists to read.
+fn quick_look(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let row = p.int_opt("row", 0).max(0) as usize;
+    let column = p.str_arg("column")?;
+    let tab = &session.tabs[index];
+    let row_count = tab.grid.result.rows.len();
+    if row >= row_count {
+        return Err(Error::not_found(format!(
+            "no row {row} on this page (it holds {row_count} rows)"
+        )));
+    }
+    let value = tab
+        .grid
+        .result
+        .value_at(row, &column)
+        .cloned()
+        .ok_or_else(|| {
+            Error::not_found(format!(
+                "no column '{column}': this table holds {}",
+                tab.grid.result.columns.join(", ")
+            ))
+        })?;
+    Ok(match value {
+        Value::Null => json!({"kind": "null", "text": ""}),
+        Value::Json(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(parsed) => json!({
+                "kind": "json",
+                "text": serde_json::to_string_pretty(&parsed).unwrap_or(text),
+            }),
+            Err(_) => json!({
+                "kind": "json",
+                "text": text,
+                "note": "invalid JSON — shown verbatim",
+            }),
+        },
+        // Text-shaped columns holding JSON still get the pretty path: SQLite has no json type,
+        // so `SELECT json_object(...)` lands as TEXT.
+        Value::Text(text) => {
+            let trimmed = text.trim_start();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(parsed) => json!({
+                        "kind": "json",
+                        "text": serde_json::to_string_pretty(&parsed).unwrap_or(text),
+                    }),
+                    Err(_) => json!({
+                        "kind": "text",
+                        "text": text,
+                        "note": "invalid JSON — shown verbatim",
+                    }),
+                }
+            } else {
+                json!({"kind": "text", "text": text})
+            }
+        }
+        Value::Bytes(bytes) => json!({
+            "kind": "bytes",
+            "size": bytes.len(),
+            "text": hex_dump(&bytes),
+        }),
+        other => json!({"kind": other.type_name(), "text": other.display()}),
+    })
 }
 
 #[cfg(test)]

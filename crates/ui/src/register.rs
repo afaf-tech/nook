@@ -16,6 +16,9 @@ use crate::icons::Glyph;
 use crate::table::{self, TableColumn, TableEvent, TableState, TableView};
 use crate::theme::{self as design, Emphasis, Mark, Tokens};
 
+/// Views that never hide columns share one empty list.
+const NO_HIDDEN: &[String] = &[];
+
 /// What the register shows before anything has run — the editor's own invitation, so an empty query
 /// tab says one thing in one wording rather than two.
 pub const INVITATION: &str = "Write a statement and press Run, or Cmd+Enter.";
@@ -691,6 +694,7 @@ fn grid(
         .collect();
     let mut view = TableView {
         columns: &columns,
+        hidden: NO_HIDDEN,
         rows: &result.rows,
         pending: Vec::new(),
         inserted: Vec::new(),

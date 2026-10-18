@@ -496,6 +496,9 @@ pub struct UiState {
     /// Form view on the data tab: the selected record as a vertical form. A flag on the UI state,
     /// not the engine's — the engine command is stateless and reads whatever row it is handed.
     pub form_view: bool,
+    /// Quick Look on one cell of the data grid: the (row, column) the band inspects. A flag on
+    /// the UI state — the engine command is stateless and reads whatever cell it is handed.
+    pub quick_look: Option<(usize, String)>,
 }
 
 impl Default for UiState {
@@ -548,6 +551,7 @@ impl Default for UiState {
             ai_providers: None,
             ai_request: None,
             form_view: false,
+            quick_look: None,
         }
     }
 }
