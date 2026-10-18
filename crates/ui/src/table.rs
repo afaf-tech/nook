@@ -252,6 +252,19 @@ fn hinted(column: &TableColumn, value: &Value) -> String {
     }
 }
 
+/// The URL a cell would open, if any: only `http(s)` reaches the OS handler, so a `javascript:`
+/// or `file:` value in a `__format__link` column is inert text rather than a handed-off string.
+fn openable_url(value: &Value) -> Option<&str> {
+    match value {
+        Value::Text(url) | Value::Json(url)
+            if url.starts_with("http://") || url.starts_with("https://") =>
+        {
+            Some(url)
+        }
+        _ => None,
+    }
+}
+
 fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
     let header_font = tokens.font(12.5);
     let cell_font = tokens.mono(12.5);
@@ -603,16 +616,15 @@ pub fn show(
                                 } else if response.clicked()
                                     && is_url
                                     && ui.input(|i| i.modifiers.command)
+                                    && openable_url(&value).is_some()
                                 {
                                     // Opening a browser is an OS action, so it costs the same
-                                    // deliberate gesture a foreign key does: a plain click still
-                                    // selects the cell. Only http(s) is handed to the OS — a
-                                    // stray `javascript:` or `file:` value stays inert text.
-                                    if let Value::Text(url) | Value::Json(url) = &value {
-                                        if url.starts_with("http://") || url.starts_with("https://")
-                                        {
-                                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                                        }
+                                    // deliberate gesture a foreign key does. Only http(s) is
+                                    // openable — a stray `javascript:` or `file:` value is not a
+                                    // link at all, so the click falls through to selecting the cell
+                                    // instead of being swallowed.
+                                    if let Some(url) = openable_url(&value) {
+                                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                                     }
                                 } else if response.clicked()
                                     && is_link
@@ -1276,5 +1288,36 @@ mod tests {
             matches!(event, TableEvent::FollowForeignKey(0, 1)),
             "a command-click must follow the key, got {event:?}"
         );
+    }
+
+    #[test]
+    fn a_link_cell_that_holds_no_url_still_selects_on_a_command_click() {
+        // Only http(s) is openable, so a `javascript:` or `ftp:` value must not eat the click:
+        // an unopenable link is ordinary text, and a swallowed click is a cell you cannot copy.
+        let columns = [TableColumn::new("site__format__link", "TEXT")];
+        let rows = vec![vec![Value::Text("javascript:alert(1)".into())]];
+        let build = || view(&columns, &rows, false, 300.0);
+        let command = egui::Modifiers {
+            command: true,
+            mac_cmd: true,
+            ..egui::Modifiers::default()
+        };
+        let event = click_cell(&mut build(), egui::Id::new("link-not-a-url"), 0, 0, command);
+        assert!(
+            matches!(event, TableEvent::Select(0, 0)),
+            "an unopenable link must fall through to selecting, got {event:?}"
+        );
+
+        // The helper is the one place that decides what may be handed to the OS.
+        assert_eq!(
+            openable_url(&Value::Text("https://x.test".into())),
+            Some("https://x.test")
+        );
+        assert_eq!(
+            openable_url(&Value::Text("javascript:alert(1)".into())),
+            None
+        );
+        assert_eq!(openable_url(&Value::Text("ftp://x.test".into())), None);
+        assert_eq!(openable_url(&Value::Null), None);
     }
 }

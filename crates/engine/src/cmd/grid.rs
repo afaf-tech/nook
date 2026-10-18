@@ -1440,8 +1440,6 @@ fn expand_reference(
     }))
 }
 
-/// The `Value` a JSON scalar came from. Only used to render a literal back into SQL, so the
-/// scalar kinds the grid produces are enough.
 /// Where a foreign-key cell points: the target table, and a `WHERE` that selects the one row.
 ///
 /// The target's primary key is the WHERE when it has one. A keyless target gets every column
