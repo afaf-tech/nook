@@ -496,9 +496,10 @@ pub struct UiState {
     /// Form view on the data tab: the selected record as a vertical form. A flag on the UI state,
     /// not the engine's — the engine command is stateless and reads whatever row it is handed.
     pub form_view: bool,
-    /// Quick Look on one cell of the data grid: the (row, column) the band inspects. A flag on
-    /// the UI state — the engine command is stateless and reads whatever cell it is handed.
-    pub quick_look: Option<(usize, String)>,
+    /// Quick Look on one cell of the data grid: (tab, row, column). The tab is part of the key
+    /// because the band reads whatever grid is painting — a look left over from another tab would
+    /// inspect a cell that tab never selected. The engine command is stateless.
+    pub quick_look: Option<(usize, usize, String)>,
 }
 
 impl Default for UiState {
@@ -891,6 +892,9 @@ impl NookApp {
                 }
                 "ui.selectRange" => {
                     NookApp::select_range(&self.session, &mut self.state, &request.params)
+                }
+                "ui.quickLook" => {
+                    NookApp::quick_look(&mut self.session, &mut self.state, &request.params)
                 }
                 "ui.setResultView" => {
                     NookApp::set_result_view(&self.session, &mut self.state, &request.params)
@@ -2198,12 +2202,14 @@ impl NookApp {
                 return serde_json::json!({"ok": false, "error": "the active tab is not a data tab"})
             }
         };
-        let pair = |key: &str| -> Option<(usize, usize)> {
+        // Signed first: a negative corner is a caller error, not a very large row index that
+        // would clamp to the last one and silently select the wrong rectangle.
+        let pair = |key: &str| -> Option<(i64, i64)> {
             let items = params.get(key)?.as_array()?;
             if items.len() != 2 {
                 return None;
             }
-            Some((items[0].as_i64()? as usize, items[1].as_i64()? as usize))
+            Some((items[0].as_i64()?, items[1].as_i64()?))
         };
         let (Some(anchor), Some(cursor)) = (pair("anchor"), pair("cursor")) else {
             return serde_json::json!({
@@ -2211,6 +2217,16 @@ impl NookApp {
                 "error": "anchor and cursor must both be [row, column]",
             });
         };
+        if anchor.0 < 0 || anchor.1 < 0 || cursor.0 < 0 || cursor.1 < 0 {
+            return serde_json::json!({
+                "ok": false,
+                "error": "anchor and cursor must not be negative",
+            });
+        }
+        let (anchor, cursor) = (
+            (anchor.0 as usize, anchor.1 as usize),
+            (cursor.0 as usize, cursor.1 as usize),
+        );
         let grid = &session.tabs[index].grid;
         let rows = grid.result.rows.len();
         let columns = grid.result.columns.len();
@@ -2228,6 +2244,48 @@ impl NookApp {
             "cursor": [cursor.0, cursor.1],
             "rows": anchor.0.abs_diff(cursor.0) + 1,
             "columns": anchor.1.abs_diff(cursor.1) + 1,
+        })
+    }
+
+    /// `ui.quickLook`: open the Quick Look band on one cell of the active data grid, so the band
+    /// can be driven and screenshotted the way `ui.selectRange` drives the rectangle. The engine
+    /// command stays the formatter; this only sets the flag the band reads.
+    fn quick_look(
+        session: &mut nook_engine::Session,
+        state: &mut UiState,
+        params: &Value,
+    ) -> Value {
+        let index = match session.active_tab {
+            Some(index) if session.tabs[index].kind == TabKind::Data => index,
+            None => return serde_json::json!({"ok": false, "error": "no active tab"}),
+            Some(_) => {
+                return serde_json::json!({"ok": false, "error": "the active tab is not a data tab"})
+            }
+        };
+        let row = params.get("row").and_then(Value::as_i64);
+        let column = params.get("column").and_then(Value::as_str);
+        let (Some(row), Some(column)) = (row, column) else {
+            return serde_json::json!({
+                "ok": false,
+                "error": "pass \"row\" and \"column\"",
+            });
+        };
+        if row < 0 {
+            return serde_json::json!({"ok": false, "error": "row must not be negative"});
+        }
+        let reply = match session.run(
+            "grid.quickLook",
+            serde_json::json!({"row": row, "column": column}),
+        ) {
+            Ok(out) => out,
+            Err(e) => return serde_json::json!({"ok": false, "error": e.to_string()}),
+        };
+        state.quick_look = Some((index, row as usize, column.to_owned()));
+        serde_json::json!({
+            "ok": true,
+            "tab": index,
+            "kind": reply["kind"],
+            "text": reply["text"],
         })
     }
 
@@ -3029,6 +3087,57 @@ mod tests {
         assert_eq!(
             reply["error"],
             serde_json::json!("anchor and cursor must both be [row, column]")
+        );
+
+        // A negative corner is a caller error, not a row index that clamps to the last one.
+        let reply = NookApp::select_range(
+            &session,
+            &mut state,
+            &serde_json::json!({"anchor": [-1, 0], "cursor": [0, 0]}),
+        );
+        assert_eq!(
+            reply["error"],
+            serde_json::json!("anchor and cursor must not be negative")
+        );
+    }
+
+    #[test]
+    fn quick_look_opens_the_band_on_the_active_data_grid() {
+        let mut session = crate::demo_session();
+        let mut state = UiState::default();
+        session
+            .run(
+                "grid.open",
+                serde_json::json!({"conn": session.conns[0].cfg.id, "table": "customers"}),
+            )
+            .expect("the data tab opens");
+        let index = session.active_tab.unwrap();
+
+        let reply = NookApp::quick_look(
+            &mut session,
+            &mut state,
+            &serde_json::json!({"row": 0, "column": "email"}),
+        );
+        assert_eq!(reply["ok"], serde_json::json!(true), "{reply:?}");
+        assert_eq!(reply["text"], serde_json::json!("ada@example.com"));
+        // The band reads this flag, and it carries the tab: another tab must not paint it.
+        assert_eq!(
+            state.quick_look,
+            Some((index, 0, "email".to_owned())),
+            "the band must be keyed by the tab that opened it"
+        );
+
+        // The engine owns the refusal, so an unknown cell never sets the flag.
+        let before = state.quick_look.clone();
+        let reply = NookApp::quick_look(
+            &mut session,
+            &mut state,
+            &serde_json::json!({"row": 0, "column": "nope"}),
+        );
+        assert_eq!(reply["ok"], serde_json::json!(false), "{reply:?}");
+        assert_eq!(
+            state.quick_look, before,
+            "a refused look leaves the band alone"
         );
     }
 }

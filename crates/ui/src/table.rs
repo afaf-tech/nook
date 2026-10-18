@@ -300,8 +300,19 @@ pub fn show(
                 .id_salt(id.with("v"))
                 .max_height(view.height)
                 .auto_shrink([false, false])
+                // A cell drag paints a rectangle; letting the area also claim the drag for
+                // scrolling would do both at once. The wheel and the bar still scroll.
+                .scroll_source(egui::scroll_area::ScrollSource {
+                    drag: egui::scroll_area::DragScroll::Never,
+                    ..Default::default()
+                })
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    // Every visible cell's rect, so a drag that leaves the cell it started on can
+                    // still be mapped to the cell under the pointer: egui routes the drag to the
+                    // widget that was pressed, so the neighbours never see it themselves.
+                    let mut cells: Vec<(usize, usize, Rect)> = Vec::new();
+                    let mut dragging = false;
                     for (row_index, row) in view.rows.iter().enumerate() {
                         let (row_rect, row_response) =
                             ui.allocate_exact_size(Vec2::new(total_w, view.row_h), Sense::click());
@@ -389,6 +400,7 @@ pub fn show(
                                 egui::pos2(x, row_rect.top()),
                                 Vec2::new(widths[column_index], view.row_h),
                             );
+                            cells.push((row_index, column_index, cell));
                             // An editor only exists while the grid can be edited: a reload that
                             // fails clears the result under an open editor, and a `Commit` from it
                             // would be refused by the engine.
@@ -415,7 +427,7 @@ pub fn show(
                                 let fill = if cursor == Some((row_index, column_index)) {
                                     // The cursor cell is the strong corner: it must read as
                                     // "this is the cell", not just part of the rectangle.
-                                    tokens.selection.gamma_multiply(1.35)
+                                    tokens.selection_strong
                                 } else {
                                     tokens.selection
                                 };
@@ -501,10 +513,12 @@ pub fn show(
                                 // the cursor while the anchor stays where the drag began. A
                                 // plain click collapses both onto the one cell; shift-click
                                 // keeps the anchor and moves only the cursor.
-                                if response.dragged()
-                                    || (response.clicked()
-                                        && ui.input(|i| i.modifiers.shift)
-                                        && view.anchor.is_some())
+                                if response.dragged() {
+                                    dragging = true;
+                                    event = TableEvent::SelectExtend(row_index, column_index);
+                                } else if response.clicked()
+                                    && ui.input(|i| i.modifiers.shift)
+                                    && view.anchor.is_some()
                                 {
                                     event = TableEvent::SelectExtend(row_index, column_index);
                                 } else if response.clicked() {
@@ -539,6 +553,17 @@ pub fn show(
                                 ui.painter().clip_rect(),
                                 view.rows[row_index].first().map(|v| v.display())
                             );
+                        }
+                    }
+                    // A drag that left the cell it started on: map the pointer to the cell under it,
+                    // so the rectangle grows instead of collapsing to the pressed cell.
+                    if dragging {
+                        if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
+                            if let Some(&(row, column, _)) =
+                                cells.iter().find(|(_, _, rect)| rect.contains(pointer))
+                            {
+                                event = TableEvent::SelectExtend(row, column);
+                            }
                         }
                     }
                 });
@@ -614,14 +639,18 @@ fn head(
         // offered when the caller allows sorting — the data grid — so the read-only previews
         // keep their full column set.
         if view.sortable {
+            // The head is the only way back: hiding the last visible column would leave no header
+            // to right-click, so the menu keeps one column standing.
+            let visible = view.columns.len().saturating_sub(view.hidden.len());
             response.context_menu(|ui| {
-                if ui
-                    .button(format!("Hide column \"{}\"", column.name))
-                    .clicked()
+                if visible > 1
+                    && ui
+                        .button(format!("Hide column \"{}\"", column.name))
+                        .clicked()
                 {
                     event = TableEvent::HideColumn(column.name.clone());
                 }
-                if ui.button("Show all columns").clicked() {
+                if !view.hidden.is_empty() && ui.button("Show all columns").clicked() {
                     event = TableEvent::ShowAllColumns;
                 }
             });
@@ -702,9 +731,21 @@ mod tests {
         editable: bool,
         height: f32,
     ) -> TableView<'a> {
+        view_hiding(columns, rows, editable, height, &[])
+    }
+
+    /// The same view with columns hidden: the slots stay, so every index a test reads is a
+    /// result index — which is the property the hidden-column paint depends on.
+    fn view_hiding<'a>(
+        columns: &'a [TableColumn],
+        rows: &'a [Vec<Value>],
+        editable: bool,
+        height: f32,
+        hidden: &'a [String],
+    ) -> TableView<'a> {
         TableView {
             columns,
-            hidden: &[],
+            hidden,
             rows,
             pending: Vec::new(),
             inserted: Vec::new(),
@@ -939,6 +980,56 @@ mod tests {
             reached,
             "the head never scrolled sideways, so the column at x={} is unreachable",
             head(tail).right()
+        );
+    }
+
+    /// Hiding a middle column must not shift the cells around it: the widget's `column` index is a
+    /// result index, so the third column's value keeps painting in the third slot's place — with
+    /// the second slot collapsed to nothing.
+    #[test]
+    fn a_hidden_middle_column_leaves_the_other_cells_on_their_own_values() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let columns = [
+            TableColumn::new("id", "INTEGER"),
+            TableColumn::new("secret", "TEXT"),
+            TableColumn::new("city", "TEXT"),
+        ];
+        let rows = vec![vec![
+            Value::Int(1),
+            Value::text("hunter2"),
+            Value::text("London"),
+        ]];
+        let hidden = [String::from("secret")];
+        let id = egui::Id::new("hidden-middle-column");
+        let mut state = TableState::default();
+        let mut rects = Vec::new();
+        let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            let mut inline = view_hiding(&columns, &rows, false, 300.0, &hidden);
+            let _ = show(ui, &tokens, &mut inline, &mut state, id);
+        });
+        out.textures_delta.clear();
+        for column in 0..3 {
+            rects.push(
+                ctx.read_response(id.with(("cell", 0, column)))
+                    .map(|response| response.rect),
+            );
+        }
+        // The hidden slot paints and interacts nothing at all — no rect, so nothing can click it.
+        assert!(
+            rects[1].is_none(),
+            "the hidden column still registered an interactable rect"
+        );
+        // The visible neighbours keep their own values and their own order.
+        let first = rects[0].expect("the first column paints");
+        let third = rects[2].expect("the third column paints");
+        assert!(
+            third.left() >= first.right() - 0.5,
+            "the third column overlapped the first: {} then {}",
+            first.right(),
+            third.left()
         );
     }
 }

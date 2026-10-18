@@ -18,6 +18,8 @@ const FORM_ROW_H: f32 = 30.0;
 const FORM_HEAD_H: f32 = 40.0;
 /// The band's floor: a one-column record still shows its header and a row of context.
 const FORM_MIN_H: f32 = 112.0;
+/// The Quick Look band's reservation: its header row plus the 200px scroll body it caps itself at.
+const QUICK_LOOK_H: f32 = 232.0;
 
 /// The cells the table paints as dirty: one per pending `SetCell` edit, on the row its record is on
 /// *now*.
@@ -66,6 +68,10 @@ pub fn show(
         .map(nook_engine::TableRef::key)
         .unwrap_or_else(|| "(no table)".into());
     let columns = tab.grid.result.columns.clone();
+    // Hidden columns stay out of the view only: the engine's page still holds them, and
+    // copy/export read the page — hiding is a display concern. The list is a cached field, not a
+    // command: the paint path must not touch the store every frame.
+    let hidden: Vec<String> = tab.grid.hidden.clone();
     let rows = tab.grid.result.rows.clone();
     let types = tab.grid.result.column_types.clone();
     let primary_key = tab.grid.primary_key.clone();
@@ -392,26 +398,16 @@ pub fn show(
             }
         });
         if open_design {
-            if let Some(reference) = tab.grid.table.clone() {
-                if let Some(conn_index) = tab.conn {
-                    crate::tree::open_design_tab(session, conn_index, reference);
-                }
+            // Cloned before the call: opening the tab borrows the session mutably, and the tab
+            // this block reads is a borrow of the same session.
+            let target = tab.grid.table.clone().zip(tab.conn);
+            if let Some((reference, conn_index)) = target {
+                crate::tree::open_design_tab(session, conn_index, reference);
             }
         }
     }
 
-    // The table itself. Hidden columns stay out of the view only: the engine's page still
-    // holds them, and copy/export read the page — hiding is a display concern.
-    let hidden: Vec<String> = session
-        .run("grid.hideColumns", serde_json::json!({}))
-        .ok()
-        .and_then(|v| v["hidden"].as_array().cloned())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    // The table itself.
     // Specs stay complete: every index the widget sees is a result index, so painting and
     // commits keep landing on the right cell. Hidden columns keep their slot at width zero.
     let specs: Vec<TableColumn> = columns
@@ -450,8 +446,20 @@ pub fn show(
     let form_h = form
         .as_ref()
         .map_or(0.0, |record| form_height(record, ui.available_height()));
+    // Quick Look competes for the same pane: its band is capped at 200px of body plus the header
+    // row, so the table reserves that before it asks for its own height. Without the reservation
+    // the band pushes the pending drawer and the footer off the bottom of the window.
+    let look_h = if state
+        .quick_look
+        .as_ref()
+        .is_some_and(|(t, ..)| *t == tab_index)
+    {
+        QUICK_LOOK_H
+    } else {
+        0.0
+    };
     let available = match empty {
-        EmptyState::None => (ui.available_height() - 96.0 - form_h).max(140.0),
+        EmptyState::None => (ui.available_height() - 96.0 - form_h - look_h).max(140.0),
         _ => 0.0,
     };
     let (title, body) = empty_copy(&empty, &table_name);
@@ -620,7 +628,7 @@ pub fn show(
                     }
                     // Quick Look is read-only, so every grid offers it.
                     if design::ghost_button(ui, tokens, "Quick Look", true).clicked() {
-                        state.quick_look = Some((row, name));
+                        state.quick_look = Some((tab_index, row, name));
                     }
                 }
                 None => {
@@ -668,7 +676,11 @@ pub fn show(
 
     // Quick Look: the selected cell pretty-printed, in a band under the hint. The engine owns
     // the formatting; this only paints the text it returned.
-    if let Some((row, column)) = state.quick_look.clone() {
+    // Only the tab that opened the look paints it: switching tabs must not inspect a cell the
+    // new grid never selected.
+    if let Some((look_tab, row, column)) =
+        state.quick_look.clone().filter(|(t, ..)| *t == tab_index)
+    {
         let record = session.run(
             "grid.quickLook",
             serde_json::json!({"row": row, "column": column}),
@@ -678,43 +690,41 @@ pub fn show(
                 let text = out["text"].as_str().unwrap_or_default().to_owned();
                 let kind = out["kind"].as_str().unwrap_or_default().to_owned();
                 let note = out["note"].as_str().map(String::from);
-                let look = design::band(ui, tokens, |ui| {
-                    ui.horizontal_centered(|ui| {
-                        ui.label(
-                            RichText::new(format!("Quick Look · {column}"))
-                                .size(design::T_MD)
-                                .color(tokens.text),
-                        );
-                        design::chip(ui, tokens, &kind, tokens.info);
-                        if let Some(note) = &note {
-                            ui.label(RichText::new(note).size(11.5).color(tokens.warn));
+                // The same shape the form band takes: a hairline, a header row, and a bounded
+                // scroll body. `design::band` is a fixed-height toolbar and would clip the body.
+                design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Quick Look · {column}"))
+                            .size(design::T_MD)
+                            .color(tokens.text),
+                    );
+                    design::chip(ui, tokens, &kind, tokens.info);
+                    if let Some(note) = &note {
+                        ui.label(RichText::new(note).size(11.5).color(tokens.warn));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                            state.quick_look = None;
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if design::ghost_button(ui, tokens, "Close", true).clicked() {
-                                state.quick_look = None;
-                            }
-                            if design::ghost_button(ui, tokens, "Copy", true).clicked() {
-                                ui.ctx().copy_text(text.clone());
-                            }
-                        });
+                        if design::ghost_button(ui, tokens, "Copy", true).clicked() {
+                            ui.ctx().copy_text(text.clone());
+                        }
                     });
-                    egui::ScrollArea::vertical()
-                        .id_salt(("quick-look-scroll", tab_index))
-                        .max_height(200.0)
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(text)
-                                    .size(design::T_SM)
-                                    .monospace()
-                                    .color(tokens.text_dim),
-                            );
-                        });
                 });
-                ui.painter().hline(
-                    look.left()..=look.right(),
-                    look.top() + 0.5,
-                    egui::Stroke::new(1.0, tokens.stroke),
-                );
+                egui::ScrollArea::vertical()
+                    .id_salt(("quick-look-scroll", look_tab))
+                    .auto_shrink([false, false])
+                    .max_height(QUICK_LOOK_H - 40.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(text)
+                                .size(design::T_SM)
+                                .monospace()
+                                .color(tokens.text_dim),
+                        );
+                    });
             }
             Err(e) => {
                 // A deleted row or a dropped column is an honest error band, and the look

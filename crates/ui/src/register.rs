@@ -140,7 +140,7 @@ impl Register {
         self.script != script
     }
 
-    /// What the Copy button puts on the clipboard: the active view's own text — the grid's CSV, or
+    /// What the Copy button puts on the clipboard: the active view's own text — the grid's TSV, or
     /// the JSON text. Both are the engine's serialisation of the same `ResultSet`, and a statement
     /// with no result set has nothing to copy.
     pub fn clipboard(&self, state: &SqlState) -> String {
@@ -152,7 +152,9 @@ impl Register {
             return String::new();
         };
         match self.view {
-            View::Grid => result.to_csv(),
+            // TSV, not CSV: a spreadsheet pastes it as a real table without a quoting round trip,
+            // and it is the same serialisation `grid.copyTsv` hands the control channel.
+            View::Grid => result.to_tsv(None, true),
             View::Json => json_text(result),
         }
     }
@@ -1465,8 +1467,8 @@ mod tests {
         let result = sql.results[0].result.clone().unwrap_or_default();
 
         let mut register = Register::from(&sql, None);
-        assert_eq!(register.clipboard(&sql), result.to_csv());
-        assert!(register.clipboard(&sql).starts_with("id,name\n"));
+        assert_eq!(register.clipboard(&sql), result.to_tsv(None, true));
+        assert!(register.clipboard(&sql).starts_with("id\tname\n"));
 
         register.view = View::Json;
         assert_eq!(register.clipboard(&sql), json_text(&result));

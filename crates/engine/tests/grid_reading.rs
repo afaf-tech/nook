@@ -223,7 +223,18 @@ fn hide_columns_persists_and_does_not_change_the_query() {
         json!(["a", "b", "c"]),
         "hiding must not change the query"
     );
-    // Hidden columns survive a reopen of the same table in the same session's store.
+    // Hidden columns survive a reopen: a fresh `grid.open` binds the table and reads the stored
+    // list, which is the only way a preference outlives the tab that set it.
+    f.open_grid("t");
+    let reopened = f
+        .session
+        .run("grid.fetchPage", json!({}))
+        .expect("page after reopen");
+    assert_eq!(
+        reopened["hidden"],
+        json!(["b"]),
+        "a reopened table must come back with the same columns hidden"
+    );
     let out = f
         .session
         .run("grid.hideColumns", json!({}))

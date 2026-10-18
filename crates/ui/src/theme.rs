@@ -189,6 +189,9 @@ pub struct Tokens {
     pub grid_row_alt: Color32,
     pub grid_line: Color32,
     pub selection: Color32,
+    /// The cursor cell of a selection rectangle: one step stronger than `selection`, so the live
+    /// corner reads as "this is the cell" rather than just part of the block.
+    pub selection_strong: Color32,
     pub dirty: Color32,
     pub dirty_text: Color32,
     pub hover: Color32,
@@ -228,6 +231,7 @@ impl Tokens {
                 grid_row_alt: Color32::from_rgb(0xf7, 0xf9, 0xfc),
                 grid_line: Color32::from_rgb(0xe7, 0xec, 0xf3),
                 selection: Color32::from_rgb(0xd6, 0xe4, 0xff),
+                selection_strong: Color32::from_rgb(0xb9, 0xcd, 0xf8),
                 dirty: Color32::from_rgb(0xff, 0xf2, 0xce),
                 dirty_text: Color32::from_rgb(0x7a, 0x51, 0x00),
                 hover: Color32::from_rgb(0xe3, 0xe9, 0xf1),
@@ -269,6 +273,7 @@ impl Tokens {
                 grid_row_alt: Color32::from_rgb(0x24, 0x24, 0x24),
                 grid_line: Color32::from_rgb(0x30, 0x30, 0x30),
                 selection: Color32::from_rgb(0x17, 0x32, 0x4f),
+                selection_strong: Color32::from_rgb(0x24, 0x50, 0x7f),
                 dirty: Color32::from_rgb(0x33, 0x2a, 0x00),
                 dirty_text: Color32::from_rgb(0xe5, 0xc0, 0x7b),
                 hover: Color32::from_rgb(0x2b, 0x2b, 0x2b),
@@ -3098,12 +3103,18 @@ mod tests {
     fn palettes_clear_their_contrast_floors() {
         for tokens in [Tokens::of("dark"), Tokens::of("light")] {
             let theme = if tokens.dark { "dark" } else { "light" };
-            let floors: [(&str, Color32, Color32, f32); 29] = [
+            let floors: [(&str, Color32, Color32, f32); 30] = [
                 ("text on panel", tokens.text, tokens.panel, 4.5),
                 ("text on background", tokens.text, tokens.background, 4.5),
                 ("text on panel_alt", tokens.text, tokens.panel_alt, 4.5),
                 ("text on panel_high", tokens.text, tokens.panel_high, 4.5),
                 ("text on selection", tokens.text, tokens.selection, 4.5),
+                (
+                    "text on selection_strong",
+                    tokens.text,
+                    tokens.selection_strong,
+                    4.5,
+                ),
                 ("text on accent_dim", tokens.text, tokens.accent_dim, 4.5),
                 (
                     "text on grid_row_alt",

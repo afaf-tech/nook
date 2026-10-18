@@ -40,12 +40,21 @@ pub struct Options {
     pub demo: bool,
 }
 
+/// Numbers the demo databases so two sessions in one process never share a file.
+static DEMO_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Build the sample database used by `--demo` and by the screenshot check.
 pub fn demo_session() -> nook_engine::Session {
     use nook_core::{ConnectionConfig, Value};
     use nook_engine::{Conn, Level, Session, TabKind};
 
-    let path = std::env::temp_dir().join("nook-demo.db");
+    // One file per session: the screenshot check and several tests each build a demo session, and
+    // a shared path means one deleting the database the other is mid-query on.
+    let path = std::env::temp_dir().join(format!(
+        "nook-demo-{}-{}.db",
+        std::process::id(),
+        DEMO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_file(&path);
     let cfg = ConnectionConfig::sqlite(path.to_string_lossy());
     let mut session = Session::new();

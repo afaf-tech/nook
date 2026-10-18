@@ -119,6 +119,7 @@ fn grid_summary(session: &Session, index: usize) -> serde_json::Value {
         "filter": tab.grid.filter,
         "total_rows": tab.grid.total_rows,
         "pending": tab.grid.pending.len(),
+        "hidden": tab.grid.hidden,
         "truncated": tab.grid.result.truncated,
         "elapsed_ms": tab.grid.elapsed_ms,
         "error": tab.grid.error,
@@ -1092,11 +1093,7 @@ fn hide_columns(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
         .map(|c| c.cfg.id.clone())
         .unwrap_or_default();
     let key = format!("hidden:{}:{}", conn_id, table.key());
-    let current: Vec<String> = crate::store::load_ui_state(&key)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default();
+    let current: Vec<String> = tab.grid.hidden.clone();
 
     if p.raw().contains_key("hidden") {
         // `hidden` must be an array of names (a comma-separated string is accepted as the
@@ -1124,6 +1121,11 @@ fn hide_columns(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
         }
         let value = serde_json::to_string(&wanted).map_err(|e| Error::internal(e.to_string()))?;
         crate::store::save_ui_state(&key, &value)?;
+        // The cache and the store move together: the paint path reads the cache, and a stale one
+        // would keep painting columns the store already says are hidden.
+        if let Some(tab) = session.tabs.get_mut(index) {
+            tab.grid.hidden = wanted.clone();
+        }
         return Ok(json!({ "hidden": wanted }));
     }
     Ok(json!({ "hidden": current }))

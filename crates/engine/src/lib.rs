@@ -398,6 +398,10 @@ pub struct GridState {
     /// The drag origin of the selection rectangle. `cursor` is the live corner; a plain click
     /// collapses both to the same cell.
     pub anchor: Option<(usize, usize)>,
+    /// Column names hidden from the view, read from the store when the tab binds its table and
+    /// rewritten by `grid.hideColumns`. Cached here because the grid paints every frame and a
+    /// store read per frame would open `nook.db` sixty times a second.
+    pub hidden: Vec<String>,
     pub total_rows: Option<u64>,
     pub error: Option<String>,
     pub elapsed_ms: f64,
@@ -416,6 +420,7 @@ impl GridState {
         self.pending.clear();
         self.cursor = None;
         self.anchor = None;
+        self.hidden.clear();
         self.total_rows = None;
         self.error = None;
         self.elapsed_ms = 0.0;

@@ -370,6 +370,14 @@ pub fn bind_grid_table(session: &mut Session, tab_index: usize, table: TableRef)
         .get_mut(tab_index)
         .ok_or_else(|| Error::not_found("tab is gone"))?;
     tab.grid.table = Some(table.clone());
+    // The hidden list is a stored preference: read it once here, so the paint path reads a field
+    // rather than the store, and a reopened table comes back with the same columns hidden.
+    let conn_id = session
+        .conns
+        .get(conn_index)
+        .map(|c| c.cfg.id.clone())
+        .unwrap_or_default();
+    tab.grid.hidden = hidden_columns(&conn_id, &table).unwrap_or_default();
     tab.payload
         .insert("dialect".into(), serde_json::json!(dialect_name(dialect)));
     match info {
@@ -385,6 +393,16 @@ pub fn bind_grid_table(session: &mut Session, tab_index: usize, table: TableRef)
         }
     }
     Ok(())
+}
+
+/// The columns this table's view hides, as stored under `hidden:<conn>:<table>`. One reader, so the
+/// key is built in exactly one place.
+pub fn hidden_columns(conn_id: &str, table: &TableRef) -> Result<Vec<String>> {
+    let key = format!("hidden:{conn_id}:{}", table.key());
+    let stored = crate::store::load_ui_state(&key)?;
+    Ok(stored
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default())
 }
 
 pub(crate) fn dialect_name(d: nook_core::Dialect) -> &'static str {
