@@ -550,9 +550,11 @@ pub fn show(
                                 let display = hinted(column, &value);
                                 // A foreign key that holds a value is a link: it points at a row
                                 // the user can go to. A NULL key points nowhere and stays plain.
-                                // A `__format__link` column is a link too, but to a URL.
+                                // A `__format__link` column is a link too, but only when it holds
+                                // something the OS can open: painting `javascript:` as a link
+                                // would promise a click that does nothing.
                                 let is_url = column.hint.as_deref() == Some("link")
-                                    && !matches!(value, Value::Null);
+                                    && openable_url(&value).is_some();
                                 let is_link = !matches!(value, Value::Null)
                                     && view.foreign_keys.iter().any(|fk| fk == &column.name);
                                 let colour = match &value {
@@ -1308,7 +1310,8 @@ mod tests {
             "an unopenable link must fall through to selecting, got {event:?}"
         );
 
-        // The helper is the one place that decides what may be handed to the OS.
+        // The helper is the one place that decides what may be handed to the OS, and the paint
+        // reads it too: a cell that cannot open must not wear the link's accent or underline.
         assert_eq!(
             openable_url(&Value::Text("https://x.test".into())),
             Some("https://x.test")
