@@ -400,10 +400,22 @@ pub fn show(
         }
     }
 
-    // The table itself.
+    // The table itself. Hidden columns stay out of the view only: the engine's page still
+    // holds them, and copy/export read the page — hiding is a display concern.
+    let hidden: Vec<String> = session
+        .run("grid.hideColumns", serde_json::json!({}))
+        .ok()
+        .and_then(|v| v["hidden"].as_array().cloned())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     let specs: Vec<TableColumn> = columns
         .iter()
         .enumerate()
+        .filter(|(_, name)| !hidden.contains(name))
         .map(|(index, name)| {
             TableColumn::new(name.clone(), types.get(index).cloned().unwrap_or_default())
                 .pk(primary_key.contains(name))
@@ -526,6 +538,16 @@ pub fn show(
                 "grid.sort",
                 serde_json::json!({"column": column, "desc": desc}),
             ));
+        }
+        TableEvent::HideColumn(name) => {
+            let mut list = hidden.clone();
+            if !list.contains(&name) {
+                list.push(name);
+            }
+            command = Some(("grid.hideColumns", serde_json::json!({ "hidden": list })));
+        }
+        TableEvent::ShowAllColumns => {
+            command = Some(("grid.hideColumns", serde_json::json!({ "hidden": [] })));
         }
         TableEvent::None => {}
     }

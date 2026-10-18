@@ -2985,9 +2985,15 @@ mod tests {
 
     #[test]
     fn select_range_sets_the_rectangle_and_clamps_it() {
-        let session = crate::demo_session();
+        let mut session = crate::demo_session();
         let mut state = UiState::default();
-        // The demo session's active tab is a data tab holding the customers grid.
+        // Open the customers grid: the demo session's own active tab is a query tab.
+        session
+            .run(
+                "grid.open",
+                serde_json::json!({"conn": session.conns[0].cfg.id, "table": "customers"}),
+            )
+            .expect("the data tab opens");
         let index = session.active_tab.unwrap();
 
         let reply = NookApp::select_range(

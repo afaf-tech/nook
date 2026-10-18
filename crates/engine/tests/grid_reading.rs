@@ -204,3 +204,56 @@ fn copy_tsv_without_params_uses_the_stored_selection() {
         .expect("copy");
     assert_eq!(out["tsv"].as_str().unwrap(), "6\n");
 }
+
+#[test]
+fn hide_columns_persists_and_does_not_change_the_query() {
+    let mut f = Fixture::new("hide-columns");
+    f.sql("CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER)");
+    f.sql("INSERT INTO t VALUES (1,2,3)");
+    f.open_grid("t");
+    let out = f
+        .session
+        .run("grid.hideColumns", json!({"hidden": ["b"]}))
+        .expect("hide");
+    assert_eq!(out["hidden"], json!(["b"]), "{out:?}");
+    // Hiding is a view concern: the page still holds every column.
+    let page = f.session.run("grid.fetchPage", json!({})).expect("page");
+    assert_eq!(
+        page["columns"],
+        json!(["a", "b", "c"]),
+        "hiding must not change the query"
+    );
+    // Hidden columns survive a reopen of the same table in the same session's store.
+    let out = f
+        .session
+        .run("grid.hideColumns", json!({}))
+        .expect("read back");
+    assert_eq!(out["hidden"], json!(["b"]), "{out:?}");
+    // Unhiding by omission: an explicit empty list clears it.
+    f.session
+        .run("grid.hideColumns", json!({"hidden": []}))
+        .expect("clear");
+    let out = f
+        .session
+        .run("grid.hideColumns", json!({}))
+        .expect("read back");
+    assert_eq!(out["hidden"], json!([]), "{out:?}");
+}
+
+#[test]
+fn hide_columns_rejects_unknown_names() {
+    let mut f = Fixture::new("hide-unknown");
+    f.sql("CREATE TABLE t (a INTEGER)");
+    f.sql("INSERT INTO t VALUES (1)");
+    f.open_grid("t");
+    let err = f
+        .session
+        .run("grid.hideColumns", json!({"hidden": ["nope"]}))
+        .unwrap_err();
+    assert!(err.message().contains("nope"), "{err:?}");
+    let err = f
+        .session
+        .run("grid.hideColumns", json!({"hidden": 7}))
+        .unwrap_err();
+    assert!(err.message().contains("hidden"), "{err:?}");
+}

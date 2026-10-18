@@ -84,6 +84,10 @@ pub enum TableEvent {
     Commit(usize, usize, String),
     Cancel,
     Sort(String),
+    /// Hide one column, by name (the head's context menu).
+    HideColumn(String),
+    /// Un-hide every hidden column of this table (the head's context menu).
+    ShowAllColumns,
 }
 
 /// Right-click handler for one table row: the row index in, menu items out.
@@ -590,6 +594,22 @@ fn head(
         if response.hovered() {
             ui.painter()
                 .rect_filled(cell, CornerRadius::ZERO, tokens.hover);
+        }
+        // The head's context menu: hide this column, or bring every hidden one back. Only
+        // offered when the caller allows sorting — the data grid — so the read-only previews
+        // keep their full column set.
+        if view.sortable {
+            response.context_menu(|ui| {
+                if ui
+                    .button(format!("Hide column \"{}\"", column.name))
+                    .clicked()
+                {
+                    event = TableEvent::HideColumn(column.name.clone());
+                }
+                if ui.button("Show all columns").clicked() {
+                    event = TableEvent::ShowAllColumns;
+                }
+            });
         }
         let sorted = view
             .sort

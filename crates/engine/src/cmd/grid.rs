@@ -72,6 +72,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.selection", "Read or set the selection rectangle", "Data", grid_selection)
             .params(r#"{"anchor":[0,0],"cursor":[5,3]}"#)
             .help("anchor is where the drag started, cursor is the live corner. Without params it reads the current rectangle; both corners are clamped to the page and returned normalised (min, max)."),
+        CommandSpec::new("grid.hideColumns", "Hide columns of this table", "Data", hide_columns)
+            .params(r#"{"hidden":["password_hash"]}"#)
+            .help("Hiding is a view concern: the query and `grid.fetchPage` still return every column. The list persists per connection and table, and an empty list clears it."),
     ]
 }
 
@@ -1067,6 +1070,60 @@ fn grid_selection(session: &mut Session, p: &Params) -> Result<serde_json::Value
         "rows": rows_range.count(),
         "columns": cols_range.count(),
     }))
+}
+
+/// Hidden columns, persisted per `conn + table` through the store's `ui_state` — one writer per
+/// fact. Hiding never touches the query: `grid.fetchPage` keeps returning every column, and the
+/// UI decides what to paint. Without params, the current list reads back.
+fn hide_columns(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let tab = &session.tabs[index];
+    let table = tab
+        .grid
+        .table
+        .clone()
+        .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
+    let conn_id = tab
+        .conn
+        .and_then(|i| session.conns.get(i))
+        .map(|c| c.cfg.id.clone())
+        .unwrap_or_default();
+    let key = format!("hidden:{}:{}", conn_id, table.key());
+    let current: Vec<String> = crate::store::load_ui_state(&key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default();
+
+    if p.raw().contains_key("hidden") {
+        // `hidden` must be an array of names (a comma-separated string is accepted as the
+        // repo's list convention); a bare scalar is junk and stays junk.
+        match p.raw().get("hidden") {
+            Some(serde_json::Value::Array(_)) | Some(serde_json::Value::String(_)) => {}
+            Some(other) => {
+                return Err(Error::config(format!(
+                    "parameter 'hidden' must be a list of column names, got {}",
+                    crate::json_kind(other)
+                )))
+            }
+            None => {}
+        }
+        let wanted = p.list("hidden");
+        // Every hidden name must be a column of the table the grid shows: a typo would
+        // silently hide nothing, and the caller has no other way to learn the real names.
+        for name in &wanted {
+            if !tab.grid.result.columns.iter().any(|c| c == name) {
+                return Err(Error::not_found(format!(
+                    "no column '{name}': this table holds {}",
+                    tab.grid.result.columns.join(", ")
+                )));
+            }
+        }
+        let value = serde_json::to_string(&wanted).map_err(|e| Error::internal(e.to_string()))?;
+        crate::store::save_ui_state(&key, &value)?;
+        return Ok(json!({ "hidden": wanted }));
+    }
+    Ok(json!({ "hidden": current }))
 }
 
 #[cfg(test)]
