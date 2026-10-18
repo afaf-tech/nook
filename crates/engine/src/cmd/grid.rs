@@ -1159,12 +1159,7 @@ fn hints(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
         .columns
         .iter()
         .filter_map(|name| {
-            let (label, kind) = name.rsplit_once("__format__")?;
-            // Only the three kinds the grid paints are hints; an unknown marker stays part of the
-            // name rather than silently vanishing from the header.
-            if !matches!(kind, "money" | "check" | "link") || label.is_empty() {
-                return None;
-            }
+            let (label, kind) = nook_model::format_hint(name)?;
             Some(json!({ "column": name, "label": label, "kind": kind }))
         })
         .collect();
@@ -1377,7 +1372,12 @@ fn row_json(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         }) else {
             continue;
         };
-        let Some(value) = doc.get(name).cloned() else {
+        // The original value, not the JSON copy: a round-trip turns `Bytes` into base64 text and a
+        // `UInt` above `i64::MAX` into a float, so the WHERE would search for the wrong literal.
+        let Some(position) = columns.iter().position(|c| c == name) else {
+            continue;
+        };
+        let Some(value) = values.get(position).cloned() else {
             continue;
         };
         if value.is_null() {
@@ -1394,7 +1394,7 @@ fn expand_reference(
     session: &mut Session,
     conn: usize,
     fk: &nook_model::ForeignKey,
-    key: &serde_json::Value,
+    key: &Value,
 ) -> Result<serde_json::Value> {
     let sql = {
         let driver = session.driver_for(conn)?;
@@ -1407,7 +1407,7 @@ fn expand_reference(
             "SELECT * FROM {} WHERE {} = {} LIMIT 1",
             nook_core::quote_qualified(fk.ref_schema.as_deref(), &fk.ref_table, dialect),
             nook_core::quote_ident(column, dialect),
-            nook_core::sql_literal(&value_of(key), dialect)
+            nook_core::sql_literal(key, dialect)
         )
     };
     let result = {
@@ -1420,7 +1420,7 @@ fn expand_reference(
                 "no row in {} with {} = {}",
                 fk.ref_table,
                 fk.ref_columns.join(", "),
-                key
+                key.display()
             ),
         }));
     };
@@ -1430,26 +1430,18 @@ fn expand_reference(
         doc.insert(name.clone(), value.to_json());
     }
     Ok(json!({
-        "__ref__": fk.ref_table,
+        // Schema-qualified: a Postgres follow needs the schema, and `public.customers` is the
+        // name the plan specifies.
+        "__ref__": match &fk.ref_schema {
+            Some(schema) => format!("{schema}.{}", fk.ref_table),
+            None => fk.ref_table.clone(),
+        },
         "row": doc,
     }))
 }
 
 /// The `Value` a JSON scalar came from. Only used to render a literal back into SQL, so the
 /// scalar kinds the grid produces are enough.
-fn value_of(json: &serde_json::Value) -> Value {
-    match json {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => match n.as_i64() {
-            Some(i) => Value::Int(i),
-            None => Value::Float(n.as_f64().unwrap_or_default()),
-        },
-        serde_json::Value::String(s) => Value::Text(s.clone()),
-        other => Value::Text(other.to_string()),
-    }
-}
-
 /// Where a foreign-key cell points: the target table, and a `WHERE` that selects the one row.
 ///
 /// The target's primary key is the WHERE when it has one. A keyless target gets every column
@@ -1552,11 +1544,14 @@ fn follow_foreign_key(session: &mut Session, p: &Params) -> Result<serde_json::V
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            format!(
-                "{} = {}",
-                nook_core::quote_ident(name, dialect),
-                nook_core::sql_literal(row.get(i).unwrap_or(&Value::Null), dialect)
-            )
+            // `col = NULL` matches nothing in every dialect, so a row with a NULL column would
+            // produce a filter that selects no rows at all. `IS NULL` is the only honest form.
+            let value = row.get(i).unwrap_or(&Value::Null);
+            let ident = nook_core::quote_ident(name, dialect);
+            match value {
+                Value::Null => format!("{ident} IS NULL"),
+                other => format!("{ident} = {}", nook_core::sql_literal(other, dialect)),
+            }
         })
         .collect::<Vec<_>>()
         .join(" AND ");

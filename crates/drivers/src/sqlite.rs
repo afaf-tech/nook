@@ -452,7 +452,27 @@ impl Sqlite {
                 )),
             }
         }
-        Ok(grouped.into_iter().map(|(_, fk)| fk).collect())
+        let mut out: Vec<ForeignKey> = grouped.into_iter().map(|(_, fk)| fk).collect();
+        // `REFERENCES customers` names no column: SQLite leaves `to` empty and means the parent's
+        // primary key. An empty identifier would be quoted as `""` and match nothing, so the
+        // parent's key is filled in from its own table info.
+        for fk in &mut out {
+            if fk.ref_columns.iter().any(|c| c.is_empty()) {
+                if let Ok(info) = self.pragma_rows(&format!(
+                    "PRAGMA table_info({})",
+                    quote_pragma_arg(&fk.ref_table)
+                )) {
+                    let keys: Vec<String> = (0..info.len())
+                        .filter(|i| Self::text_at(&info, *i, 5) != "0")
+                        .map(|i| Self::text_at(&info, i, 1))
+                        .collect();
+                    if keys.len() == fk.ref_columns.len() {
+                        fk.ref_columns = keys;
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Table rebuild used by the table designer when SQLite cannot ALTER in place.

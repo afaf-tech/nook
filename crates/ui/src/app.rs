@@ -3347,6 +3347,49 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_tab_takes_its_row_json_and_blob_editor_with_it() {
+        let mut state = UiState::default();
+        let panel = |tab: usize| RowJson {
+            tab,
+            row: 0,
+            doc: serde_json::json!({"id": 1}),
+            text: "{}".into(),
+        };
+        let editor = |tab: usize| BlobEditor {
+            tab,
+            row: 0,
+            column: "body".into(),
+            hex: "00".into(),
+        };
+        state.row_json = Some(panel(2));
+        state.blob_editor = Some(editor(2));
+        state.forget_tab(2);
+        assert_eq!(
+            state.row_json, None,
+            "the closed tab's panel must not linger"
+        );
+        assert_eq!(
+            state.blob_editor, None,
+            "the closed tab's editor must not linger"
+        );
+
+        // The bands that follow a tab down must follow it down here too, or the tab that lands on
+        // the closed index paints a record it never selected.
+        state.row_json = Some(panel(3));
+        state.blob_editor = Some(editor(3));
+        state.forget_tab(2);
+        assert_eq!(state.row_json.map(|p| p.tab), Some(2));
+        assert_eq!(state.blob_editor.map(|e| e.tab), Some(2));
+
+        // A band before the closed tab is untouched.
+        state.row_json = Some(panel(0));
+        state.blob_editor = Some(editor(0));
+        state.forget_tab(2);
+        assert_eq!(state.row_json.map(|p| p.tab), Some(0));
+        assert_eq!(state.blob_editor.map(|e| e.tab), Some(0));
+    }
+
+    #[test]
     fn blob_editor_seeds_from_the_cell_and_stages_the_typed_hex() {
         let mut session = crate::demo_session();
         let mut state = UiState::default();

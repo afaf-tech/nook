@@ -484,8 +484,17 @@ pub fn show(
     } else {
         0.0
     };
-    // The JSON panel and the blob editor take the same slot, so the table reserves one of them.
-    let json_h = if state.row_json.is_some() || state.blob_editor.is_some() {
+    // The JSON panel and the blob editor take the same slot, so the table reserves one of them —
+    // but only for the tab that owns it, or a band from tab A would squeeze tab B's table.
+    let json_h = if state
+        .row_json
+        .as_ref()
+        .is_some_and(|panel| panel.tab == tab_index)
+        || state
+            .blob_editor
+            .as_ref()
+            .is_some_and(|editor| editor.tab == tab_index)
+    {
         ROW_JSON_H
     } else {
         0.0
@@ -782,16 +791,27 @@ pub fn show(
                 _ => None,
             })
             .unwrap_or_default();
-        state.blob_editor = Some(BlobEditor {
-            tab: tab_index,
-            row,
-            column,
-            hex,
-        });
-        state.quick_look = None;
-        state.row_json = None;
+        // Refuse to open what the editor could not save: the cap is a guard on the buffer the
+        // user would type into, so hitting it after the work is the wrong time to say so.
+        let cap = session.settings.max_blob_bytes;
+        let size = hex.len() / 2;
+        if size > cap {
+            session.log(
+                Level::Error,
+                format!("that blob is {size} bytes; the editor stops at max_blob_bytes ({cap})"),
+            );
+        } else {
+            state.blob_editor = Some(BlobEditor {
+                tab: tab_index,
+                row,
+                column,
+                hex,
+            });
+            state.quick_look = None;
+            state.row_json = None;
+        }
     }
-    if let Some(editor) = state.blob_editor.clone() {
+    if let Some(editor) = state.blob_editor.clone().filter(|e| e.tab == tab_index) {
         design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
         ui.add_space(4.0);
         let mut buffer = editor.hex.clone();
@@ -839,16 +859,21 @@ pub fn show(
             }
         }
         if save {
+            // Run inline, not through `command`: the band must stay open when the engine refuses
+            // the hex, or a typo would discard the whole buffer the user typed. A refusal is an
+            // honest error in the log, and the buffer is still there to fix.
             let hex = state
                 .blob_editor
                 .as_ref()
                 .map(|e| e.hex.clone())
                 .unwrap_or_default();
-            command = Some((
+            match session.run(
                 "grid.blobEditor",
                 serde_json::json!({"row": editor.row, "column": editor.column, "hex": hex}),
-            ));
-            state.blob_editor = None;
+            ) {
+                Ok(_) => state.blob_editor = None,
+                Err(error) => session.log(Level::Error, error.to_string()),
+            }
         }
         if close {
             state.blob_editor = None;
@@ -858,7 +883,7 @@ pub fn show(
     // Row JSON: the selected record as a collapsible tree, with its foreign keys expanded one
     // level. Read once per frame while the panel is open — the panel is a view of the row the
     // pointer sits on, so it follows the selection rather than pinning a record.
-    if let Some(panel) = state.row_json.clone() {
+    if let Some(panel) = state.row_json.clone().filter(|p| p.tab == tab_index) {
         // The panel follows the selection: a click on another record re-reads it, so the panel
         // never shows the row the pointer has left.
         let selected = state.table(tab_index).selected.map(|(r, _)| r);
@@ -894,7 +919,7 @@ pub fn show(
             .id_salt(("row-json-scroll", tab_index))
             .auto_shrink([false, false])
             .max_height(ROW_JSON_H - 40.0)
-            .show(ui, |ui| json_tree(ui, tokens, "", &panel.doc, 0));
+            .show(ui, |ui| json_tree(ui, tokens, "", &panel.doc, 0, ""));
     }
 
     // Quick Look: the selected cell pretty-printed, in a band under the hint. The engine owns
@@ -1205,12 +1230,15 @@ fn quick_look_record(
 /// One node of the row's JSON tree: a scalar as `name: value`, an object or an array as a
 /// collapsing header whose children recurse. The depth is the only thing carried down — the
 /// document itself already stopped at one foreign-key level, so this walk never needs a limit.
+/// `path` is the node's full position, not just its key: two sibling rows that both hold an `id`
+/// would otherwise share one open state, because egui keys a collapsing header by id salt.
 fn json_tree(
     ui: &mut egui::Ui,
     tokens: &Tokens,
     name: &str,
     value: &serde_json::Value,
     depth: usize,
+    path: &str,
 ) {
     let label = |text: &str, color: egui::Color32| {
         RichText::new(text)
@@ -1236,20 +1264,27 @@ fn json_tree(
                 tokens.text
             };
             egui::CollapsingHeader::new(label(&title, color))
-                .id_salt(("json-node", depth, name))
+                .id_salt(("json-node", path))
                 .default_open(depth < 2)
                 .show(ui, |ui| {
                     for (key, child) in map {
-                        json_tree(ui, tokens, key, child, depth + 1);
+                        json_tree(ui, tokens, key, child, depth + 1, &format!("{path}/{key}"));
                     }
                 });
         }
         serde_json::Value::Array(items) if !items.is_empty() => {
             egui::CollapsingHeader::new(label(&format!("{name} [{}]", items.len()), tokens.text))
-                .id_salt(("json-node", depth, name))
+                .id_salt(("json-node", path))
                 .show(ui, |ui| {
                     for (i, child) in items.iter().enumerate() {
-                        json_tree(ui, tokens, &i.to_string(), child, depth + 1);
+                        json_tree(
+                            ui,
+                            tokens,
+                            &i.to_string(),
+                            child,
+                            depth + 1,
+                            &format!("{path}[{i}]"),
+                        );
                     }
                 });
         }

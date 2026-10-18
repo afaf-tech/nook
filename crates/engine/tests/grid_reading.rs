@@ -470,6 +470,28 @@ fn follow_foreign_key_resolves_the_target_row_and_says_where() {
 }
 
 #[test]
+fn a_foreign_key_that_names_no_column_resolves_against_the_parent_key() {
+    let mut f = Fixture::new("follow-fk-implicit-pk");
+    // `REFERENCES customers` names no column: SQLite reports an empty `to` and means the parent's
+    // primary key. Quoting the empty identifier would produce `"" = 1` and match nothing.
+    f.sql("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)");
+    f.sql("CREATE TABLE orders (id INTEGER PRIMARY KEY, customer INTEGER REFERENCES customers)");
+    f.sql("INSERT INTO customers (id, name) VALUES (7, 'Ada')");
+    f.sql("INSERT INTO orders (id, customer) VALUES (1, 7)");
+    f.open_grid("orders");
+
+    let out = f
+        .session
+        .run(
+            "grid.followForeignKey",
+            json!({"row": 0, "column": "customer"}),
+        )
+        .expect("an implicit primary key still resolves");
+    assert_eq!(out["table"], json!("customers"), "{out:?}");
+    assert_eq!(out["where"], json!("\"id\" = 7"), "{out:?}");
+}
+
+#[test]
 fn follow_foreign_key_falls_back_to_every_column_without_a_primary_key() {
     let mut f = Fixture::new("follow-fk-nokey");
     // A keyless table: the command still resolves the row, but its WHERE names every column.
@@ -494,6 +516,39 @@ fn follow_foreign_key_falls_back_to_every_column_without_a_primary_key() {
         json!("tags has no primary key — matching on every column"),
         "the fallback must say so: {out:?}"
     );
+
+    // A NULL column is `IS NULL`, not `= NULL`: the latter matches no row in any dialect, so a
+    // keyless target holding one NULL would filter the grid down to nothing.
+    f.sql("INSERT INTO tags (name, color) VALUES ('later', NULL)");
+    f.sql("INSERT INTO notes (id, tag) VALUES (2, 'later')");
+    f.open_grid("notes");
+    let out = f
+        .session
+        .run("grid.followForeignKey", json!({"row": 1, "column": "tag"}))
+        .expect("a keyless target with a NULL column still resolves");
+    let where_clause = out["where"].as_str().expect("a WHERE clause");
+    assert!(
+        where_clause.contains("IS NULL") && !where_clause.contains("= NULL"),
+        "a NULL must be matched with IS NULL: {where_clause}"
+    );
+}
+
+#[test]
+fn blob_editor_refuses_non_ascii_hex_instead_of_panicking() {
+    let mut f = Fixture::new("blob-editor-nonascii");
+    f.sql("CREATE TABLE files (id INTEGER PRIMARY KEY, body BLOB)");
+    f.sql("INSERT INTO files (id, body) VALUES (1, x'00ff')");
+    f.open_grid("files");
+
+    // `é` is two bytes, so slicing the string into pairs would split it and abort the process.
+    let error = f
+        .session
+        .run(
+            "grid.blobEditor",
+            json!({"row": 0, "column": "body", "hex": "é0"}),
+        )
+        .expect_err("non-ASCII hex is a named error");
+    assert!(error.to_string().contains("ASCII"), "{error}");
 }
 
 #[test]

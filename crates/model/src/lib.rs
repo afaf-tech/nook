@@ -65,6 +65,19 @@ impl Column {
     }
 }
 
+/// The display hint a column name carries: `price__format__money` is money and heads as `price`.
+///
+/// One owner for the marker, because the engine publishes it (`grid.hints`) and the grid paints
+/// it: two parses would drift the moment a fourth kind is added. An unknown marker is not a hint —
+/// the name stays whole, so a typo is visible rather than silently swallowed.
+pub fn format_hint(name: &str) -> Option<(&str, &str)> {
+    let (label, kind) = name.rsplit_once("__format__")?;
+    if label.is_empty() || !matches!(kind, "money" | "check" | "link") {
+        return None;
+    }
+    Some((label, kind))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Index {
     pub name: String,

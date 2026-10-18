@@ -30,14 +30,10 @@ impl TableColumn {
     pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
         let name = name.into();
         // The marker is a display instruction, not part of the header: `price__format__money`
-        // heads as `price`. An unknown marker stays, so a typo is visible rather than swallowed.
-        let (label, hint) = match name.rsplit_once("__format__") {
-            Some((label, kind))
-                if !label.is_empty() && matches!(kind, "money" | "check" | "link") =>
-            {
-                (label.to_owned(), Some(kind.to_owned()))
-            }
-            _ => (name.clone(), None),
+        // heads as `price`. `format_hint` is the one owner, shared with `grid.hints`.
+        let (label, hint) = match nook_model::format_hint(&name) {
+            Some((label, kind)) => (label.to_owned(), Some(kind.to_owned())),
+            None => (name.clone(), None),
         };
         TableColumn {
             name,
@@ -223,6 +219,39 @@ fn numeric_column(rows: &[Vec<Value>], index: usize) -> bool {
     seen
 }
 
+/// What a cell shows. A hint changes the painted text and never the value, so the width
+/// measurement must call this too: `12.5` widens to `12.50` and `1` becomes one glyph, and a
+/// column sized from `display()` would clip or overlap the cell it then paints.
+fn hinted(column: &TableColumn, value: &Value) -> String {
+    match column.hint.as_deref() {
+        Some("money") => match value {
+            Value::Null => value.display(),
+            Value::Float(f) => format!("{f:.2}"),
+            Value::Int(i) => format!("{:.2}", *i as f64),
+            other => other.display(),
+        },
+        // U+2714 and U+00D7: the only tick/cross pair the bundled fonts actually carry
+        // (U+2713 and U+2717 paint as tofu).
+        Some("check") => match value {
+            Value::Null => "—".to_owned(),
+            Value::Bool(true) => "✔".to_owned(),
+            Value::Bool(false) => "×".to_owned(),
+            // A check column is often an int 0/1 (SQLite has no bool).
+            Value::Int(i) => if *i != 0 { "✔" } else { "×" }.to_owned(),
+            Value::Text(text) => {
+                let t = text.trim().to_ascii_lowercase();
+                if matches!(t.as_str(), "1" | "t" | "true" | "y" | "yes") {
+                    "✔".to_owned()
+                } else {
+                    "×".to_owned()
+                }
+            }
+            _ => "×".to_owned(),
+        },
+        _ => value.display(),
+    }
+}
+
 fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
     let header_font = tokens.font(12.5);
     let cell_font = tokens.mono(12.5);
@@ -246,7 +275,9 @@ fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
                 .iter()
                 .take(400)
                 .filter_map(|row| row.get(index))
-                .map(|value| text_width(ui, &value.display(), cell_font.clone()) + CELL_PAD * 2.0)
+                .map(|value| {
+                    text_width(ui, &hinted(column, value), cell_font.clone()) + CELL_PAD * 2.0
+                })
                 .fold(0.0_f32, f32::max);
             width = width.max(longest).clamp(MIN_COL_W, MAX_COL_W);
             if column.numeric() || numeric_column(view.rows, index) {
@@ -503,39 +534,7 @@ pub fn show(
                                     );
                                 }
                             } else {
-                                // A display hint changes only what is painted, never the value:
-                                // money gets two decimals, a check becomes a tick or a cross, and
-                                // a link keeps its URL as the cell's text.
-                                let display = match column.hint.as_deref() {
-                                    Some("money") => match &value {
-                                        Value::Null => value.display(),
-                                        Value::Float(f) => format!("{f:.2}"),
-                                        Value::Int(i) => format!("{:.2}", *i as f64),
-                                        other => other.display(),
-                                    },
-                                    // U+2714 and U+00D7: the only tick/cross pair the bundled
-                                    // fonts actually carry (U+2713 and U+2717 paint as tofu).
-                                    Some("check") => match &value {
-                                        Value::Null => "—".to_owned(),
-                                        Value::Bool(true) => "✔".to_owned(),
-                                        Value::Bool(false) => "×".to_owned(),
-                                        // A check column is often an int 0/1 (SQLite has no bool).
-                                        Value::Int(i) => if *i != 0 { "✔" } else { "×" }.to_owned(),
-                                        Value::Text(text) => {
-                                            let t = text.trim().to_ascii_lowercase();
-                                            if matches!(
-                                                t.as_str(),
-                                                "1" | "t" | "true" | "y" | "yes"
-                                            ) {
-                                                "✔".to_owned()
-                                            } else {
-                                                "×".to_owned()
-                                            }
-                                        }
-                                        _ => "×".to_owned(),
-                                    },
-                                    _ => value.display(),
-                                };
+                                let display = hinted(column, &value);
                                 // A foreign key that holds a value is a link: it points at a row
                                 // the user can go to. A NULL key points nowhere and stays plain.
                                 // A `__format__link` column is a link too, but to a URL.
@@ -601,11 +600,19 @@ pub fn show(
                                     && view.anchor.is_some()
                                 {
                                     event = TableEvent::SelectExtend(row_index, column_index);
-                                } else if response.clicked() && is_url {
-                                    // A URL hint opens in the OS browser: the cell's value is the
-                                    // URL, so there is nothing to resolve first.
+                                } else if response.clicked()
+                                    && is_url
+                                    && ui.input(|i| i.modifiers.command)
+                                {
+                                    // Opening a browser is an OS action, so it costs the same
+                                    // deliberate gesture a foreign key does: a plain click still
+                                    // selects the cell. Only http(s) is handed to the OS — a
+                                    // stray `javascript:` or `file:` value stays inert text.
                                     if let Value::Text(url) | Value::Json(url) = &value {
-                                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                        if url.starts_with("http://") || url.starts_with("https://")
+                                        {
+                                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                        }
                                     }
                                 } else if response.clicked()
                                     && is_link
@@ -1204,6 +1211,26 @@ mod tests {
         let plain = TableColumn::new("city", "TEXT");
         assert_eq!(plain.label, "city");
         assert_eq!(plain.hint, None);
+    }
+
+    #[test]
+    fn a_hinted_cell_measures_the_text_it_paints() {
+        // The width pass and the paint pass must agree: `12.5` widens to `12.50`, and a check
+        // collapses to one glyph, so a column sized from `display()` clips or overlaps.
+        let money = TableColumn::new("price__format__money", "REAL");
+        assert_eq!(hinted(&money, &Value::Float(12.5)), "12.50");
+        assert_eq!(hinted(&money, &Value::Int(7)), "7.00");
+
+        let check = TableColumn::new("active__format__check", "INTEGER");
+        assert_eq!(hinted(&check, &Value::Int(1)), "✔");
+        assert_eq!(hinted(&check, &Value::Int(0)), "×");
+        assert_eq!(hinted(&check, &Value::Text("yes".into())), "✔");
+        assert_eq!(hinted(&check, &Value::Null), "—");
+
+        // No hint paints exactly what `display()` does, so a plain column keeps its old width.
+        let plain = TableColumn::new("city", "TEXT");
+        let text = Value::Text("London".into());
+        assert_eq!(hinted(&plain, &text), text.display());
     }
 
     #[test]
