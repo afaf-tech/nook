@@ -39,6 +39,7 @@ A bad key is refused with `{"id":…,"error":"bad key; read …"}`.
 | `ui.setAiBand` | `{"open":true}` | opens (or closes, with `{"open":false}`) the AI band inside the active query tab and seeds its form from the session and the live catalog; returns the form's provider, base URL, key state and mention count — never the key |
 | `ui.messages` | `{}` | the last 50 messages, newest first, with their level |
 | `ui.commands` | `{}` | the number of registered commands and every id |
+| `ui.quickOpen` | `{"mode":"objects","query":"cust"}` | opens the palette in `objects` (default) or `commands` mode with the query typed — the `>` and `#` prefixes switch the same way from the field; returns `{"ok":true,"objects":true,"query":"cust"}` |
 | `ui.shot` | `{"path":"/tmp/shot.png"}` | queues a screenshot of the window; the file appears a frame later |
 | `ui.quit` | `{}` | closes the app |
 
