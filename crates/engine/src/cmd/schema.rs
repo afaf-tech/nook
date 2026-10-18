@@ -374,11 +374,8 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
             column.primary_key = true;
         }
         let driver = session.driver_for(index)?;
-        let script = driver.rebuild_table(
-            reference.schema.as_deref(),
-            &table,
-            &table.columns.clone(),
-        )?;
+        let script =
+            driver.rebuild_table(reference.schema.as_deref(), &table, &table.columns.clone())?;
         // The plan's first and last statements are pragmas — SQLite ignores them inside a
         // transaction — so they run outside; every step in between is atomic. A failure after
         // DROP TABLE would otherwise leave the rows stranded in {table}_dc_new and the session
@@ -397,7 +394,11 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
             let mut post = Vec::new();
             for sql in script.into_iter() {
                 if sql.trim_start().to_ascii_lowercase().starts_with("pragma") {
-                    if body.is_empty() { pre.push(sql); } else { post.push(sql); }
+                    if body.is_empty() {
+                        pre.push(sql);
+                    } else {
+                        post.push(sql);
+                    }
                 } else {
                     body.push(sql);
                 }
@@ -1053,10 +1054,8 @@ mod tests {
                 .expect("catalog"),
         );
         session.conns.push(conn);
-        let p = Params::from_json(
-            json!({"table": "users", "columns": ["id"], "conn": "mem"}),
-        )
-        .expect("params");
+        let p = Params::from_json(json!({"table": "users", "columns": ["id"], "conn": "mem"}))
+            .expect("params");
         let out = set_primary_key(&mut session, &p).expect("the key is added");
         assert!(
             out["statements"].as_array().expect("statements").is_empty(),
@@ -1106,10 +1105,8 @@ mod tests {
                 .expect("catalog"),
         );
         session.conns.push(conn);
-        let p = Params::from_json(
-            json!({"table": "users", "columns": ["id"], "conn": "mem"}),
-        )
-        .expect("params");
+        let p = Params::from_json(json!({"table": "users", "columns": ["id"], "conn": "mem"}))
+            .expect("params");
         // Force a failure at the INSERT step — deterministically. Duplicated `id` values make
         // `INSERT … SELECT` fail with a UNIQUE violation once `id` is the key of the scratch
         // table. Without a transaction the scratch table would be stranded; with one, the plan
@@ -1138,13 +1135,18 @@ mod tests {
             .expect("the original table survived");
         assert_eq!(rs.rows[0][0].as_text(), "2", "both rows are still there");
         // The pragma restore ran even though the plan failed.
-        let rs = driver
-            .run("PRAGMA foreign_keys", 1)
-            .expect("pragma read");
-        assert_eq!(rs.rows[0][0].as_text(), "0", "enforcement is back where it started");
+        let rs = driver.run("PRAGMA foreign_keys", 1).expect("pragma read");
+        assert_eq!(
+            rs.rows[0][0].as_text(),
+            "0",
+            "enforcement is back where it started"
+        );
         // No scratch table left behind by the rolled-back plan.
         let rs = driver
-            .run("SELECT count(*) FROM sqlite_master WHERE name LIKE 'users_dc_new%'", 1)
+            .run(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 'users_dc_new%'",
+                1,
+            )
             .expect("scratch gone");
         assert_eq!(rs.rows[0][0].as_text(), "0");
     }
@@ -1166,8 +1168,7 @@ mod tests {
             10,
         )
         .expect("setup");
-        nook_drivers::Driver::run(&mut driver, "PRAGMA foreign_keys = ON", 1)
-            .expect("enforce");
+        nook_drivers::Driver::run(&mut driver, "PRAGMA foreign_keys = ON", 1).expect("enforce");
         let mut conn = crate::Conn::new(cfg);
         conn.driver = Some(Box::new(driver));
         conn.catalog = Some(
@@ -1178,10 +1179,8 @@ mod tests {
                 .expect("catalog"),
         );
         session.conns.push(conn);
-        let p = Params::from_json(
-            json!({"table": "users", "columns": ["id"], "conn": "mem"}),
-        )
-        .expect("params");
+        let p = Params::from_json(json!({"table": "users", "columns": ["id"], "conn": "mem"}))
+            .expect("params");
         set_primary_key(&mut session, &p).expect("the key is added");
         let driver = session.driver_for(0).expect("driver");
         let rs = driver
@@ -1222,10 +1221,8 @@ mod tests {
                 .expect("catalog"),
         );
         session.conns.push(conn);
-        let p = Params::from_json(
-            json!({"table": "users", "columns": ["id"], "conn": "mem"}),
-        )
-        .expect("params");
+        let p = Params::from_json(json!({"table": "users", "columns": ["id"], "conn": "mem"}))
+            .expect("params");
         let e = set_primary_key(&mut session, &p).expect_err("an open tx must refuse");
         assert!(
             e.message().contains("transaction"),

@@ -213,7 +213,11 @@ pub fn save_snippet(name: &str, sql: &str, tags: &[String]) -> Result<()> {
     conn.execute(
         "INSERT INTO snippet (name, sql, tags, updated_at) VALUES (?1, ?2, ?3, unixepoch()) \
          ON CONFLICT(name) DO UPDATE SET sql = ?2, tags = ?3, updated_at = unixepoch()",
-        params![name, sql, serde_json::to_string(tags).unwrap_or_else(|_| "[]".into())],
+        params![
+            name,
+            sql,
+            serde_json::to_string(tags).unwrap_or_else(|_| "[]".into())
+        ],
     )
     .map_err(db)?;
     Ok(())
@@ -305,9 +309,11 @@ pub fn load_ui_state(key: &str) -> Result<Option<String>> {
     }
     let conn = open()?;
     let value = conn
-        .query_row("SELECT value FROM ui_state WHERE key = ?1", params![key], |r| {
-            r.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM ui_state WHERE key = ?1",
+            params![key],
+            |r| r.get::<_, String>(0),
+        )
         .optional()
         .map_err(db)?;
     Ok(value)
@@ -334,9 +340,7 @@ pub fn load_pins() -> Result<Vec<String>> {
     let mut stmt = conn
         .prepare("SELECT conn_id FROM pinned ORDER BY pin_order")
         .map_err(db)?;
-    let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .map_err(db)?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(db)?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row.map_err(db)?);
@@ -456,8 +460,7 @@ mod tests {
     #[test]
     fn a_snippet_round_trips_through_the_database() {
         let _guard = crate::test_support::scratch_config();
-        save_snippet("Count rows", "select count(*) from t", &["stats".into()])
-            .expect("save");
+        save_snippet("Count rows", "select count(*) from t", &["stats".into()]).expect("save");
         save_snippet("Top 100", "select * from t limit 100", &[]).expect("save");
         let first = load_snippets().expect("load");
         assert_eq!(first.len(), 2);
@@ -527,7 +530,10 @@ mod tests {
             Some(r#"{"tabs":[],"active":0}"#)
         );
         save_pins(&["stage".to_string(), "local".to_string()]).expect("save");
-        assert_eq!(load_pins().expect("load"), vec!["stage".to_string(), "local".to_string()]);
+        assert_eq!(
+            load_pins().expect("load"),
+            vec!["stage".to_string(), "local".to_string()]
+        );
         save_pins(&[]).expect("clear pins");
         assert!(load_pins().expect("load").is_empty());
     }

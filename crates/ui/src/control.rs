@@ -199,6 +199,7 @@ pub const METHODS: &[&str] = &[
     "ui.shot",
     "ui.commands",
     "ui.selectResult",
+    "ui.selectRange",
     "ui.setResultView",
     "ui.openConnection",
     "ui.setConnectionTab",

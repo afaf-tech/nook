@@ -31,6 +31,7 @@ A bad key is refused with `{"id":…,"error":"bad key; read …"}`.
 | `ui.selectTable` | `{"conn":0,"schema":"main","table":"customers","tab":"columns"}` | points the object inspector at a table; `conn` defaults to the active connection and `tab` (`columns`, `indexes`, `foreign keys`, `preview`) to the one already showing |
 | `ui.setEditorText` | `{"sql":"select 1"}` | replaces the active tab's editor text |
 | `ui.selectResult` | `{"index":1}` | puts the results register on that statement of the last run; an index the register does not hold answers `{"error":"no result 7: the run holds 2 (0..1)"}` |
+| `ui.selectRange` | `{"anchor":[0,0],"cursor":[2,3]}` | sets the active data grid's selection rectangle (corners clamped to the page) and answers `{"ok":true,"rows":3,"columns":4}`; the active tab must be a data tab |
 | `ui.setResultView` | `{"view":"json"}` | paints the active result as `grid` or `json`; anything else answers `{"error":"unknown view \"csv\": valid views are grid, json"}` |
 | `ui.openConnection` | `{"conn":"local"}` | opens the connection editor on that profile, naming it by id as `conn.*` does; `conn` omitted or `null` opens a new one, and an id no profile holds answers `{"ok":false,"error":"no such connection 'shop'; try local, shop-staging"}` |
 | `ui.setConnectionTab` | `{"tab":"TLS"}` | `{"ok":true,"tab":"TLS"}`; the tabs are `General`, `TLS`, `Tunnel` and `Advanced`, matched without case, and anything else answers `unknown tab 'Security'; try General, TLS, Tunnel, Advanced` |

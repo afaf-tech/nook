@@ -885,6 +885,9 @@ impl NookApp {
                 "ui.selectResult" => {
                     NookApp::select_result(&self.session, &mut self.state, &request.params)
                 }
+                "ui.selectRange" => {
+                    NookApp::select_range(&self.session, &mut self.state, &request.params)
+                }
                 "ui.setResultView" => {
                     NookApp::set_result_view(&self.session, &mut self.state, &request.params)
                 }
@@ -2180,6 +2183,50 @@ impl NookApp {
         serde_json::json!({"ok": true, "result": wanted, "results": runs})
     }
 
+    /// `ui.selectRange`: set the active data grid's selection rectangle, so a screenshot can
+    /// prove the pointer work without synthesising mouse events. The corners are clamped to
+    /// the page the grid holds — the same rule `grid.selection` enforces.
+    fn select_range(session: &Session, state: &mut UiState, params: &Value) -> Value {
+        let index = match session.active_tab {
+            Some(index) if session.tabs[index].kind == TabKind::Data => index,
+            None => return serde_json::json!({"ok": false, "error": "no active tab"}),
+            Some(_) => {
+                return serde_json::json!({"ok": false, "error": "the active tab is not a data tab"})
+            }
+        };
+        let pair = |key: &str| -> Option<(usize, usize)> {
+            let items = params.get(key)?.as_array()?;
+            if items.len() != 2 {
+                return None;
+            }
+            Some((items[0].as_i64()? as usize, items[1].as_i64()? as usize))
+        };
+        let (Some(anchor), Some(cursor)) = (pair("anchor"), pair("cursor")) else {
+            return serde_json::json!({
+                "ok": false,
+                "error": "anchor and cursor must both be [row, column]",
+            });
+        };
+        let grid = &session.tabs[index].grid;
+        let rows = grid.result.rows.len();
+        let columns = grid.result.columns.len();
+        if rows == 0 || columns == 0 {
+            return serde_json::json!({"ok": false, "error": "the grid holds no rows to select"});
+        }
+        let clamp = |(r, c): (usize, usize)| (r.min(rows - 1), c.min(columns - 1));
+        let (anchor, cursor) = (clamp(anchor), clamp(cursor));
+        let table = state.table(index);
+        table.anchor = Some(anchor);
+        table.selected = Some(cursor);
+        serde_json::json!({
+            "ok": true,
+            "anchor": [anchor.0, anchor.1],
+            "cursor": [cursor.0, cursor.1],
+            "rows": anchor.0.abs_diff(cursor.0) + 1,
+            "columns": anchor.1.abs_diff(cursor.1) + 1,
+        })
+    }
+
     /// `ui.setResultView`: show the active query tab's register as a grid or as JSON. The refusal
     /// lists the views the segment actually paints, so the two can never drift apart.
     fn set_result_view(session: &Session, state: &mut UiState, params: &Value) -> Value {
@@ -2934,5 +2981,44 @@ mod tests {
         state.open_command("sql.run".to_string());
         assert!(state.command_open);
         assert_eq!(state.command_id, "sql.run");
+    }
+
+    #[test]
+    fn select_range_sets_the_rectangle_and_clamps_it() {
+        let session = crate::demo_session();
+        let mut state = UiState::default();
+        // The demo session's active tab is a data tab holding the customers grid.
+        let index = session.active_tab.unwrap();
+
+        let reply = NookApp::select_range(
+            &session,
+            &mut state,
+            &serde_json::json!({"anchor": [0, 0], "cursor": [2, 3]}),
+        );
+        assert_eq!(reply["ok"], serde_json::json!(true), "{reply:?}");
+        assert_eq!(reply["rows"], serde_json::json!(3));
+        assert_eq!(reply["columns"], serde_json::json!(4));
+        assert_eq!(state.table(index).anchor, Some((0, 0)));
+        assert_eq!(state.table(index).selected, Some((2, 3)));
+
+        // Corners beyond the page clamp to it, the same rule grid.selection enforces.
+        let reply = NookApp::select_range(
+            &session,
+            &mut state,
+            &serde_json::json!({"anchor": [0, 0], "cursor": [500, 500]}),
+        );
+        assert_eq!(reply["ok"], serde_json::json!(true), "{reply:?}");
+        let clamped = state.table(index).selected;
+        let rows = session.tabs[index].grid.result.rows.len();
+        let columns = session.tabs[index].grid.result.columns.len();
+        assert_eq!(clamped, Some((rows - 1, columns - 1)));
+
+        // Both corners must arrive as [row, column] pairs.
+        let reply =
+            NookApp::select_range(&session, &mut state, &serde_json::json!({"anchor": [0, 0]}));
+        assert_eq!(
+            reply["error"],
+            serde_json::json!("anchor and cursor must both be [row, column]")
+        );
     }
 }

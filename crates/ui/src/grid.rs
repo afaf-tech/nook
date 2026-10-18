@@ -410,6 +410,7 @@ pub fn show(
         })
         .collect();
     let selected = state.table(tab_index).selected;
+    let anchor = state.table(tab_index).anchor;
     let sort = (!order.is_empty()).then(|| {
         let desc = order.contains("DESC");
         let name = order
@@ -459,6 +460,7 @@ pub fn show(
         pending: dirty_cells.clone(),
         inserted: inserted_rows.clone(),
         selected,
+        anchor,
         sort,
         editable,
         sortable: true,
@@ -478,6 +480,17 @@ pub fn show(
     );
     match event {
         TableEvent::Select(row, column) => {
+            // A plain click collapses the rectangle onto one cell.
+            state.table(tab_index).selected = Some((row, column));
+            state.table(tab_index).anchor = Some((row, column));
+            state.table(tab_index).stop_edit();
+        }
+        TableEvent::SelectExtend(row, column) => {
+            // The pointer moved the cursor; the anchor stays where the drag began. First
+            // pointer-down has no anchor yet, so this cell becomes it.
+            if state.table(tab_index).anchor.is_none() {
+                state.table(tab_index).anchor = Some((row, column));
+            }
             state.table(tab_index).selected = Some((row, column));
             state.table(tab_index).stop_edit();
         }
@@ -1204,6 +1217,7 @@ mod tests {
                         pending: Vec::new(),
                         inserted: Vec::new(),
                         selected: None,
+                        anchor: None,
                         sort: None,
                         editable: true,
                         sortable: true,

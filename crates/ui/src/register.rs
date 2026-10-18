@@ -695,6 +695,7 @@ fn grid(
         pending: Vec::new(),
         inserted: Vec::new(),
         selected: table.selected,
+        anchor: table.anchor,
         sort: None,
         editable: false,
         sortable: false,
@@ -705,8 +706,18 @@ fn grid(
         row_menu: None,
     };
     let before = ui.cursor();
-    if let TableEvent::Select(row, column) = table::show(ui, tokens, &mut view, table, id) {
-        table.selected = Some((row, column));
+    match table::show(ui, tokens, &mut view, table, id) {
+        TableEvent::Select(row, column) => {
+            table.selected = Some((row, column));
+            table.anchor = Some((row, column));
+        }
+        TableEvent::SelectExtend(row, column) => {
+            if table.anchor.is_none() {
+                table.anchor = Some((row, column));
+            }
+            table.selected = Some((row, column));
+        }
+        _ => {}
     }
     let after = ui.cursor().top();
     Rect::from_min_max(

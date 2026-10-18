@@ -94,17 +94,19 @@ pub fn create_table_with(table: &Table, dialect: Dialect, inline_foreign_keys: b
                 .map(|c| quote_ident(c, dialect))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let ref_target =
-                quote_qualified(fk.ref_schema.as_deref().or(table.schema.as_deref()), &fk.ref_table, dialect);
+            let ref_target = quote_qualified(
+                fk.ref_schema.as_deref().or(table.schema.as_deref()),
+                &fk.ref_table,
+                dialect,
+            );
             let ref_cols = fk
                 .ref_columns
                 .iter()
                 .map(|c| quote_ident(c, dialect))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut constraint = format!(
-                "FOREIGN KEY ({cols}) REFERENCES {ref_target} ({ref_cols})",
-            );
+            let mut constraint =
+                format!("FOREIGN KEY ({cols}) REFERENCES {ref_target} ({ref_cols})",);
             if !fk.on_delete.is_empty() && !fk.on_delete.eq_ignore_ascii_case("no action") {
                 constraint.push_str(&format!(" ON DELETE {}", fk.on_delete.to_ascii_uppercase()));
             }
@@ -438,7 +440,10 @@ pub fn drop_trigger(schema: Option<&str>, name: &str, table: &str, dialect: Dial
         // SQLite has no IF EXISTS for triggers.
         Dialect::Sqlite => format!("DROP TRIGGER {target};"),
         Dialect::Postgres => {
-            format!("DROP TRIGGER IF EXISTS {target} ON {};", quote_qualified(schema, table, dialect))
+            format!(
+                "DROP TRIGGER IF EXISTS {target} ON {};",
+                quote_qualified(schema, table, dialect)
+            )
         }
         Dialect::MySql => format!("DROP TRIGGER IF EXISTS {target};"),
     }
@@ -470,7 +475,11 @@ pub fn create_routine(
 
 pub fn drop_routine(schema: Option<&str>, name: &str, kind: &str, dialect: Dialect) -> String {
     let target = quote_qualified(schema, name, dialect);
-    let kw = if kind == "function" { "FUNCTION" } else { "PROCEDURE" };
+    let kw = if kind == "function" {
+        "FUNCTION"
+    } else {
+        "PROCEDURE"
+    };
     match dialect {
         Dialect::Sqlite => format!("DROP {kw} {target};"),
         _ => format!("DROP {kw} IF EXISTS {target};"),
@@ -694,12 +703,17 @@ mod tests {
             "CREATE SEQUENCE \"public\".\"order_seq\" START WITH 10 INCREMENT BY 5 MINVALUE 10 MAXVALUE 1000 CYCLE;"
         );
         // Defaults stay silent: increment 1 and no bounds emit a bare create.
-        let plain = crate::Sequence { name: "s".into(), ..Default::default() };
-        assert_eq!(create_sequence(&plain, Dialect::Postgres), "CREATE SEQUENCE \"s\";");
+        let plain = crate::Sequence {
+            name: "s".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            create_sequence(&plain, Dialect::Postgres),
+            "CREATE SEQUENCE \"s\";"
+        );
         assert_eq!(
             drop_sequence(Some("public"), "s", Dialect::Postgres),
             "DROP SEQUENCE IF EXISTS \"public\".\"s\";"
         );
     }
 }
-

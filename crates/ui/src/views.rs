@@ -69,6 +69,7 @@ pub(crate) fn list(
         pending: Vec::new(),
         inserted: Vec::new(),
         selected: state.selected,
+        anchor: None,
         sort: None,
         editable: false,
         sortable: false,
@@ -818,7 +819,7 @@ pub fn report(
                 height,
                 id: egui::Id::new(("pivot", tab_index)),
                 empty: "nothing to pivot",
-                    row_menu: None,
+                row_menu: None,
             },
             state.table(tab_index),
         );
@@ -875,7 +876,7 @@ pub fn report(
                 height,
                 id: egui::Id::new(("report-table", tab_index)),
                 empty: "no rows",
-                    row_menu: None,
+                row_menu: None,
             },
             state.table(tab_index),
         );
@@ -1897,7 +1898,7 @@ pub fn users(
             height,
             id: egui::Id::new(("users", tab_index)),
             empty: "SQLite has no users; Postgres and MySQL do",
-                    row_menu: None,
+            row_menu: None,
         },
         state.table(tab_index),
     );

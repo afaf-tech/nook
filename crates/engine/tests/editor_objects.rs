@@ -28,10 +28,7 @@ impl Fixture {
             .conn_index(&conn)
             .expect("the connection is registered");
         open_now(&mut session, index).expect("sqlite opens");
-        Fixture {
-            session,
-            conn,
-        }
+        Fixture { session, conn }
     }
 
     fn run(&mut self, id: &str, mut params: serde_json::Value) -> serde_json::Value {
@@ -52,7 +49,10 @@ impl Fixture {
 
     /// The trigger names the editor lists for a table, straight from the cached catalog.
     fn trigger_names(&mut self, table: &str) -> Vec<String> {
-        let value = self.run("schema.triggerEditor", json!({"action": "list", "table": table}));
+        let value = self.run(
+            "schema.triggerEditor",
+            json!({"action": "list", "table": table}),
+        );
         value["items"]
             .as_array()
             .expect("items")
@@ -92,16 +92,25 @@ fn a_trigger_with_a_two_statement_body_roundtrips_through_the_editor() {
     );
 
     let names = f.trigger_names("users");
-    assert!(names.contains(&"audit_email".to_string()), "trigger listed: {names:?}");
+    assert!(
+        names.contains(&"audit_email".to_string()),
+        "trigger listed: {names:?}"
+    );
 
     // The stored DDL keeps both statements inside one trigger definition.
-    let value = f.run("schema.triggerEditor", json!({"action": "list", "table": "users"}));
+    let value = f.run(
+        "schema.triggerEditor",
+        json!({"action": "list", "table": "users"}),
+    );
     let ddl = value["items"]
         .as_array()
         .and_then(|items| items.iter().find(|t| t["name"] == "audit_email"))
         .and_then(|t| t["ddl"].as_str())
         .expect("the trigger carries its ddl");
-    assert!(ddl.contains("lower(email)"), "ddl keeps statement one: {ddl}");
+    assert!(
+        ddl.contains("lower(email)"),
+        "ddl keeps statement one: {ddl}"
+    );
     assert!(ddl.contains("NEW.id"), "ddl keeps statement two: {ddl}");
 
     f.run(
@@ -109,7 +118,10 @@ fn a_trigger_with_a_two_statement_body_roundtrips_through_the_editor() {
         json!({"action": "drop", "table": "users", "name": "audit_email", "confirm": true}),
     );
     let names = f.trigger_names("users");
-    assert!(!names.contains(&"audit_email".to_string()), "trigger dropped: {names:?}");
+    assert!(
+        !names.contains(&"audit_email".to_string()),
+        "trigger dropped: {names:?}"
+    );
 }
 
 #[test]
@@ -130,7 +142,10 @@ fn a_drop_without_confirm_is_refused() {
             json!({"action": "drop", "table": "users", "name": "nope"}),
         )
         .expect_err("destructive actions need confirm");
-    assert!(err.contains("confirm"), "refusal names the missing confirm: {err}");
+    assert!(
+        err.contains("confirm"),
+        "refusal names the missing confirm: {err}"
+    );
 }
 
 #[test]

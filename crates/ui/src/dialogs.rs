@@ -1930,9 +1930,7 @@ fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens
                             if spec.group != group {
                                 group = spec.group;
                                 ui.add_space(2.0);
-                                ui.label(
-                                    RichText::new(group).size(10.5).color(tokens.text_faint),
-                                );
+                                ui.label(RichText::new(group).size(10.5).color(tokens.text_faint));
                             }
                             // Same as the objects list: `.small()` keeps 22px, and the button's
                             // own fill paints the hover under its text.

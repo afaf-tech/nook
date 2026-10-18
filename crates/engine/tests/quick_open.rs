@@ -146,7 +146,10 @@ fn opening_a_table_creates_a_data_tab_and_a_missing_connection_is_a_named_error(
     let mut f = Fixture::new("open-table");
     f.sql("CREATE TABLE customers (id INTEGER PRIMARY KEY)");
     f.session
-        .run("quickOpen.open", json!({"kind":"table","conn":f.conn,"name":"customers"}))
+        .run(
+            "quickOpen.open",
+            json!({"kind":"table","conn":f.conn,"name":"customers"}),
+        )
         .expect("open");
     let tabs = &f.session.tabs;
     let data = tabs
@@ -161,7 +164,10 @@ fn opening_a_table_creates_a_data_tab_and_a_missing_connection_is_a_named_error(
     );
     let err = f
         .session
-        .run("quickOpen.open", json!({"kind":"table","conn":"ghost","name":"customers"}))
+        .run(
+            "quickOpen.open",
+            json!({"kind":"table","conn":"ghost","name":"customers"}),
+        )
         .unwrap_err();
     assert!(err.message().contains("ghost"), "must name the id: {err:?}");
 }
@@ -170,18 +176,26 @@ fn opening_a_table_creates_a_data_tab_and_a_missing_connection_is_a_named_error(
 fn opening_a_saved_query_creates_a_query_tab_with_its_sql() {
     let mut f = Fixture::new("open-saved");
     f.session
-        .run("snippet.save", json!({"name":"Big spenders","sql":"select * from orders"}))
+        .run(
+            "snippet.save",
+            json!({"name":"Big spenders","sql":"select * from orders"}),
+        )
         .expect("save snippet");
     let out = f
         .session
         .run("quickOpen.search", json!({"query":"spend"}))
         .expect("search");
     assert!(
-        hits(&out).iter().any(|(k, _, n)| k == "saved" && n == "Big spenders"),
+        hits(&out)
+            .iter()
+            .any(|(k, _, n)| k == "saved" && n == "Big spenders"),
         "{out:?}"
     );
     f.session
-        .run("quickOpen.open", json!({"kind":"saved","name":"Big spenders"}))
+        .run(
+            "quickOpen.open",
+            json!({"kind":"saved","name":"Big spenders"}),
+        )
         .expect("open");
     let tab = f.session.tabs.last().cloned().expect("the tab exists");
     assert_eq!(tab.kind, nook_engine::TabKind::Query);
@@ -193,7 +207,10 @@ fn opening_a_tab_hit_makes_it_active() {
     let mut f = Fixture::new("open-tab");
     f.sql("CREATE TABLE orders (id INTEGER PRIMARY KEY)");
     f.session
-        .run("quickOpen.open", json!({"kind":"table","conn":f.conn,"name":"orders"}))
+        .run(
+            "quickOpen.open",
+            json!({"kind":"table","conn":f.conn,"name":"orders"}),
+        )
         .expect("first tab");
     f.session
         .run("tab.new", json!({"kind":"Query","title":"scratch"}))
@@ -201,7 +218,12 @@ fn opening_a_tab_hit_makes_it_active() {
     f.session
         .run("quickOpen.open", json!({"kind":"tab","name":"orders"}))
         .expect("activate");
-    assert_eq!(f.session.active_tab, Some(1), "{:?}", f.session.tabs.iter().map(|t| &t.title).collect::<Vec<_>>());
+    assert_eq!(
+        f.session.active_tab,
+        Some(1),
+        "{:?}",
+        f.session.tabs.iter().map(|t| &t.title).collect::<Vec<_>>()
+    );
 }
 
 #[test]

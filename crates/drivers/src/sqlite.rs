@@ -495,12 +495,10 @@ impl Sqlite {
         );
         // Triggers die with DROP TABLE and cannot be ALTERed back — re-run their CREATE after
         // the rename. The DDL comes from sqlite_master, the server's own record of the trigger.
-        let trigger_rows = self.pragma_rows(
-            &format!(
-                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = {}",
-                quote_pragma_arg(&table.name)
-            ),
-        )?;
+        let trigger_rows = self.pragma_rows(&format!(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = {}",
+            quote_pragma_arg(&table.name)
+        ))?;
         let trigger_ddl: Vec<String> = (0..trigger_rows.len())
             .filter_map(|i| {
                 let sql = Self::text_at(&trigger_rows, i, 0);
@@ -700,7 +698,10 @@ mod tests {
         let mut db = db();
         let cat = db.catalog().expect("catalog");
         let posts = cat.find_table(None, "posts").expect("posts").clone();
-        assert!(!posts.foreign_keys.is_empty(), "the fixture has a child table");
+        assert!(
+            !posts.foreign_keys.is_empty(),
+            "the fixture has a child table"
+        );
         // Give the child table a key the way the designer would: same columns, marked.
         let mut cols = posts.columns.clone();
         for column in cols.iter_mut() {
@@ -795,11 +796,12 @@ mod tests {
             }
             db.run(stmt, 10).expect("run rebuild step");
         }
-        let state = db
-            .pragma_rows("PRAGMA foreign_keys")
-            .expect("read pragma")[0][0]
-            .clone();
-        assert_eq!(state, Value::Int(0), "enforcement stays off after the rebuild");
+        let state = db.pragma_rows("PRAGMA foreign_keys").expect("read pragma")[0][0].clone();
+        assert_eq!(
+            state,
+            Value::Int(0),
+            "enforcement stays off after the rebuild"
+        );
     }
 
     #[test]

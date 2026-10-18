@@ -548,7 +548,10 @@ mod tests {
             parts[1].contains("END) + 1; END;"),
             "the body with END) stays one statement: {parts:?}"
         );
-        assert_eq!(parts[2], "SELECT 1;", "statements after the trigger split normally");
+        assert_eq!(
+            parts[2], "SELECT 1;",
+            "statements after the trigger split normally"
+        );
     }
 
     #[test]

@@ -61,10 +61,12 @@ pub fn commands() -> Vec<CommandSpec> {
 fn pin(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     let id = p.str_arg("conn")?;
     // Resolve against the profiles so a typo is a named error, not a silent no-op.
-    session.profiles.get(&id).ok_or_else(|| Error::not_found(format!("no connection named '{id}'")))?;
+    session
+        .profiles
+        .get(&id)
+        .ok_or_else(|| Error::not_found(format!("no connection named '{id}'")))?;
     let pinned = p.bool_opt("pinned", true);
-    let mut pins: Vec<String> =
-        session.pins.iter().filter(|x| *x != &id).cloned().collect();
+    let mut pins: Vec<String> = session.pins.iter().filter(|x| *x != &id).cloned().collect();
     if pinned {
         pins.push(id.clone());
     }

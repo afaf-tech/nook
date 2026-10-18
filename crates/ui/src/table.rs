@@ -49,8 +49,11 @@ impl TableColumn {
 /// Per-table view state that has to survive across frames.
 #[derive(Debug, Clone, Default)]
 pub struct TableState {
-    /// Selected cell, kept across frames.
+    /// The cursor cell of the selection: the live corner, and what "the selected cell" means
+    /// to every caller that wants one cell.
     pub selected: Option<(usize, usize)>,
+    /// The drag origin of the selection rectangle. A plain click collapses it onto `selected`.
+    pub anchor: Option<(usize, usize)>,
     pub editing: Option<(usize, usize)>,
     pub buffer: String,
     focus_editor: bool,
@@ -75,6 +78,8 @@ impl TableState {
 pub enum TableEvent {
     None,
     Select(usize, usize),
+    /// The pointer moved the live corner of the rectangle: the anchor stays, the cursor moves.
+    SelectExtend(usize, usize),
     BeginEdit(usize, usize),
     Commit(usize, usize, String),
     Cancel,
@@ -95,6 +100,9 @@ pub struct TableView<'a> {
     /// Rows that are new and not yet written to the server.
     pub inserted: Vec<usize>,
     pub selected: Option<(usize, usize)>,
+    /// The drag origin of the selection rectangle, painted as `tokens.selection` over the
+    /// rectangle with the cursor cell stronger.
+    pub anchor: Option<(usize, usize)>,
     pub sort: Option<(String, bool)>,
     pub editable: bool,
     pub sortable: bool,
@@ -291,8 +299,12 @@ pub fn show(
                             egui::pos2(row_rect.left() + viewport_w, row_rect.bottom()),
                         );
                         let is_new = view.inserted.contains(&row_index);
-                        let selected_row =
-                            view.selected.map(|(r, _)| r == row_index).unwrap_or(false);
+                        // With a rectangle in play (anchor and cursor differ), the rectangle is
+                        // the selection; the full-row bar would paint over it.
+                        let rect_active =
+                            view.selected.zip(view.anchor).is_some_and(|(s, a)| s != a);
+                        let selected_row = !rect_active
+                            && view.selected.map(|(r, _)| r == row_index).unwrap_or(false);
 
                         if selected_row {
                             ui.painter()
@@ -372,16 +384,26 @@ pub fn show(
                             let response = ui.interact(
                                 cell,
                                 id.with(("cell", row_index, column_index)),
-                                Sense::click(),
+                                Sense::click_and_drag(),
                             );
-                            let cell_selected = view.selected == Some((row_index, column_index));
+                            let (cursor, anchor) = (view.selected, view.anchor);
+                            let in_rect = cursor.zip(anchor).is_some_and(|(c, a)| {
+                                row_index >= a.0.min(c.0)
+                                    && row_index <= a.0.max(c.0)
+                                    && column_index >= a.1.min(c.1)
+                                    && column_index <= a.1.max(c.1)
+                            }) || cursor == Some((row_index, column_index));
+                            let cell_selected = in_rect;
 
                             if cell_selected && !selected_row {
-                                ui.painter().rect_filled(
-                                    cell,
-                                    CornerRadius::ZERO,
-                                    tokens.selection,
-                                );
+                                let fill = if cursor == Some((row_index, column_index)) {
+                                    // The cursor cell is the strong corner: it must read as
+                                    // "this is the cell", not just part of the rectangle.
+                                    tokens.selection.gamma_multiply(1.35)
+                                } else {
+                                    tokens.selection
+                                };
+                                ui.painter().rect_filled(cell, CornerRadius::ZERO, fill);
                             }
                             if dirty {
                                 ui.painter().rect_filled(
@@ -459,7 +481,17 @@ pub fn show(
                                 if response.hovered() && display.len() > 60 {
                                     response.clone().on_hover_text(display);
                                 }
-                                if response.clicked() {
+                                // A drag paints the rectangle live: the pointer's cell becomes
+                                // the cursor while the anchor stays where the drag began. A
+                                // plain click collapses both onto the one cell; shift-click
+                                // keeps the anchor and moves only the cursor.
+                                if response.dragged()
+                                    || (response.clicked()
+                                        && ui.input(|i| i.modifiers.shift)
+                                        && view.anchor.is_some())
+                                {
+                                    event = TableEvent::SelectExtend(row_index, column_index);
+                                } else if response.clicked() {
                                     event = TableEvent::Select(row_index, column_index);
                                 }
                                 if view.editable && response.double_clicked() {
@@ -641,6 +673,7 @@ mod tests {
             pending: Vec::new(),
             inserted: Vec::new(),
             selected: None,
+            anchor: None,
             sort: None,
             editable,
             sortable: true,
