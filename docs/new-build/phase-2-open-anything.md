@@ -106,7 +106,8 @@ coin flip.
 ## Done when
 
 Typing `cust` after `Cmd+P` lists tables, the overlay opens the highlighted one on Enter, and
-`nook-cli run tools.serverSearch --params '{"pattern":"cust"}'` returns the same hits as JSON.
+`tools.serverSearch` with `{"pattern":"cust"}` returns the same hits as JSON over the MCP control
+channel (`nook-cli mcp`) — the CLI has no generic `run` verb, so MCP stdio is the scripted surface.
 
 ## Ceilings
 

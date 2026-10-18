@@ -2648,15 +2648,14 @@ impl eframe::App for NookApp {
         // Phase 1: snapshot the tabs at most every two seconds of wall-clock time. egui repaints
         // only on input, so a "no input for 2 s" frame never arrives in the plain window — the
         // wake-up has to be scheduled (`request_repaint_after`), the same way `tick_jobs` ticks.
-        // The write is skipped when the snapshot is unchanged, so an idle app writes nothing.
+        // The snapshot is compared before writing, so an idle app never touches the store.
         self.tab_persist_at.get_or_insert_with(std::time::Instant::now);
         if self.tab_persist_at.unwrap().elapsed() >= std::time::Duration::from_secs(2) {
             self.tab_persist_at = Some(std::time::Instant::now());
-            let before = self.last_tab_snapshot.clone();
-            self.session.persist_tabs();
-            let after = nook_engine::store::load_ui_state("tabs").ok().flatten();
-            if after != before {
-                self.last_tab_snapshot = after;
+            let snap = self.session.tab_snapshot();
+            if Some(&snap) != self.last_tab_snapshot.as_ref() {
+                self.last_tab_snapshot = Some(snap.clone());
+                self.session.persist_tabs();
             }
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(2));

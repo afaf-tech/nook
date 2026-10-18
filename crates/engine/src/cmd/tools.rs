@@ -934,11 +934,13 @@ fn score(entries: &[IndexEntry], query: &str, limit: usize) -> Vec<IndexEntry> {
 }
 
 /// The session's quick-open index: every open connection's catalog, the saved snippets, the open
-/// tabs. A closed connection contributes nothing — its catalog is `None`.
+/// tabs. A closed connection contributes nothing: `close_conn` clears the driver but keeps the
+/// last catalog, so the gate is "is the connection live", not "does it have a catalog".
 fn session_index(session: &Session) -> Vec<IndexEntry> {
     let catalogs: Vec<(&str, &nook_model::Catalog)> = session
         .conns
         .iter()
+        .filter(|c| c.driver.is_some())
         .filter_map(|c| c.catalog.as_ref().map(|cat| (c.cfg.id.as_str(), cat)))
         .collect();
     let mut entries = build_index(&catalogs);
@@ -1117,6 +1119,41 @@ mod tests {
             hits2.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
             vec!["customer_audit_log", "customer_standards", "customers"],
             "all prefix, alphabetical tiebreak: {hits2:?}"
+        );
+    }
+
+    #[test]
+    fn contains_ranks_below_prefix() {
+        let entries = build_index(&[(
+            "local",
+            &catalog(vec![
+                table("x_customers", vec![]), // contains only
+                table("customers_x", vec![]), // prefix
+            ]),
+        )]);
+        // `customers_x` starts with the query (60); `x_customers` only contains it (40).
+        let hits = score(&entries, "customers", 40);
+        assert_eq!(
+            hits.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            vec!["customers_x", "x_customers"],
+            "prefix must outrank contains: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn a_closed_connection_contributes_nothing_even_though_its_catalog_remains() {
+        let cat = catalog(vec![table("customers", vec![])]);
+        let mut session = Session::new();
+        // A connection that was opened (catalog filled) and then closed: `close_conn` keeps the
+        // catalog but drops the driver — the gate must be the driver, not the catalog.
+        let cfg = nook_core::ConnectionConfig::parse("sqlite::memory:closed").expect("parses");
+        let mut conn = crate::Conn::new(cfg);
+        conn.catalog = Some(cat);
+        session.conns.push(conn);
+        let entries = session_index(&session);
+        assert!(
+            entries.iter().all(|e| e.kind != "table"),
+            "a closed connection's catalog must not be searchable: {entries:?}"
         );
     }
 

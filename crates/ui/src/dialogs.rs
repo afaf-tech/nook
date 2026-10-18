@@ -1891,22 +1891,36 @@ fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens
                             } else {
                                 format!("{kind}  ·  {label}  ·  {conn}")
                             };
+                            // Paint the hover fill BEFORE the button: painting after would cover
+                            // the text, which is exactly the invisible-row bug. `rect_contains_pointer`
+                            // knows the hover state before the button exists.
+                            let row_rect = egui::Rect::from_min_size(
+                                ui.cursor().min,
+                                egui::Vec2::new(ui.available_width(), 22.0),
+                            );
+                            let hovered = ui.rect_contains_pointer(row_rect);
+                            if hovered {
+                                ui.painter().rect_filled(
+                                    row_rect,
+                                    CornerRadius::same(4),
+                                    // `panel_high` is the app-wide hover fill, but on the dialog's
+                                    // own surface it is nearly invisible; the selection tint is the
+                                    // palette's hover, same as the tree's selected row.
+                                    tokens.selection,
+                                );
+                            }
                             let response = ui.add(
                                 egui::Button::new(
                                     RichText::new(text).size(12.0).color(tokens.text),
                                 )
-                                .fill(egui::Color32::TRANSPARENT)
+                                .fill(if hovered {
+                                    tokens.selection
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                })
                                 .stroke(Stroke::NONE)
                                 .min_size(egui::Vec2::new(ui.available_width(), 22.0)),
                             );
-                            if response.hovered() {
-                                let rect = response.rect;
-                                ui.painter().rect_filled(
-                                    rect,
-                                    CornerRadius::same(4),
-                                    tokens.panel_high,
-                                );
-                            }
                             if response.clicked() {
                                 open_hit = Some(hit.clone());
                             }
@@ -1928,24 +1942,34 @@ fn palette(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens
                                     RichText::new(group).size(10.5).color(tokens.text_faint),
                                 );
                             }
+                            // Same fix as the objects list: fill first, then the button, or the
+                            // hover paints over the text.
+                            let row_rect = egui::Rect::from_min_size(
+                                ui.cursor().min,
+                                egui::Vec2::new(ui.available_width(), 22.0),
+                            );
+                            let hovered = ui.rect_contains_pointer(row_rect);
+                            if hovered {
+                                ui.painter().rect_filled(
+                                    row_rect,
+                                    CornerRadius::same(4),
+                                    tokens.selection,
+                                );
+                            }
                             let response = ui.add(
                                 egui::Button::new(
                                     RichText::new(format!("{}  ·  {}", spec.id, spec.label))
                                         .size(12.0)
                                         .color(tokens.text),
                                 )
-                                .fill(egui::Color32::TRANSPARENT)
+                                .fill(if hovered {
+                                    tokens.selection
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                })
                                 .stroke(Stroke::NONE)
                                 .min_size(egui::Vec2::new(ui.available_width(), 22.0)),
                             );
-                            if response.hovered() {
-                                let rect = response.rect;
-                                ui.painter().rect_filled(
-                                    rect,
-                                    CornerRadius::same(4),
-                                    tokens.panel_high,
-                                );
-                            }
                             if response.clicked() {
                                 run = Some(spec.id);
                             }

@@ -934,8 +934,9 @@ impl Session {
 
     /// Snapshot the open tabs into the store: kind, title, editor text and the connection id.
     /// Deliberately not the grid edits, result rows or scroll position — a restored tab is a place
-    /// to work, not a replay of a run.
-    pub fn persist_tabs(&mut self) {
+    /// to work, not a replay of a run. Returns the snapshot string so the caller can skip the
+    /// write when nothing changed — an idle app must not touch the file.
+    pub fn tab_snapshot(&self) -> String {
         #[derive(serde::Serialize)]
         struct SnapshotTab<'a> {
             kind: &'static str,
@@ -965,8 +966,14 @@ impl Session {
                 sql: &t.sql.text,
             })
             .collect();
-        let snap = json!({ "tabs": tabs, "active": self.active_tab });
-        if let Err(e) = store::save_ui_state("tabs", &snap.to_string()) {
+        json!({ "tabs": tabs, "active": self.active_tab }).to_string()
+    }
+
+    /// Write the tab snapshot unconditionally — the on-exit path, where the write must happen even
+    /// if the content is unchanged (it also covers a first run whose store does not exist yet).
+    pub fn persist_tabs(&mut self) {
+        let snap = self.tab_snapshot();
+        if let Err(e) = store::save_ui_state("tabs", &snap) {
             self.log(Level::Warn, format!("tab snapshot: {}", e.message()));
         }
     }
