@@ -5,7 +5,7 @@
 //! The register is a view of what the engine recorded, never of the editor: it reads
 //! `SqlState::results`, one `StatementRun` per statement, so every tab carries its own rows, its own
 //! duration and its own failure. Everything it paints is built from those runs — the pill's copy,
-//! the CSV the Copy button writes and the JSON the JSON view shows.
+//! the TSV the Copy button writes and the JSON the JSON view shows.
 
 use egui::{Align2, CornerRadius, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use nook_engine::{Session, SqlState, StatementRun};
@@ -2129,7 +2129,7 @@ mod tests {
         assert_eq!(View::from_name(""), None);
     }
 
-    /// The actions the bands advertise are the product's own: the CSV of the active result, the
+    /// The actions the bands advertise are the product's own: the TSV of the active result, the
     /// statement itself, and a re-run of the script.
     #[test]
     fn the_registers_buttons_ask_for_the_view_they_are_about() {

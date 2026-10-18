@@ -56,7 +56,10 @@ pub fn demo_session() -> nook_engine::Session {
         DEMO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let _ = std::fs::remove_file(&path);
-    let cfg = ConnectionConfig::sqlite(path.to_string_lossy());
+    let mut cfg = ConnectionConfig::sqlite(path.to_string_lossy());
+    // The file is unique per session; the label is not. `sqlite()` derives both name and id from
+    // the file name, which would surface the pid in the tree, the tab title and the status chip.
+    cfg.name = "nook-demo.db".into();
     let mut session = Session::new();
     session.conns.push(Conn::new(cfg));
     if let Err(e) = nook_engine::cmd::open_now(&mut session, 0) {

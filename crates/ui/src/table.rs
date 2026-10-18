@@ -556,12 +556,26 @@ pub fn show(
                         }
                     }
                     // A drag that left the cell it started on: map the pointer to the cell under it,
-                    // so the rectangle grows instead of collapsing to the pressed cell.
+                    // so the rectangle grows instead of collapsing to the pressed cell. Past the last
+                    // row or into the gutter the pointer sits on no cell, so it clamps to the nearest
+                    // one — a drag that runs off the edge still selects the rows it passed.
                     if dragging {
                         if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
-                            if let Some(&(row, column, _)) =
-                                cells.iter().find(|(_, _, rect)| rect.contains(pointer))
-                            {
+                            let hit = cells
+                                .iter()
+                                .find(|(_, _, rect)| rect.contains(pointer))
+                                .map(|&(row, column, _)| (row, column))
+                                .or_else(|| {
+                                    cells
+                                        .iter()
+                                        .min_by(|a, b| {
+                                            let da = a.2.distance_to_pos(pointer);
+                                            let db = b.2.distance_to_pos(pointer);
+                                            da.total_cmp(&db)
+                                        })
+                                        .map(|&(row, column, _)| (row, column))
+                                });
+                            if let Some((row, column)) = hit {
                                 event = TableEvent::SelectExtend(row, column);
                             }
                         }

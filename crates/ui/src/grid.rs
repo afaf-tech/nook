@@ -3,7 +3,7 @@
 use egui::RichText;
 use nook_engine::{Level, Session};
 
-use crate::app::UiState;
+use crate::app::{QuickLook, UiState};
 use crate::table::{TableColumn, TableEvent, TableView};
 use crate::theme::{self as design, Tokens};
 
@@ -452,7 +452,7 @@ pub fn show(
     let look_h = if state
         .quick_look
         .as_ref()
-        .is_some_and(|(t, ..)| *t == tab_index)
+        .is_some_and(|look| look.tab == tab_index)
     {
         QUICK_LOOK_H
     } else {
@@ -626,9 +626,11 @@ pub fn show(
                     } else {
                         design::tag_lite(ui, tokens, "read-only");
                     }
-                    // Quick Look is read-only, so every grid offers it.
+                    // Quick Look is read-only, so every grid offers it. The record is captured
+                    // here, once: the band paints a stored string, so a large blob is not
+                    // re-hex-dumped on every repaint.
                     if design::ghost_button(ui, tokens, "Quick Look", true).clicked() {
-                        state.quick_look = Some((tab_index, row, name));
+                        state.quick_look = Some(quick_look_record(session, tab_index, row, &name));
                     }
                 }
                 None => {
@@ -675,64 +677,49 @@ pub fn show(
     );
 
     // Quick Look: the selected cell pretty-printed, in a band under the hint. The engine owns
-    // the formatting; this only paints the text it returned.
-    // Only the tab that opened the look paints it: switching tabs must not inspect a cell the
-    // new grid never selected.
-    if let Some((look_tab, row, column)) =
-        state.quick_look.clone().filter(|(t, ..)| *t == tab_index)
+    // the formatting and did it once, when the look opened; this only paints what it returned.
+    // Only the tab that opened the look paints it: switching tabs must not show a cell the new
+    // grid never selected.
+    if let Some(look) = state
+        .quick_look
+        .clone()
+        .filter(|look| look.tab == tab_index)
     {
-        let record = session.run(
-            "grid.quickLook",
-            serde_json::json!({"row": row, "column": column}),
-        );
-        match record {
-            Ok(out) => {
-                let text = out["text"].as_str().unwrap_or_default().to_owned();
-                let kind = out["kind"].as_str().unwrap_or_default().to_owned();
-                let note = out["note"].as_str().map(String::from);
-                // The same shape the form band takes: a hairline, a header row, and a bounded
-                // scroll body. `design::band` is a fixed-height toolbar and would clip the body.
-                design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("Quick Look · {column}"))
-                            .size(design::T_MD)
-                            .color(tokens.text),
-                    );
-                    design::chip(ui, tokens, &kind, tokens.info);
-                    if let Some(note) = &note {
-                        ui.label(RichText::new(note).size(11.5).color(tokens.warn));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if design::ghost_button(ui, tokens, "Close", true).clicked() {
-                            state.quick_look = None;
-                        }
-                        if design::ghost_button(ui, tokens, "Copy", true).clicked() {
-                            ui.ctx().copy_text(text.clone());
-                        }
-                    });
-                });
-                egui::ScrollArea::vertical()
-                    .id_salt(("quick-look-scroll", look_tab))
-                    .auto_shrink([false, false])
-                    .max_height(QUICK_LOOK_H - 40.0)
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(text)
-                                .size(design::T_SM)
-                                .monospace()
-                                .color(tokens.text_dim),
-                        );
-                    });
+        // The same shape the form band takes: a hairline, a header row, and a bounded scroll body.
+        // `design::band` is a fixed-height toolbar and would clip the body.
+        design::band_hairline(ui, tokens, ui.available_rect_before_wrap());
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("Quick Look · {}", look.column))
+                    .size(design::T_MD)
+                    .color(tokens.text),
+            );
+            design::chip(ui, tokens, &look.kind, tokens.info);
+            if let Some(note) = &look.note {
+                ui.label(RichText::new(note).size(11.5).color(tokens.warn));
             }
-            Err(e) => {
-                // A deleted row or a dropped column is an honest error band, and the look
-                // does not linger over a cell that no longer exists.
-                state.quick_look = None;
-                design::error_band(ui, tokens, "Quick Look failed", &e.to_string(), |_ui| {});
-            }
-        }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                    state.quick_look = None;
+                }
+                if design::ghost_button(ui, tokens, "Copy", true).clicked() {
+                    ui.ctx().copy_text(look.text.clone());
+                }
+            });
+        });
+        egui::ScrollArea::vertical()
+            .id_salt(("quick-look-scroll", look.tab))
+            .auto_shrink([false, false])
+            .max_height(QUICK_LOOK_H - 40.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(&look.text)
+                        .size(design::T_SM)
+                        .monospace()
+                        .color(tokens.text_dim),
+                );
+            });
     }
 
     // Pending statements, exactly as they will be sent, and the drawer's `.dfoot`.
@@ -817,6 +804,26 @@ pub fn show(
             }
             match session.run(id, params) {
                 Ok(_) => {
+                    // The page under the band can change: a sort, filter, page turn or reload moves
+                    // every row, and a look left pointing at row N would then show a different
+                    // record's value. The look is dropped rather than re-resolved — it named a
+                    // cell, and that cell is gone.
+                    if matches!(
+                        id,
+                        "grid.sort"
+                            | "grid.filter"
+                            | "grid.clearFilter"
+                            | "grid.fetchPage"
+                            | "grid.nextPage"
+                            | "grid.prevPage"
+                            | "grid.firstPage"
+                            | "grid.lastPage"
+                            | "grid.setPageSize"
+                            | "grid.apply"
+                            | "grid.revert"
+                    ) {
+                        state.quick_look = None;
+                    }
                     if id == "grid.editCell" && state.apply_after_edit {
                         state.apply_after_edit = false;
                         if let Err(e) = session.run("grid.apply", serde_json::json!({})) {
@@ -884,6 +891,41 @@ fn form_cell<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -
 /// is never written, so a default there would silently show the first record.
 ///
 /// Returns the edit the user made, if any; the caller runs it, the way the table's own events are run.
+/// Read one cell through `grid.quickLook` and keep the answer, so the band paints a stored
+/// string instead of re-running the formatter every frame. A refusal becomes the record the band
+/// shows as an error: the cell is gone, and the look says so rather than showing nothing.
+fn quick_look_record(
+    session: &mut Session,
+    tab_index: usize,
+    row: usize,
+    column: &str,
+) -> QuickLook {
+    let out = session.run(
+        "grid.quickLook",
+        serde_json::json!({"row": row, "column": column}),
+    );
+    let mut look = QuickLook {
+        tab: tab_index,
+        row,
+        column: column.to_owned(),
+        kind: "error".into(),
+        text: String::new(),
+        note: None,
+    };
+    match out {
+        Ok(out) => {
+            look.kind = out["kind"].as_str().unwrap_or("text").to_owned();
+            look.text = out["text"].as_str().unwrap_or_default().to_owned();
+            look.note = out["note"].as_str().map(String::from);
+        }
+        Err(e) => {
+            look.text = e.to_string();
+            look.note = Some("the cell could not be read".into());
+        }
+    }
+    look
+}
+
 fn form_band(
     ui: &mut egui::Ui,
     tokens: &Tokens,

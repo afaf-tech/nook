@@ -496,10 +496,22 @@ pub struct UiState {
     /// Form view on the data tab: the selected record as a vertical form. A flag on the UI state,
     /// not the engine's — the engine command is stateless and reads whatever row it is handed.
     pub form_view: bool,
-    /// Quick Look on one cell of the data grid: (tab, row, column). The tab is part of the key
-    /// because the band reads whatever grid is painting — a look left over from another tab would
-    /// inspect a cell that tab never selected. The engine command is stateless.
-    pub quick_look: Option<(usize, usize, String)>,
+    /// Quick Look on one cell of the data grid. The tab is part of the key because the band reads
+    /// whatever grid is painting — a look left over from another tab would inspect a cell that tab
+    /// never selected. The record is the engine's answer, captured once when the look opens: a
+    /// 1 MB blob re-hex-dumped every frame would block the UI thread.
+    pub quick_look: Option<QuickLook>,
+}
+
+/// The cell a Quick Look band shows and the text it paints, as `grid.quickLook` returned it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuickLook {
+    pub tab: usize,
+    pub row: usize,
+    pub column: String,
+    pub kind: String,
+    pub text: String,
+    pub note: Option<String>,
 }
 
 impl Default for UiState {
@@ -579,6 +591,17 @@ impl UiState {
             }
         }
         self.registers = kept;
+        // The Quick Look band is keyed by tab too: closing tab N must drop its look, and the tabs
+        // that shift down must move theirs, or the tab that lands on N paints a cell it never
+        // selected.
+        self.quick_look = match self.quick_look.take() {
+            Some(look) if look.tab < index => Some(look),
+            Some(mut look) if look.tab > index => {
+                look.tab -= 1;
+                Some(look)
+            }
+            _ => None,
+        };
     }
 
     pub fn open_connection_dialog(&mut self, index: Option<usize>) {
@@ -2280,7 +2303,14 @@ impl NookApp {
             Ok(out) => out,
             Err(e) => return serde_json::json!({"ok": false, "error": e.to_string()}),
         };
-        state.quick_look = Some((index, row as usize, column.to_owned()));
+        state.quick_look = Some(QuickLook {
+            tab: index,
+            row: row as usize,
+            column: column.to_owned(),
+            kind: reply["kind"].as_str().unwrap_or("text").to_owned(),
+            text: reply["text"].as_str().unwrap_or_default().to_owned(),
+            note: reply["note"].as_str().map(String::from),
+        });
         serde_json::json!({
             "ok": true,
             "tab": index,
@@ -2666,16 +2696,18 @@ impl NookApp {
 
     /// Keyboard shortcuts that are not tied to the menu.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let (palette, run_query, apply, close_tab, format_sql, toggle_log) = ctx.input(|i| {
-            (
-                i.modifiers.command && i.key_pressed(egui::Key::K),
-                i.modifiers.command && i.key_pressed(egui::Key::Enter),
-                i.modifiers.command && i.key_pressed(egui::Key::S),
-                i.modifiers.command && i.key_pressed(egui::Key::W),
-                i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::F),
-                i.modifiers.command && i.key_pressed(egui::Key::L),
-            )
-        });
+        let (palette, run_query, apply, close_tab, format_sql, toggle_log, copy_tsv) =
+            ctx.input(|i| {
+                (
+                    i.modifiers.command && i.key_pressed(egui::Key::K),
+                    i.modifiers.command && i.key_pressed(egui::Key::Enter),
+                    i.modifiers.command && i.key_pressed(egui::Key::S),
+                    i.modifiers.command && i.key_pressed(egui::Key::W),
+                    i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::F),
+                    i.modifiers.command && i.key_pressed(egui::Key::L),
+                    i.modifiers.command && i.key_pressed(egui::Key::C),
+                )
+            });
         if palette {
             self.state.palette_open = true;
             self.state.palette_objects = false;
@@ -2703,6 +2735,22 @@ impl NookApp {
         }
         if toggle_log {
             self.state.log_open = !self.state.log_open;
+        }
+        // Cmd/Ctrl+C on a data grid copies the selection (or the whole page) as TSV — the plan's
+        // "pastes into a spreadsheet as a real table". Skipped while a text field has focus, so the
+        // inline editor and the filter keep their own copy.
+        if copy_tsv && !ctx.egui_wants_keyboard_input() {
+            if let Some(index) = self.session.active_tab {
+                if self.session.tabs[index].kind == TabKind::Data {
+                    if let Ok(out) = self.session.run("grid.copyTsv", serde_json::json!({})) {
+                        if let Some(text) = out["tsv"].as_str() {
+                            if !text.is_empty() {
+                                ctx.copy_text(text.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
         }
         if close_tab {
             if let Some(index) = self.session.active_tab {
@@ -3102,6 +3150,34 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_tab_takes_its_quick_look_with_it_and_shifts_the_rest() {
+        let mut state = UiState::default();
+        let look = |tab: usize| QuickLook {
+            tab,
+            row: 0,
+            column: "email".into(),
+            kind: "text".into(),
+            text: "ada@example.com".into(),
+            note: None,
+        };
+        // A look on the tab being closed is dropped.
+        state.quick_look = Some(look(2));
+        state.forget_tab(2);
+        assert_eq!(
+            state.quick_look, None,
+            "the closed tab's look must not linger"
+        );
+        // A look on a tab after it follows the tab down.
+        state.quick_look = Some(look(3));
+        state.forget_tab(2);
+        assert_eq!(state.quick_look.map(|look| look.tab), Some(2));
+        // A look before it is untouched.
+        state.quick_look = Some(look(0));
+        state.forget_tab(2);
+        assert_eq!(state.quick_look.map(|look| look.tab), Some(0));
+    }
+
+    #[test]
     fn quick_look_opens_the_band_on_the_active_data_grid() {
         let mut session = crate::demo_session();
         let mut state = UiState::default();
@@ -3120,12 +3196,15 @@ mod tests {
         );
         assert_eq!(reply["ok"], serde_json::json!(true), "{reply:?}");
         assert_eq!(reply["text"], serde_json::json!("ada@example.com"));
-        // The band reads this flag, and it carries the tab: another tab must not paint it.
+        // The band paints this record, and it carries the tab: another tab must not show it.
+        let look = state.quick_look.clone().expect("the look is set");
         assert_eq!(
-            state.quick_look,
-            Some((index, 0, "email".to_owned())),
-            "the band must be keyed by the tab that opened it"
+            look.tab, index,
+            "the band is keyed by the tab that opened it"
         );
+        assert_eq!((look.row, look.column.as_str()), (0, "email"));
+        assert_eq!(look.kind, "text");
+        assert_eq!(look.text, "ada@example.com");
 
         // The engine owns the refusal, so an unknown cell never sets the flag.
         let before = state.quick_look.clone();
