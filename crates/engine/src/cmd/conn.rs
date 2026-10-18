@@ -23,7 +23,8 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("conn.close", "Close connection", "Connection", close),
         CommandSpec::new("conn.closeAll", "Close all connections", "Connection", close_all),
         CommandSpec::new("conn.test", "Test connection", "Connection", test)
-            .help("Connect, read the version and disconnect without touching the open connection."),
+            .params(r#"{"conn":"local","password":"…"}"#)
+            .help("Connect, read the version and disconnect without touching the open connection. A \"password\" overrides the stored one for this probe, which is how editor.safeMode proves the credential a user typed."),
         CommandSpec::new("conn.reconnect", "Reconnect", "Connection", reconnect),
         CommandSpec::new("conn.select", "Make active", "Connection", select),
         CommandSpec::new("conn.refresh", "Refresh server", "Connection", refresh)
@@ -353,6 +354,11 @@ fn test(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
     let mut probe = crate::Conn::new(cfg.clone());
     let started = std::time::Instant::now();
     let mut effective = super::dial_config(&cfg)?;
+    // A caller-supplied password overrides the stored one: `editor.safeMode` uses this to prove the
+    // credential the *user* typed rather than one already in the keychain.
+    if let Some(password) = p.str_opt("password") {
+        effective.password = Some(password);
+    }
     let mut tunnel = None;
     if cfg.ssh.enabled {
         let t = crate::Tunnel::start(&cfg, SshSecret::for_connection(&cfg.id))?;

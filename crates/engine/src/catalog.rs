@@ -255,7 +255,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Data",
         "grid.rawMode",
         "Edit the SQL of a row",
-        "grid edits become SQL in the pending list instead",
+        "the exact UPDATE a pending edit will run, editable; the edit is re-derived from the statement by WHERE, and anything it cannot map back is refused",
     ),
     // ---------------------------------------------------------------- Design
     (

@@ -212,6 +212,53 @@ fn the_is_null_condition_matches_null_rows_and_not_equals_null() {
 // ---------------------------------------------------------------- bulk edit
 
 #[test]
+fn a_filter_naming_a_column_the_result_lacks_is_refused_not_read_as_a_literal() {
+    let mut f = Fixture::new("filters-typo");
+    orders(&mut f);
+    f.open_grid("orders");
+    // SQLite reads `"ctiy"` as the string `'ctiy'`, so an unchecked typo compiles to a filter that
+    // matches nothing and reports success. It has to be an error that names the column.
+    let err = f
+        .try_run(
+            "grid.filters",
+            json!({"filters": [{"column": "ctiy", "op": "=", "value": "London"}]}),
+        )
+        .expect_err("an unknown column is refused");
+    assert!(err.message().contains("ctiy"), "{err}");
+    assert!(
+        err.message().contains("status"),
+        "{err}: the message lists the real columns"
+    );
+}
+
+#[test]
+fn a_hand_typed_where_clears_the_chips_it_replaces() {
+    let mut f = Fixture::new("filters-raw");
+    orders(&mut f);
+    f.open_grid("orders");
+    f.run(
+        "grid.filters",
+        json!({"filters": [{"column": "status", "op": "=", "value": "draft"}]}),
+    );
+    f.run("grid.filter", json!({"where": "status = 'live'"}));
+    let index = f.session.active_tab.expect("a tab is active");
+    assert!(
+        f.session.tabs[index].grid.filters.is_empty(),
+        "the chips still describe the filter the raw WHERE replaced"
+    );
+    // And the same when the chips are cleared outright.
+    f.run(
+        "grid.filters",
+        json!({"filters": [{"column": "status", "op": "=", "value": "draft"}]}),
+    );
+    f.run("grid.clearFilter", json!({}));
+    assert!(
+        f.session.tabs[index].grid.filters.is_empty(),
+        "Clear all left a chip behind"
+    );
+}
+
+#[test]
 fn bulk_edit_stages_one_edit_per_row_and_the_apply_lands_them() {
     let mut f = Fixture::new("bulk");
     orders(&mut f);
@@ -277,6 +324,28 @@ fn bulk_edit_refuses_a_column_that_is_not_there_and_a_primary_key_across_rows() 
 }
 
 #[test]
+fn a_refused_row_leaves_a_bulk_edit_exactly_as_it_was() {
+    let mut f = Fixture::new("bulk-atomic");
+    orders(&mut f);
+    f.open_grid("orders");
+    // Row 3 exists; row 9 does not. The batch must stage nothing rather than the two good rows.
+    let err = f
+        .try_run(
+            "grid.bulkEdit",
+            json!({"column": "status", "value": "x", "rows": [0, 1, 9]}),
+        )
+        .expect_err("the last row is not on the page");
+    assert!(err.message().contains('9'), "{err}");
+    assert!(
+        f.try_run("grid.pending", json!({})).unwrap()["pending"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a batch refused partway staged rows before the refusal"
+    );
+}
+
+#[test]
 fn bulk_edit_caps_the_row_count_and_says_so() {
     let mut f = Fixture::new("bulk-cap");
     f.sql("CREATE TABLE wide (id INTEGER PRIMARY KEY, status TEXT)");
@@ -337,6 +406,42 @@ fn a_query_result_becomes_editable_and_its_apply_writes_the_row() {
     let rows = f.sql("select id, name from people order by id");
     assert_eq!(rows["objects"][0]["name"], json!("Ada L."), "{rows:?}");
     assert_eq!(rows["objects"][1]["name"], json!("Bob"), "{rows:?}");
+}
+
+#[test]
+fn a_page_query_command_refuses_an_editable_result_instead_of_lying() {
+    let mut f = Fixture::new("query-sort");
+    f.sql("CREATE TABLE items (id INTEGER PRIMARY KEY, kind TEXT)");
+    f.sql("INSERT INTO items (id, kind) VALUES (1, 'b'), (2, 'a')");
+    f.query("select id, kind from items order by id");
+    f.session
+        .run("grid.editQueryResult", json!({"statement": 0}))
+        .expect("editable");
+    // Sorting would be stored and reported back by `grid_summary` while the reload re-ran the
+    // statement, which is the silent lie: the grid would claim an order it never applied.
+    for (id, params) in [
+        ("grid.sort", json!({"column": "kind"})),
+        ("grid.filter", json!({"where": "kind = 'a'"})),
+        ("grid.clearFilter", json!({})),
+        ("grid.fetchPage", json!({"page": 1})),
+        (
+            "grid.filters",
+            json!({"filters": [{"column": "kind", "op": "=", "value": "a"}]}),
+        ),
+    ] {
+        let err = f.try_run(id, params.clone()).expect_err(id);
+        assert!(err.message().contains("statement"), "{id}: {err}");
+    }
+    // And the rows are still the statement's, in the statement's order.
+    let index = f.session.active_tab.expect("a tab is active");
+    let kinds: Vec<String> = f.session.tabs[index]
+        .grid
+        .result
+        .rows
+        .iter()
+        .map(|r| r[1].display())
+        .collect();
+    assert_eq!(kinds, vec!["b", "a"], "a refused command moved the page");
 }
 
 #[test]
@@ -514,6 +619,23 @@ fn fake_security(secret: &str) -> std::path::PathBuf {
     }
     std::env::set_var("NOOK_SECURITY_BIN", &script);
     script
+}
+
+#[test]
+fn safe_mode_hands_out_no_token_without_a_password_to_prove() {
+    let _script = fake_security("safe-token-value");
+    let mut f = Fixture::new("safe-password");
+    orders(&mut f);
+    f.open_grid("orders");
+    // The proof has to cost the caller the credential. Reading the stored one would make the gate
+    // two commands deep for any script that can reach the control channel.
+    let err = f
+        .try_run(
+            "editor.safeMode",
+            json!({"enabled": true, "confirm": true, "conn": f.conn}),
+        )
+        .expect_err("no password is refused");
+    assert!(err.message().contains("password"), "{err}");
 }
 
 #[test]

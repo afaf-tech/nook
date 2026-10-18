@@ -100,12 +100,20 @@ fn safe_mode(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             "safe_mode": true,
             "conn": conn,
             "token": null,
-            "note": "pass \"confirm\": true to prove the connection and get the token",
+            "note": "pass \"confirm\": true and the connection's password to prove the connection \
+                     and get the token",
         }));
     }
-    // The proof: a real connect with the stored credentials. A rotated password fails here, which is
-    // the property a locally compared string would not have.
-    session.run("conn.test", json!({ "conn": conn }))?;
+    // The proof is a real connect made with the credential the *caller* supplies. Reading the stored
+    // password instead would hand the token to anyone who can send two commands, which is the gate
+    // proving nothing: knowing the token must require knowing the credential.
+    let password = p.str_opt("password").ok_or_else(|| {
+        Error::config(format!(
+            "safe mode: pass \"password\": the credential for {conn}. The token is handed out only \
+             after a live connection test with it"
+        ))
+    })?;
+    session.run("conn.test", json!({ "conn": conn, "password": password }))?;
     let token = crate::profiles::safe_token(&conn)?;
     Ok(json!({ "safe_mode": true, "conn": conn, "token": token }))
 }

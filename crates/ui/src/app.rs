@@ -524,6 +524,27 @@ pub struct UiState {
     /// never selected. The record is the engine's answer, captured once when the look opens: a
     /// 1 MB blob re-hex-dumped every frame would block the UI thread.
     pub quick_look: Option<QuickLook>,
+    /// The safe-mode prompt: the connection being confirmed and the password typed so far. `None`
+    /// is closed. Safe mode's token is handed out only after a live test with this credential, so
+    /// the field is the gate's whole UI — nothing is stored until the test passes.
+    pub safe_prompt: Option<SafePrompt>,
+    /// The token `editor.safeMode` handed back after a confirmed prompt. Kept for the session: the
+    /// gate wants it on every commit, and asking for the password once per row would train the user
+    /// to type it without reading.
+    pub safe_token: Option<String>,
+    /// A commit that safe mode refused, waiting for the prompt: the tab whose Apply should be
+    /// retried once the credential is confirmed. Without it the refusal would cost the user their
+    /// click and their pending buffer's meaning.
+    pub apply_after_confirm: Option<usize>,
+}
+
+/// The half-typed safe-mode confirmation. `error` keeps the driver's own refusal on screen instead
+/// of a toast the user has already missed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SafePrompt {
+    pub conn: String,
+    pub password: String,
+    pub error: Option<String>,
 }
 
 /// The condition the filter builder is composing, before `grid.filters` takes it.
@@ -624,6 +645,9 @@ impl Default for UiState {
             bulk_edit: None,
             filter_sql_open: false,
             filter_preview: None,
+            safe_prompt: None,
+            safe_token: None,
+            apply_after_confirm: None,
         }
     }
 }

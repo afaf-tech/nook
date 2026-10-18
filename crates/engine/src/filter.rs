@@ -150,7 +150,21 @@ fn condition(filter: &Filter, dialect: Dialect) -> Result<String> {
                 sql_literal(&nook_core::Value::from_json(&pair[1]), dialect)
             )
         }
-        op @ ("=" | "!=" | "<" | "<=" | ">" | ">=" | "like" | "ilike") => {
+        // `ILIKE` is Postgres-only. SQLite's `LIKE` is already case-insensitive for ASCII and MySQL's
+        // is case-insensitive under its default collation, so the honest mapping is `LIKE` there —
+        // emitting `ILIKE` unconditionally would be a syntax error on two of the three engines.
+        "ilike" => {
+            let literal = match value {
+                Some(v) => sql_literal(&nook_core::Value::from_json(v), dialect),
+                None => return Err(Error::config("'ilike' needs a value")),
+            };
+            let op = match dialect {
+                Dialect::Postgres => "ILIKE",
+                Dialect::Sqlite | Dialect::MySql => "LIKE",
+            };
+            format!("{column} {op} {literal}")
+        }
+        op @ ("=" | "!=" | "<" | "<=" | ">" | ">=" | "like") => {
             let literal = match value {
                 Some(v) => sql_literal(&nook_core::Value::from_json(v), dialect),
                 None => return Err(Error::config(format!("'{op}' needs a value"))),
@@ -191,7 +205,8 @@ mod tests {
             (">", "\"status\" > 'live'"),
             (">=", "\"status\" >= 'live'"),
             ("like", "\"status\" LIKE 'live'"),
-            ("ilike", "\"status\" ILIKE 'live'"),
+            // On SQLite `ilike` compiles to `LIKE`: SQLite has no `ILIKE`.
+            ("ilike", "\"status\" LIKE 'live'"),
         ] {
             assert_eq!(
                 compile_one(&one("status", op, json!("live"))),
@@ -199,6 +214,15 @@ mod tests {
                 "{op}"
             );
         }
+        // The operator still means what it says where the engine has it.
+        assert_eq!(
+            compile(
+                std::slice::from_ref(&one("status", "ilike", json!("live"))),
+                Dialect::Postgres
+            )
+            .expect("it compiles"),
+            "\"status\" ILIKE 'live'"
+        );
     }
 
     #[test]

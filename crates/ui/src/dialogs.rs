@@ -29,6 +29,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
     datagen_dialog(ui, session, state, tokens);
     export_dialog(ui, session, state, tokens);
     settings_dialog(ui, session, state, tokens);
+    safe_prompt(ui, session, state, tokens);
     palette(ui, session, state, tokens);
 }
 
@@ -1643,6 +1644,14 @@ fn extension(format: &str) -> &'static str {
     }
 }
 
+/// The active connection's id, which is the one a commit will be written through.
+fn active_conn_id(session: &Session) -> Option<String> {
+    session
+        .active_conn
+        .and_then(|i| session.conns.get(i))
+        .map(|c| c.cfg.id.clone())
+}
+
 fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
     if !state.settings_open {
         return;
@@ -1727,6 +1736,42 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
             });
             ui.add_space(8.0);
             design::card_frame(tokens).show(ui, |ui| {
+                ui.label(RichText::new("Safety").size(11.5).color(tokens.text_dim));
+                ui.add_space(f32::from(design::S2));
+                let on = session.settings.safe_mode;
+                if let Some(index) =
+                    design::segmented(ui, tokens, &[("Safe mode on", on), ("Off", !on)])
+                {
+                    let enabled = index == 0;
+                    if let Err(e) =
+                        session.run("editor.safeMode", serde_json::json!({ "enabled": enabled }))
+                    {
+                        session.log(nook_engine::Level::Error, format!("editor.safeMode: {e}"));
+                    } else if enabled {
+                        // Turning it on is not a flag the app can honour by itself: the first
+                        // commit needs the token, so ask for the credential now rather than
+                        // letting the user discover the gate at the moment they press Apply.
+                        if let Some(conn) = active_conn_id(session) {
+                            state.safe_prompt = Some(crate::app::SafePrompt {
+                                conn,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+                ui.label(
+                    RichText::new(
+                        "A commit or a destructive command needs the connection's token, which is \
+                         handed out only after a live connection test with the password you type. \
+                         It stops a stray script and a slip of the mouse; someone who can already \
+                         read the keychain has your credentials anyway.",
+                    )
+                    .size(11.0)
+                    .color(tokens.text_faint),
+                );
+            });
+            ui.add_space(8.0);
+            design::card_frame(tokens).show(ui, |ui| {
                 ui.label(RichText::new("AI").size(11.5).color(tokens.text_dim));
                 ui.add_space(f32::from(design::S2));
                 crate::ai::preferences(ui, session, state, tokens);
@@ -1783,6 +1828,115 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
         });
     if close || !open {
         state.settings_open = false;
+    }
+}
+
+/// The safe-mode confirmation: the credential, then a live `conn.test` with it, and only then the
+/// token. The dialog is the gate's own UI — a commit that was refused leaves `safe_prompt` open so
+/// the user can answer it instead of guessing what the log meant.
+fn safe_prompt(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
+    let Some(mut prompt) = state.safe_prompt.clone() else {
+        return;
+    };
+    let frame = dialog(ui.ctx(), tokens);
+    let mut open = true;
+    let mut close = false;
+    let mut submit = false;
+    egui::Window::new("Confirm safe mode")
+        .open(&mut open)
+        .frame(frame)
+        .collapsible(false)
+        .default_width(420.0)
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(380.0);
+            ui.label(
+                RichText::new(format!(
+                    "Type the password for {} — the token is handed out only after a live test \
+                     with it.",
+                    prompt.conn
+                ))
+                .size(11.5)
+                .color(tokens.text_dim),
+            );
+            ui.add_space(f32::from(design::S4));
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut prompt.password)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            );
+            if prompt.error.is_none() {
+                field.request_focus();
+            }
+            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                submit = true;
+            }
+            if let Some(error) = prompt.error.clone() {
+                ui.add_space(f32::from(design::S2));
+                ui.label(RichText::new(error).size(11.0).color(tokens.error));
+            }
+            ui.add_space(f32::from(design::S4));
+            ui.horizontal(|ui| {
+                if design::primary_button(ui, tokens, "Confirm", !prompt.password.is_empty())
+                    .clicked()
+                {
+                    submit = true;
+                }
+                if design::ghost_button(ui, tokens, "Cancel", true).clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    if submit {
+        match session.run(
+            "editor.safeMode",
+            serde_json::json!({
+                "enabled": true,
+                "confirm": true,
+                "conn": prompt.conn,
+                "password": prompt.password,
+            }),
+        ) {
+            Ok(answer) => {
+                state.safe_token = answer["token"].as_str().map(str::to_owned);
+                session.log(
+                    nook_engine::Level::Info,
+                    format!("safe mode: {} confirmed", prompt.conn),
+                );
+                close = true;
+            }
+            // The driver's own words stay in the dialog: a wrong password and an unreachable
+            // server are different problems and both are worth reading.
+            Err(e) => prompt.error = Some(e.to_string()),
+        }
+    }
+    state.safe_prompt = if close || !open { None } else { Some(prompt) };
+    // The commit that opened this dialog is still staged; confirming should run it rather than
+    // making the user find the Apply button again.
+    if state.safe_prompt.is_none() && state.safe_token.is_some() {
+        if let Some(tab_index) = state.apply_after_confirm.take() {
+            let conn = session
+                .tabs
+                .get(tab_index)
+                .and_then(|t| t.conn)
+                .and_then(|i| session.conns.get(i))
+                .map(|c| c.cfg.id.clone());
+            let mut params = serde_json::json!({});
+            if let (Some(conn), Some(map)) = (conn, params.as_object_mut()) {
+                map.insert("conn".into(), serde_json::json!(conn));
+                map.insert(
+                    "safe_token".into(),
+                    serde_json::json!(state.safe_token.clone().unwrap_or_default()),
+                );
+            }
+            match session.run("grid.apply", params) {
+                Ok(_) => session.log(
+                    nook_engine::Level::Info,
+                    "safe mode: the waiting commit ran".to_owned(),
+                ),
+                Err(e) => session.log(nook_engine::Level::Error, format!("grid.apply: {e}")),
+            }
+        }
     }
 }
 

@@ -211,6 +211,33 @@ process table. This is the pre-existing path for SSH and database passwords too,
   works on it. It used to fill `SqlState::last_result` and a `result_label`, which only the editor's
   own result table read — the reason the plan had nothing to appear in once P5 deleted that table.
   Both fields are gone.
+- **A query result is editable only when the statement is one table's rows.** `grid.editQueryResult`
+  accepts a single `SELECT … FROM <one table>` whose projection carries the table's primary key, and
+  refuses everything else by name: `GROUP BY`, `HAVING`, `DISTINCT`, `JOIN`, `UNION`, a CTE, a window
+  function, an aggregate, a subquery, two tables, an unnamed expression, or a missing key column.
+  The three refusals that matter are one table, a primary key, and the key in the projection — without
+  the last there is no row to update, and guessing is how a client rewrites 400 rows at once. Once
+  accepted, the tab reuses the data grid's whole edit path: the same pending list, the same planner,
+  the same one-transaction apply. A query-sourced grid reloads by *re-running its statement*, and the
+  page-query commands (`grid.sort`, `grid.filter`, `grid.fetchPage`, `grid.setPageSize`) refuse it
+  with a named error rather than storing an order they cannot apply — a grid that reports a sort it
+  did not perform is worse than one that says no. `sync_grid_table` skips the table-shape comparison
+  for the same reason: a narrower projection is legitimate, and reloading would let an unordered
+  statement return its rows in another order under an index-based row reference.
+- **Raw mode maps a statement back or refuses it.** `grid.rawMode` lists the exact `UPDATE` each
+  pending edit will run and accepts an edited one only when it re-derives to exactly one staged edit:
+  the shape is `UPDATE … SET col = literal WHERE …`, the `WHERE` is matched against the pending
+  edits', and an ambiguous match needs `index`. Anything else is refused, because appending arbitrary
+  SQL to the pending list turns a review pane into a way to run SQL without saying so. Arbitrary SQL
+  belongs in the editor.
+- **Safe mode is a keychain token behind a live connection test.** `editor.safeMode` mints a token
+  into the keychain and hands it back only after a real `conn.test` made with the password the
+  *caller* supplies — reading the stored password instead would hand the token to any script that can
+  send two commands. The gate is keyed on the setting alone and on the *tab's* connection, not on
+  `active_conn`: with a per-connection "token exists" test, enabling safe mode while connected to A
+  would leave B ungated. The ceiling is honest and belongs in the setting's own help text: an
+  attacker who can read the keychain already has the credentials, so this stops a stray script and a
+  slip of the mouse, not a determined local process.
 - **A bounded pill row hides pills instead of scrolling.** The register's `.rtabs` and the editor's
   `.strip` are `nowrap` flex rows in the design with the band's own fact pinned to the right, and
   nothing stopped the pills painting over that fact and past the pane: the run's total was clipped

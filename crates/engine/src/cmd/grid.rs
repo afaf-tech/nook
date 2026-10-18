@@ -134,6 +134,20 @@ fn active_grid_tab(session: &Session) -> Result<usize> {
     Ok(index)
 }
 
+/// Refuse a command that would change the *page query* on a grid whose rows are a statement's own
+/// result. `load_grid` re-runs that statement, so an order, filter or page set here would be stored,
+/// reported back by `grid_summary`, and never applied — the silent lie this phase exists to prevent.
+fn refuse_on_statement_rows(session: &Session, index: usize, what: &str) -> Result<()> {
+    let editable = session.tabs[index].sql.editable.as_ref();
+    if editable.is_some() {
+        return Err(Error::config(format!(
+            "this result is the statement's own rows: {what} would not reach the query. Change the \
+             statement and run it again"
+        )));
+    }
+    Ok(())
+}
+
 /// Why the grid commands refuse the active tab. One definition, so a surface that cannot run one —
 /// the results register's Export sits on a query tab, which has no data grid to hand over — can say
 /// the engine's own words rather than its own.
@@ -187,6 +201,7 @@ fn open(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 
 fn fetch_page(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    refuse_on_statement_rows(session, index, "paging")?;
     let page = p.int_opt("page", 0).max(0) as usize;
     session
         .tabs
@@ -256,6 +271,7 @@ fn last_page(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
 
 fn set_page_size(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    refuse_on_statement_rows(session, index, "a page size")?;
     let size = p.int_opt("page_size", 200).clamp(1, 100_000) as usize;
     session
         .tabs
@@ -270,6 +286,7 @@ fn set_page_size(session: &mut Session, p: &Params) -> Result<serde_json::Value>
 
 fn sort(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    refuse_on_statement_rows(session, index, "sorting")?;
     let column = p.str_arg("column")?;
     let desc = p.bool_opt("desc", false);
     {
@@ -314,6 +331,7 @@ fn sort(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 
 fn filter(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    refuse_on_statement_rows(session, index, "a WHERE clause")?;
     let where_clause = p.str_arg("where")?;
     {
         let tab = session
@@ -321,6 +339,9 @@ fn filter(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             .get_mut(index)
             .ok_or_else(|| Error::internal("tab is gone"))?;
         tab.grid.filter = where_clause;
+        // A hand-typed WHERE replaces whatever the chips described; keeping them would paint a
+        // condition the grid is no longer filtering by.
+        tab.grid.filters.clear();
         tab.grid.page = 0;
         // The count belongs to the rows the grid was asking for; this asks for a different set.
         tab.grid.total_rows = None;
@@ -345,6 +366,42 @@ fn filters_arg(p: &Params) -> Result<Vec<crate::filter::Filter>> {
     }
 }
 
+/// Refuse a condition whose column the page does not have. SQLite reads a double-quoted unknown
+/// name as a string literal, so without this a typo'd chip compiles to `WHERE "ctiy" = 'London'`,
+/// which is `'ctiy' = 'London'` — a filter that silently matches nothing instead of reporting a
+/// mistake.
+fn check_filter_columns(
+    session: &Session,
+    index: usize,
+    filters: &[crate::filter::Filter],
+) -> Result<()> {
+    let known: Vec<String> = session.tabs[index]
+        .grid
+        .result
+        .columns
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if known.is_empty() {
+        // Nothing loaded: there is no column list to check against, and refusing every condition
+        // would make the command unusable on a tab that has not fetched yet.
+        return Ok(());
+    }
+    for filter in filters {
+        if !known
+            .iter()
+            .any(|c| *c == filter.column.to_ascii_lowercase())
+        {
+            return Err(Error::not_found(format!(
+                "no column '{}' in this result; it has: {}",
+                filter.column,
+                session.tabs[index].grid.result.columns.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn dialect_of(session: &Session, index: usize) -> nook_core::Dialect {
     session
         .tabs
@@ -357,7 +414,9 @@ fn dialect_of(session: &Session, index: usize) -> nook_core::Dialect {
 
 fn filters(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    refuse_on_statement_rows(session, index, "a filter")?;
     let parsed = filters_arg(p)?;
+    check_filter_columns(session, index, &parsed)?;
     let where_clause = crate::filter::compile(&parsed, dialect_of(session, index))?;
     {
         let tab = session
@@ -380,6 +439,7 @@ fn filters(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 fn filter_preview(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
     let parsed = filters_arg(p)?;
+    check_filter_columns(session, index, &parsed)?;
     let dialect = dialect_of(session, index);
     let where_clause = crate::filter::compile(&parsed, dialect)?;
     let table = session.tabs[index]
@@ -424,6 +484,7 @@ fn filter_preview(session: &mut Session, p: &Params) -> Result<serde_json::Value
 
 fn clear_filter(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
+    refuse_on_statement_rows(session, index, "clearing the filter")?;
     {
         let tab = session
             .tabs
@@ -481,15 +542,17 @@ fn count_rows(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     Ok(json!({ "rows": total, "table": table }))
 }
 
-fn record_edit(
-    session: &mut Session,
+/// Plan one edit without touching the buffer. The split exists so a batch can plan every row
+/// before it pushes any: a refusal halfway through must leave the pending list as it was.
+fn plan_one(
+    session: &Session,
     tab_index: usize,
     kind: EditKind,
     row: usize,
     column: Option<String>,
     value: Option<Value>,
     insert_values: Vec<(String, Value)>,
-) -> Result<serde_json::Value> {
+) -> Result<crate::PendingEdit> {
     let (sql, key) = plan_edit(
         session,
         tab_index,
@@ -502,19 +565,33 @@ fn record_edit(
             key: None,
         },
     )?;
-    let tab = session
-        .tabs
-        .get_mut(tab_index)
-        .ok_or_else(|| Error::internal("tab is gone"))?;
-    tab.grid.pending.push(crate::PendingEdit {
+    Ok(crate::PendingEdit {
         kind,
         row,
         column: column.unwrap_or_default(),
         value: value.unwrap_or(Value::Null),
         insert: insert_values,
         key,
-        sql: sql.clone(),
-    });
+        sql,
+    })
+}
+
+fn record_edit(
+    session: &mut Session,
+    tab_index: usize,
+    kind: EditKind,
+    row: usize,
+    column: Option<String>,
+    value: Option<Value>,
+    insert_values: Vec<(String, Value)>,
+) -> Result<serde_json::Value> {
+    let edit = plan_one(session, tab_index, kind, row, column, value, insert_values)?;
+    let sql = edit.sql.clone();
+    let tab = session
+        .tabs
+        .get_mut(tab_index)
+        .ok_or_else(|| Error::internal("tab is gone"))?;
+    tab.grid.pending.push(edit);
     Ok(json!({
         "pending": tab.grid.pending.len(),
         "sql": sql,
@@ -822,8 +899,11 @@ fn bulk_edit(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             rows.len()
         )));
     }
+    // Plan every row first, then push. A refusal on row 7 must not leave rows 0..6 staged: the
+    // caller asked for one batch and would have no way to tell a partial one from a whole one.
+    let mut planned = Vec::with_capacity(staged_rows.len());
     for row in &staged_rows {
-        record_edit(
+        planned.push(plan_one(
             session,
             index,
             EditKind::SetCell,
@@ -831,7 +911,14 @@ fn bulk_edit(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             Some(column.clone()),
             Some(value.clone()),
             vec![],
-        )?;
+        )?);
+    }
+    {
+        let tab = session
+            .tabs
+            .get_mut(index)
+            .ok_or_else(|| Error::internal("tab is gone"))?;
+        tab.grid.pending.extend(planned);
     }
     Ok(json!({
         "staged": staged_rows.len(),
@@ -1039,10 +1126,14 @@ fn revert(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
 }
 
 fn apply(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
-    // The commit's own gate, before anything is planned: safe mode wants the connection's token, and
-    // a caller that cannot present it never reaches the statements.
-    super::require_safe_mode(session, p)?;
     let index = active_grid_tab(session)?;
+    // The commit's own gate, before anything is planned: safe mode wants the token of the connection
+    // this write will land in — the tab's, not whichever one the params name — and a caller that
+    // cannot present it never reaches the statements.
+    let conn_index = session.tabs[index]
+        .conn
+        .ok_or_else(|| Error::config("this tab has no connection"))?;
+    super::require_safe_mode(session, p, conn_index)?;
     // Plan every pending edit again, against the table as it is now. A statement planned before the
     // table changed cannot be trusted: the columns it names may be gone, and a stale `WHERE` matches
     // no row while reporting the edit applied — the SQL that runs here is the SQL the grid shows

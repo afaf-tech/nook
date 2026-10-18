@@ -148,7 +148,7 @@ fn drop_user(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             "refusing to drop a user without \"confirm\": true",
         ));
     }
-    super::require_safe_mode(session, p)?;
+    super::require_safe_mode_for_params(session, p)?;
     let index = session.resolve_conn(p)?;
     let (kind, dialect) = kind_and_dialect(session, index)?;
     let user = p.str_arg("user")?;

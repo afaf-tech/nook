@@ -214,6 +214,8 @@ pub fn show(
 
     let mut actions = Actions::default();
     let sql = &tab.sql;
+    // Dirty cells read the tab's pending list, which is the same source the data grid paints from.
+    let pending = super::grid::dirty_cells(tab);
     let _ = paint(
         ui,
         tokens,
@@ -223,6 +225,7 @@ pub fn show(
         max_rows,
         id,
         state.table(tab_index),
+        &pending,
         &mut actions,
     );
 
@@ -238,6 +241,14 @@ pub fn show(
                 nook_engine::Level::Error,
                 format!("grid.editQueryResult: {e}"),
             );
+        }
+    }
+    if let Some((row, column, text)) = actions.edit {
+        if let Err(e) = session.run(
+            "grid.editCell",
+            serde_json::json!({ "row": row, "column": column, "value": text }),
+        ) {
+            session.log(nook_engine::Level::Error, format!("grid.editCell: {e}"));
         }
     }
     if actions.rerun {
@@ -262,6 +273,8 @@ struct Actions {
     rerun: bool,
     /// Make the active statement's result editable (`grid.editQueryResult`).
     make_editable: bool,
+    /// Stage one cell edit on an editable result: (row, column name, new text).
+    edit: Option<(usize, String, String)>,
 }
 
 /// The bands one frame painted, so the caller — and the tests below — can measure the stack.
@@ -289,6 +302,7 @@ fn paint(
     max_rows: usize,
     id: egui::Id,
     table: &mut TableState,
+    pending: &[(usize, usize)],
     actions: &mut Actions,
 ) -> Layout {
     // The design stacks its bands with no gap between them — each one's hairline is the next one's
@@ -306,6 +320,10 @@ fn paint(
     let run = &sql.results[register.active];
     let row_h = design::row_h(density);
     marks.row_h = row_h;
+    // An editable result paints the same two things a data grid does: the inline editor, and the
+    // dirty stripe on a cell that has a staged edit. Both come from the tab's own state, so the
+    // register cannot claim editability the engine would refuse.
+    let editable = sql.editable.is_some();
 
     marks.tabs = Some(tabs(ui, tokens, sql, register));
     marks.bar = Some(status_bar(
@@ -331,14 +349,24 @@ fn paint(
                 };
                 marks.json = Some(json_view(ui, tokens, &json_text(result), height, id));
                 if rows > 0 {
-                    marks.footer = Some(footer(ui, tokens, View::Json, result, table.selected));
+                    marks.footer = Some(footer(
+                        ui,
+                        tokens,
+                        View::Json,
+                        result,
+                        table.selected,
+                        false,
+                        None,
+                    ));
                 }
             }
             // The design keeps the columns of a zero-row result so the layout does not jump: the
             // head stays, and the block below it says what the engine reported.
             View::Grid if result.rows.is_empty() => {
                 if !result.columns.is_empty() {
-                    marks.grid = Some(grid(ui, tokens, result, row_h, table, id, 0.0));
+                    marks.grid = Some(grid(
+                        ui, tokens, result, row_h, table, id, 0.0, editable, pending, actions,
+                    ));
                 }
                 marks.empty = Some(empty_block(ui, tokens, run, result, actions));
             }
@@ -346,8 +374,18 @@ fn paint(
                 // The widget spends the head above the body it is handed, and the footer below it:
                 // both come out of what is left, or the footer lands past the pane's last row.
                 let height = (ui.available_height() - FOOTER_H - design::HEAD_H).max(row_h);
-                marks.grid = Some(grid(ui, tokens, result, row_h, table, id, height));
-                marks.footer = Some(footer(ui, tokens, View::Grid, result, table.selected));
+                marks.grid = Some(grid(
+                    ui, tokens, result, row_h, table, id, height, editable, pending, actions,
+                ));
+                marks.footer = Some(footer(
+                    ui,
+                    tokens,
+                    View::Grid,
+                    result,
+                    table.selected,
+                    editable,
+                    sql.editable.as_ref(),
+                ));
             }
         },
     }
@@ -727,6 +765,7 @@ fn error_band(
 
 /// The grid itself: P4's widget, read-only. A result set is not a table — nothing behind it can be
 /// written back — so neither the inline editor nor the header's sort is offered.
+#[allow(clippy::too_many_arguments)]
 fn grid(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -735,6 +774,9 @@ fn grid(
     table: &mut TableState,
     id: egui::Id,
     height: f32,
+    editable: bool,
+    pending: &[(usize, usize)],
+    actions: &mut Actions,
 ) -> Rect {
     let columns: Vec<TableColumn> = result
         .columns
@@ -752,12 +794,14 @@ fn grid(
         hidden: NO_HIDDEN,
         foreign_keys: &[],
         rows: &result.rows,
-        pending: Vec::new(),
+        pending: pending.to_vec(),
         inserted: Vec::new(),
         selected: table.selected,
         anchor: table.anchor,
         sort: None,
-        editable: false,
+        editable,
+        // Sorting and filtering go through the page query, which a statement's own rows do not
+        // have: the head offers neither, so the user is never offered a control that cannot work.
         sortable: false,
         gutter: true,
         height,
@@ -777,6 +821,25 @@ fn grid(
             }
             table.selected = Some((row, column));
         }
+        // The same two events the data grid handles, so an editable result behaves like a table:
+        // double-click opens the inline editor on the value the cell paints, and committing it
+        // stages the edit through `grid.editCell`.
+        TableEvent::BeginEdit(row, column) if editable => {
+            let value = result
+                .rows
+                .get(row)
+                .and_then(|r| r.get(column))
+                .cloned()
+                .unwrap_or(nook_core::Value::Null);
+            table.selected = Some((row, column));
+            table.begin_edit(row, column, value.as_text());
+        }
+        TableEvent::Commit(row, column, text) if editable => {
+            let name = result.columns.get(column).cloned().unwrap_or_default();
+            table.stop_edit();
+            actions.edit = Some((row, name, text));
+        }
+        TableEvent::Cancel => table.stop_edit(),
         _ => {}
     }
     let after = ui.cursor().top();
@@ -794,6 +857,8 @@ fn footer(
     view: View,
     result: &ResultSet,
     selected: Option<(usize, usize)>,
+    editable: bool,
+    source: Option<&nook_engine::EditableSource>,
 ) -> Rect {
     let rect = design::band_fill(
         ui,
@@ -830,7 +895,26 @@ fn footer(
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                design::note_pill(ui, tokens, READ_ONLY, Some(tokens.text_faint));
+                // The pill describes the result, so it changes when the result does: a statement
+                // made editable says which table its rows are and what keys them, instead of
+                // claiming a read-only result the engine would happily update.
+                match (editable, source) {
+                    (true, Some(source)) => {
+                        design::note_pill(
+                            ui,
+                            tokens,
+                            &format!("keyed by {}", source.key.join(", ")),
+                            Some(tokens.accent),
+                        )
+                        .on_hover_text(format!(
+                            "each row is one row of {} · double-click a cell to edit it",
+                            source.table.key()
+                        ));
+                    }
+                    _ => {
+                        design::note_pill(ui, tokens, READ_ONLY, Some(tokens.text_faint));
+                    }
+                }
             });
         },
     );
@@ -1338,6 +1422,32 @@ mod tests {
         table: &mut TableState,
         actions: &mut Actions,
     ) -> (Layout, Vec<(Rect, String)>) {
+        run_frame_pending(
+            ctx,
+            size,
+            events,
+            register,
+            sql,
+            density,
+            table,
+            &[],
+            actions,
+        )
+    }
+
+    /// The same frame with a dirty-cell list, so a test can prove the stripe reaches the widget.
+    #[allow(clippy::too_many_arguments)]
+    fn run_frame_pending(
+        ctx: &egui::Context,
+        size: Vec2,
+        events: Vec<egui::Event>,
+        register: &mut Register,
+        sql: &SqlState,
+        density: nook_engine::Density,
+        table: &mut TableState,
+        pending: &[(usize, usize)],
+        actions: &mut Actions,
+    ) -> (Layout, Vec<(Rect, String)>) {
         let tokens = Tokens::of("dark");
         tokens.apply(ctx);
         let input = egui::RawInput {
@@ -1360,6 +1470,7 @@ mod tests {
                         200,
                         egui::Id::new(("register", 0)),
                         table,
+                        pending,
                         actions,
                     );
                 });
@@ -2165,6 +2276,77 @@ mod tests {
             "the click still selects the cell"
         );
         assert_eq!(table.editing, None, "a result set is not editable");
+    }
+
+    /// An editable result behaves like a data tab: the double-click opens the inline editor on the
+    /// value the cell paints, and the footer names the key instead of claiming a read-only result.
+    #[test]
+    fn an_editable_result_opens_its_editor_and_names_its_key() {
+        let ctx = egui::Context::default();
+        let mut sql = state(vec![ok("select id, name from main.customers", 6, 12.0)]);
+        sql.editable = Some(nook_engine::EditableSource {
+            statement: 0,
+            table: nook_engine::TableRef {
+                schema: Some("main".into()),
+                table: "customers".into(),
+            },
+            key: vec!["id".into()],
+        });
+        let mut register = Register::from(&sql, None);
+        let mut table = TableState::default();
+        let mut actions = Actions::default();
+        let _ = run_frame(
+            &ctx,
+            pane(),
+            Vec::new(),
+            &mut register,
+            &sql,
+            nook_engine::Density::Compact,
+            &mut table,
+            &mut actions,
+        );
+        let cell = ctx
+            .read_response(egui::Id::new(("register", 0)).with(("cell", 0, 1)))
+            .expect("the grid's cell registered its rect")
+            .rect;
+        let mut events = vec![egui::Event::PointerMoved(cell.center())];
+        for _ in 0..2 {
+            events.push(egui::Event::PointerButton {
+                pos: cell.center(),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            });
+            events.push(egui::Event::PointerButton {
+                pos: cell.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        let (_, copy) = run_frame(
+            &ctx,
+            pane(),
+            events,
+            &mut register,
+            &sql,
+            nook_engine::Density::Compact,
+            &mut table,
+            &mut actions,
+        );
+        assert_eq!(
+            table.editing,
+            Some((0, 1)),
+            "an editable result opens the editor the engine would accept"
+        );
+        assert!(
+            shows(&copy, "keyed by id"),
+            "the footer names the key: {copy:?}"
+        );
+        assert!(
+            !shows(&copy, READ_ONLY),
+            "an editable result must not claim to be read-only"
+        );
     }
 
     /// The control channel's two faces of one list: the names a `view` may be, and the refusal that

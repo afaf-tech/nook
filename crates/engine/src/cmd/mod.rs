@@ -24,11 +24,39 @@ pub fn open_now(session: &mut Session, index: usize) -> Result<()> {
 }
 
 /// Safe mode's gate, at the moment of commit. Returns `Ok(())` when safe mode is off, and otherwise
-/// only when the caller presented the connection's token — which `editor.safeMode` hands out after a
-/// live `conn.test`, so a rotated password fails and an unattended script cannot read the answer off
-/// disk. The connection is the one the params name, or the active one, which is the one a grid apply
-/// is about to write to.
-pub(crate) fn require_safe_mode(session: &Session, p: &Params) -> Result<()> {
+/// only when the caller presented the token of the connection it is about to write to.
+///
+/// The connection is passed in rather than read from the params: `grid.apply` writes through its
+/// *tab's* connection, and a gate that resolved `active_conn` instead would let a caller hold one
+/// connection's token while the write landed in another database. Every other caller passes the
+/// connection it is about to act on.
+///
+/// The gate is keyed on the setting alone, not on "a token exists for this connection": with the
+/// latter, enabling safe mode while connected to A would leave B ungated and `apply` could not tell
+/// "off" from "on, no token".
+pub(crate) fn require_safe_mode(session: &Session, p: &Params, index: usize) -> Result<()> {
+    if !session.settings.safe_mode {
+        return Ok(());
+    }
+    let conn_id = session
+        .conns
+        .get(index)
+        .map(|c| c.cfg.id.clone())
+        .ok_or_else(|| Error::not_found(format!("no connection at index {index}")))?;
+    let presented = p.str_opt("safe_token").unwrap_or_default();
+    if crate::profiles::safe_token_matches(&conn_id, &presented) {
+        Ok(())
+    } else {
+        Err(Error::config(format!(
+            "safe mode: confirm {conn_id} first (editor.safeMode returns the token once the \
+             connection test passes)"
+        )))
+    }
+}
+
+/// The same gate for the commands that resolve their own connection from the params. Kept separate
+/// so a caller cannot forget which connection it is gating.
+pub(crate) fn require_safe_mode_for_params(session: &Session, p: &Params) -> Result<()> {
     if !session.settings.safe_mode {
         return Ok(());
     }
@@ -38,16 +66,7 @@ pub(crate) fn require_safe_mode(session: &Session, p: &Params) -> Result<()> {
             .active_conn
             .ok_or_else(|| Error::config("safe mode: no connection is active to confirm"))?,
     };
-    let conn_id = session.conns[index].cfg.id.clone();
-    let presented = p.str_opt("safe_token").unwrap_or_default();
-    if crate::profiles::safe_token_matches(&conn_id, &presented) {
-        Ok(())
-    } else {
-        Err(Error::config(
-            "safe mode: confirm the connection first (editor.safeMode returns the token once the \
-             connection test passes)",
-        ))
-    }
+    require_safe_mode(session, p, index)
 }
 
 /// The config a driver dials with: the profile's own, plus the password the keychain holds for it.
@@ -385,6 +404,14 @@ pub(crate) fn sync_grid_table(session: &mut Session, tab_index: usize) -> Result
     // describes the table. `stale_page` is then judged against the freshly bound columns: a page
     // whose columns no longer exist must reload, and its `load_grid` re-binds before it selects.
     bind_grid_table(session, tab_index, reference)?;
+    // A query-sourced grid's projection is the statement's own (`select id from users`), so it is
+    // legitimately narrower than the table and would look stale on every edit. Worse, the reload
+    // that follows re-runs the statement: an unordered one may return its rows in another order, so
+    // the row index resolved after the reload can name a different record than the cell the user
+    // edited. The statement's rows are the page; never judge them against the table's shape.
+    if session.tabs[tab_index].sql.editable.is_some() {
+        return Ok(());
+    }
     let stale_page = {
         let tab = session
             .tabs

@@ -101,7 +101,7 @@ pub(crate) fn require_confirm(session: &Session, p: &Params, what: &str) -> Resu
     }
     // Safe mode is the second check, and the one a caller cannot pass by setting a flag: it wants the
     // connection's token, which only a live connection test hands out.
-    super::require_safe_mode(session, p)
+    super::require_safe_mode_for_params(session, p)
 }
 
 /// Execute DDL and refresh the cached catalog so the tree matches the server again.

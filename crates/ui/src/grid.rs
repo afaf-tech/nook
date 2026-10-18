@@ -112,8 +112,12 @@ pub fn show(
     let editable = tab.grid.editable();
     let filter_count = tab.grid.filter_count();
     let counts = tab.grid.pending_counts();
-    // The rectangle the phase-3 selection covers, as the rows a bulk edit would touch.
-    let selected_rows: Vec<usize> = match (tab.grid.anchor, tab.grid.cursor) {
+    // The rectangle the widget paints, read from the same `TableState` the pointer drags write.
+    // Reading `tab.grid.anchor` here would describe a rectangle no click ever set.
+    let selected_rows: Vec<usize> = match (
+        state.table(tab_index).anchor,
+        state.table(tab_index).selected,
+    ) {
         (Some(a), Some(c)) => (a.0.min(c.0)..=a.0.max(c.0)).collect(),
         _ => Vec::new(),
     };
@@ -355,6 +359,9 @@ pub fn show(
                             let mut next = conditions.clone();
                             next.push(filter);
                             apply_conditions = Some(next);
+                            // The form did its job: leaving it open would let a second click add
+                            // the same condition again.
+                            state.filter_form = None;
                         }
                         FilterFormOutcome::Close => state.filter_form = None,
                     }
@@ -1170,7 +1177,11 @@ pub fn show(
                     // it for editing. The engine maps an edited statement back to its pending edit
                     // by WHERE and refuses anything it cannot map, so this field can never append
                     // SQL to the buffer — see `grid.rawMode`.
-                    for statement in &pending_statements {
+                    // The label is the drawer's `kind · sql` line; the field seeds from the SQL
+                    // itself, because that is what the engine maps back and what the user could
+                    // copy into the editor. Seeding from the label would hand them a prefix
+                    // `parse_set_value` silently discards.
+                    for (statement, sql) in pending_statements.iter().zip(pending_sql.iter()) {
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(statement)
@@ -1188,7 +1199,7 @@ pub fn show(
                                         )
                                         .clicked()
                                     {
-                                        state.raw_edit = Some((tab_index, statement.clone()));
+                                        state.raw_edit = Some((tab_index, sql.clone()));
                                     }
                                 },
                             );
@@ -1289,6 +1300,13 @@ pub fn show(
                     "conn".into(),
                     serde_json::json!(session.conns[conn_index].cfg.id),
                 );
+                // Safe mode's token rides on every commit once the prompt handed one back, so the
+                // user confirms once per session rather than once per click.
+                if id == "grid.apply" {
+                    if let Some(token) = state.safe_token.clone() {
+                        map.insert("safe_token".into(), serde_json::json!(token));
+                    }
+                }
             }
             match session.run(id, params) {
                 Ok(_) => {
@@ -1330,6 +1348,22 @@ pub fn show(
                         }
                     }
                 }
+                // Safe mode's refusal is the one error the user can answer: open the prompt and
+                // remember the commit, so confirming retries it instead of costing the click.
+                Err(e) if id == "grid.apply" && is_safe_mode_refusal(&e.to_string()) => {
+                    let conn = session.tabs[tab_index]
+                        .conn
+                        .and_then(|i| session.conns.get(i))
+                        .map(|c| c.cfg.id.clone());
+                    if let Some(conn) = conn {
+                        state.safe_prompt = Some(crate::app::SafePrompt {
+                            conn,
+                            ..Default::default()
+                        });
+                        state.apply_after_confirm = Some(tab_index);
+                    }
+                    session.log(Level::Warn, e.to_string());
+                }
                 Err(e) => session.log(Level::Error, format!("{id}: {e}")),
             }
         }
@@ -1339,6 +1373,12 @@ pub fn show(
             session.log(Level::Error, e.to_string());
         }
     }
+}
+
+/// True when the engine refused a commit because safe mode wants a token. The message is the
+/// engine's own; matching on it is how the UI tells "answer me" apart from "this failed".
+fn is_safe_mode_refusal(message: &str) -> bool {
+    message.contains("safe mode: confirm")
 }
 
 /// The record the form is showing, read once per frame: the table's `available` height needs the

@@ -41,7 +41,7 @@ fn kill(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             "refusing to kill a session without \"confirm\": true",
         ));
     }
-    super::require_safe_mode(session, p)?;
+    super::require_safe_mode_for_params(session, p)?;
     let index = session.resolve_conn(p)?;
     let id = p.str_arg("id")?;
     {
