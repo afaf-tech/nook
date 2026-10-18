@@ -18,16 +18,33 @@ const MAX_COL_W: f32 = 280.0;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TableColumn {
     pub name: String,
+    /// What the head paints: the name without a `__format__` marker.
+    pub label: String,
     pub type_name: String,
     pub primary_key: bool,
+    /// The display hint the column name carried, if any: `money`, `check` or `link`.
+    pub hint: Option<String>,
 }
 
 impl TableColumn {
     pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
+        let name = name.into();
+        // The marker is a display instruction, not part of the header: `price__format__money`
+        // heads as `price`. An unknown marker stays, so a typo is visible rather than swallowed.
+        let (label, hint) = match name.rsplit_once("__format__") {
+            Some((label, kind))
+                if !label.is_empty() && matches!(kind, "money" | "check" | "link") =>
+            {
+                (label.to_owned(), Some(kind.to_owned()))
+            }
+            _ => (name.clone(), None),
+        };
         TableColumn {
-            name: name.into(),
+            name,
+            label,
             type_name: type_name.into(),
             primary_key: false,
+            hint,
         }
     }
 
@@ -219,7 +236,7 @@ fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
                 return 0.0;
             }
             let mut width =
-                text_width(ui, &column.name, header_font.clone()) + CELL_PAD * 2.0 + 18.0;
+                text_width(ui, &column.label, header_font.clone()) + CELL_PAD * 2.0 + 18.0;
             if column.primary_key {
                 // The `.pkbadge` itself plus the design's `gap: var(--s2)` before it.
                 width += badge + f32::from(design::S2);
@@ -486,15 +503,50 @@ pub fn show(
                                     );
                                 }
                             } else {
-                                let display = value.display();
+                                // A display hint changes only what is painted, never the value:
+                                // money gets two decimals, a check becomes a tick or a cross, and
+                                // a link keeps its URL as the cell's text.
+                                let display = match column.hint.as_deref() {
+                                    Some("money") => match &value {
+                                        Value::Null => value.display(),
+                                        Value::Float(f) => format!("{f:.2}"),
+                                        Value::Int(i) => format!("{:.2}", *i as f64),
+                                        other => other.display(),
+                                    },
+                                    // U+2714 and U+00D7: the only tick/cross pair the bundled
+                                    // fonts actually carry (U+2713 and U+2717 paint as tofu).
+                                    Some("check") => match &value {
+                                        Value::Null => "—".to_owned(),
+                                        Value::Bool(true) => "✔".to_owned(),
+                                        Value::Bool(false) => "×".to_owned(),
+                                        // A check column is often an int 0/1 (SQLite has no bool).
+                                        Value::Int(i) => if *i != 0 { "✔" } else { "×" }.to_owned(),
+                                        Value::Text(text) => {
+                                            let t = text.trim().to_ascii_lowercase();
+                                            if matches!(
+                                                t.as_str(),
+                                                "1" | "t" | "true" | "y" | "yes"
+                                            ) {
+                                                "✔".to_owned()
+                                            } else {
+                                                "×".to_owned()
+                                            }
+                                        }
+                                        _ => "×".to_owned(),
+                                    },
+                                    _ => value.display(),
+                                };
                                 // A foreign key that holds a value is a link: it points at a row
                                 // the user can go to. A NULL key points nowhere and stays plain.
+                                // A `__format__link` column is a link too, but to a URL.
+                                let is_url = column.hint.as_deref() == Some("link")
+                                    && !matches!(value, Value::Null);
                                 let is_link = !matches!(value, Value::Null)
                                     && view.foreign_keys.iter().any(|fk| fk == &column.name);
                                 let colour = match &value {
                                     Value::Null => tokens.text_faint,
                                     Value::Bytes(_) => tokens.info,
-                                    _ if is_link => tokens.accent,
+                                    _ if is_link || is_url => tokens.accent,
                                     _ if dirty => tokens.dirty_text,
                                     _ => tokens.text,
                                 };
@@ -502,6 +554,7 @@ pub fn show(
                                 let max = cell.width() - CELL_PAD * 2.0;
                                 let text = ellipsize(ui, &display, font.clone(), max);
                                 let (anchor, position) = if column.numeric()
+                                    || matches!(column.hint.as_deref(), Some("money" | "check"))
                                     || numeric_column(view.rows, column_index)
                                 {
                                     (
@@ -515,7 +568,7 @@ pub fn show(
                                     )
                                 };
                                 let painter = ui.painter().with_clip_rect(cell);
-                                if is_link {
+                                if is_link || is_url {
                                     let underline_y = position.y + font.size * 0.62;
                                     let width = painter
                                         .layout_no_wrap(text.clone(), font.clone(), colour)
@@ -548,6 +601,12 @@ pub fn show(
                                     && view.anchor.is_some()
                                 {
                                     event = TableEvent::SelectExtend(row_index, column_index);
+                                } else if response.clicked() && is_url {
+                                    // A URL hint opens in the OS browser: the cell's value is the
+                                    // URL, so there is nothing to resolve first.
+                                    if let Value::Text(url) | Value::Json(url) = &value {
+                                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                    }
                                 } else if response.clicked()
                                     && is_link
                                     && ui.input(|i| i.modifiers.command)
@@ -710,9 +769,9 @@ fn head(
             .filter(|(name, _)| name == &column.name)
             .map(|(_, desc)| *desc);
         let label = match sorted {
-            Some(true) => format!("{} ▼", column.name),
-            Some(false) => format!("{} ▲", column.name),
-            None => column.name.clone(),
+            Some(true) => format!("{} ▼", column.label),
+            Some(false) => format!("{} ▲", column.label),
+            None => column.label.clone(),
         };
         ui.painter().text(
             egui::pos2(cell.left() + CELL_PAD, cell.center().y),
@@ -1123,6 +1182,28 @@ mod tests {
             first.right(),
             third.left()
         );
+    }
+
+    #[test]
+    fn a_format_marker_becomes_a_hint_and_leaves_the_header_reading_the_real_name() {
+        let money = TableColumn::new("price__format__money", "REAL");
+        assert_eq!(money.label, "price");
+        assert_eq!(money.hint.as_deref(), Some("money"));
+        // The column still names the real column: sorting and edits address the database's name.
+        assert_eq!(money.name, "price__format__money");
+
+        let check = TableColumn::new("active__format__check", "INTEGER");
+        assert_eq!(check.hint.as_deref(), Some("check"));
+
+        // An unknown marker is not a hint: the header keeps the whole name, so a typo is visible.
+        let odd = TableColumn::new("x__format__stars", "TEXT");
+        assert_eq!(odd.label, "x__format__stars");
+        assert_eq!(odd.hint, None);
+
+        // A plain column carries no hint and heads as itself.
+        let plain = TableColumn::new("city", "TEXT");
+        assert_eq!(plain.label, "city");
+        assert_eq!(plain.hint, None);
     }
 
     #[test]

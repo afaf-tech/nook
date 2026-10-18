@@ -575,3 +575,44 @@ fn blob_editor_rejects_junk_hex_and_oversized_blobs() {
         "the refusal names both sizes, got {err}"
     );
 }
+
+#[test]
+fn display_hints_read_the_format_marker_in_the_column_name() {
+    let mut f = Fixture::new("hints");
+    f.sql("CREATE TABLE shop (id INTEGER PRIMARY KEY, price__format__money REAL, active__format__check INTEGER, site__format__link TEXT, plain TEXT)");
+    f.sql("INSERT INTO shop (id, price__format__money, active__format__check, site__format__link, plain) VALUES (1, 12.5, 1, 'https://example.com', 'x'), (2, 7.0, 0, NULL, 'y')");
+    f.open_grid("shop");
+
+    let out = f
+        .session
+        .run("grid.hints", json!({}))
+        .expect("hints read from the page's columns");
+    let hints = out["hints"].as_array().expect("a hint list");
+    assert_eq!(
+        hints.len(),
+        3,
+        "only the marked columns carry a hint: {out:?}"
+    );
+    let find = |name: &str| {
+        hints
+            .iter()
+            .find(|h| h["column"] == json!(name))
+            .cloned()
+            .unwrap_or_else(|| panic!("no hint for {name}: {out:?}"))
+    };
+    assert_eq!(find("price__format__money")["kind"], json!("money"));
+    assert_eq!(find("active__format__check")["kind"], json!("check"));
+    assert_eq!(find("site__format__link")["kind"], json!("link"));
+    // The marker is stripped for display: the header shows the real name.
+    assert_eq!(find("price__format__money")["label"], json!("price"));
+    // A hint is a view concern: the query still returns every column.
+    let page = f
+        .session
+        .run("grid.fetchPage", json!({}))
+        .expect("the page reads");
+    assert_eq!(
+        page["columns"].as_array().map(Vec::len),
+        Some(5),
+        "hints must not change the query: {page:?}"
+    );
+}

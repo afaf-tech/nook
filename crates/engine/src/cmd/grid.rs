@@ -75,6 +75,8 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.hideColumns", "Hide columns of this table", "Data", hide_columns)
             .params(r#"{"hidden":["password_hash"]}"#)
             .help("Hiding is a view concern: the query and `grid.fetchPage` still return every column. The list persists per connection and table, and an empty list clears it."),
+        CommandSpec::new("grid.hints", "Display hints from column names", "Data", hints)
+            .help("Reads the `__format__` marker in a column name: money, check or link. The header shows the name without the marker, and the query is untouched — a hint is a view concern."),
         CommandSpec::new("grid.blobEditor", "Edit a BLOB from hex", "Data", blob_editor)
             .params(r#"{"row":0,"column":"body","hex":"deadbeef"}"#)
             .help("Decodes hex (whitespace ignored) into the same pending edit the inline editor stages; nothing is written until grid.apply. Junk hex and a blob over max_blob_bytes are named errors."),
@@ -1143,6 +1145,30 @@ fn hide_columns(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
         return Ok(json!({ "hidden": wanted }));
     }
     Ok(json!({ "hidden": current }))
+}
+
+/// Display hints read from the column names: `name__format__money` renders as money, and the
+/// header shows `name`. A hint is a view concern — the query still returns every column — so this
+/// reads the page the grid already holds and never touches the SQL.
+fn hints(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let tab = &session.tabs[index];
+    let hints: Vec<serde_json::Value> = tab
+        .grid
+        .result
+        .columns
+        .iter()
+        .filter_map(|name| {
+            let (label, kind) = name.rsplit_once("__format__")?;
+            // Only the three kinds the grid paints are hints; an unknown marker stays part of the
+            // name rather than silently vanishing from the header.
+            if !matches!(kind, "money" | "check" | "link") || label.is_empty() {
+                return None;
+            }
+            Some(json!({ "column": name, "label": label, "kind": kind }))
+        })
+        .collect();
+    Ok(json!({ "hints": hints }))
 }
 
 /// Stage a BLOB edit from hex text.
