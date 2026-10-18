@@ -14,7 +14,7 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("Report the current preferences."),
         CommandSpec::new("app.setSetting", "Change a preference", "App", set_setting)
             .params(r#"{"key":"theme","value":"light"}"#)
-            .help("Set one preference: theme, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects, max_blob_bytes, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout."),
+            .help("Set one preference: theme, page_size, max_rows, font_size, confirm_destructive, safe_mode, auto_commit_edits, keyword_case, show_system_objects, max_blob_bytes, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout."),
         CommandSpec::new("app.log", "Message log", "App", get_log)
             .params(r#"{"limit":50}"#)
             .help("Recent messages, oldest first."),
@@ -83,6 +83,7 @@ fn get_settings(session: &mut Session, _p: &crate::Params) -> Result<serde_json:
         "max_rows": s.max_rows,
         "font_size": s.font_size,
         "confirm_destructive": s.confirm_destructive,
+        "safe_mode": s.safe_mode,
         "auto_commit_edits": s.auto_commit_edits,
         "keyword_case": match s.keyword_case { KeywordCase::Upper => "upper", KeywordCase::Lower => "lower", KeywordCase::Preserve => "preserve" },
         "show_system_objects": s.show_system_objects,
@@ -132,6 +133,7 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
             session.settings.font_size = size.clamp(9.0, 28.0);
         }
         "confirm_destructive" => session.settings.confirm_destructive = truthy(&value),
+        "safe_mode" => session.settings.safe_mode = truthy(&value),
         "auto_commit_edits" => session.settings.auto_commit_edits = truthy(&value),
         "show_system_objects" => session.settings.show_system_objects = truthy(&value),
         "max_blob_bytes" => {
@@ -190,7 +192,7 @@ fn set_setting(session: &mut Session, p: &crate::Params) -> Result<serde_json::V
         }
         other => {
             return Err(Error::config(format!(
-                "unknown preference '{other}'; try theme, density, page_size, max_rows, font_size, confirm_destructive, auto_commit_edits, keyword_case, show_system_objects, max_blob_bytes, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout"
+                "unknown preference '{other}'; try theme, density, page_size, max_rows, font_size, confirm_destructive, safe_mode, auto_commit_edits, keyword_case, show_system_objects, max_blob_bytes, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout"
             )))
         }
     }

@@ -12,6 +12,7 @@
 pub mod catalog;
 pub mod cmd;
 pub mod datagen;
+pub mod filter;
 pub mod jobs;
 pub mod parity;
 pub mod profiles;
@@ -393,6 +394,9 @@ pub struct GridState {
     pub page_size: usize,
     pub order: String,
     pub filter: String,
+    /// The structured filters `filter` was compiled from. Empty when the clause was typed by hand
+    /// (`grid.filter`) — the chips describe what the builder made, not what the escape hatch said.
+    pub filters: Vec<crate::filter::Filter>,
     pub pending: Vec<PendingEdit>,
     pub cursor: Option<(usize, usize)>,
     /// The drag origin of the selection rectangle. `cursor` is the live corner; a plain click
@@ -417,6 +421,7 @@ impl GridState {
         self.page = 0;
         self.order.clear();
         self.filter.clear();
+        self.filters.clear();
         self.pending.clear();
         self.cursor = None;
         self.anchor = None;
@@ -484,6 +489,20 @@ pub struct SqlState {
     /// One entry per statement of the last run, in run order. The next run replaces them.
     pub results: Vec<StatementRun>,
     pub history_cursor: Option<usize>,
+    /// The table a result became editable against (`grid.editQueryResult`), when one was resolved:
+    /// the statement index it belongs to and the key the writes are keyed by. `None` is the normal
+    /// state — a result is read-only until someone asks for otherwise.
+    pub editable: Option<EditableSource>,
+}
+
+/// A query result that `grid.editQueryResult` made writable, and why it is safe to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditableSource {
+    /// The statement of the last run these rows came from.
+    pub statement: usize,
+    pub table: TableRef,
+    /// The key columns the row updates are keyed by, in the table's own order.
+    pub key: Vec<String>,
 }
 
 impl SqlState {
@@ -593,6 +612,11 @@ pub struct Settings {
     pub max_rows: usize,
     pub font_size: f32,
     pub confirm_destructive: bool,
+    /// Safe mode: `grid.apply` and every destructive command additionally require the connection's
+    /// token, which only a real connection test hands out. It stops a stray script and a slip of the
+    /// mouse; it does not stop a local attacker who can read the keychain, because they already have
+    /// the credentials.
+    pub safe_mode: bool,
     pub auto_commit_edits: bool,
     pub keyword_case: sqltext::KeywordCase,
     pub keep_history: usize,
@@ -614,6 +638,7 @@ impl Default for Settings {
             max_rows: nook_drivers::MAX_ROWS,
             font_size: 13.0,
             confirm_destructive: true,
+            safe_mode: false,
             auto_commit_edits: false,
             keyword_case: sqltext::KeywordCase::Upper,
             keep_history: 500,

@@ -16,11 +16,38 @@ pub mod tools;
 use nook_core::{Error, Result};
 use nook_model::ResultSet;
 
-use crate::{Conn, ConnState, Level, Session, SshSecret, Tab, TableRef, Tunnel};
+use crate::{Conn, ConnState, Level, Params, Session, SshSecret, Tab, TableRef, Tunnel};
 
 /// Public entry point for the CLI and MCP: open a connection by index.
 pub fn open_now(session: &mut Session, index: usize) -> Result<()> {
     open_conn(session, index)
+}
+
+/// Safe mode's gate, at the moment of commit. Returns `Ok(())` when safe mode is off, and otherwise
+/// only when the caller presented the connection's token — which `editor.safeMode` hands out after a
+/// live `conn.test`, so a rotated password fails and an unattended script cannot read the answer off
+/// disk. The connection is the one the params name, or the active one, which is the one a grid apply
+/// is about to write to.
+pub(crate) fn require_safe_mode(session: &Session, p: &Params) -> Result<()> {
+    if !session.settings.safe_mode {
+        return Ok(());
+    }
+    let index = match p.conn_id() {
+        Some(id) => session.conn_index(&id)?,
+        None => session
+            .active_conn
+            .ok_or_else(|| Error::config("safe mode: no connection is active to confirm"))?,
+    };
+    let conn_id = session.conns[index].cfg.id.clone();
+    let presented = p.str_opt("safe_token").unwrap_or_default();
+    if crate::profiles::safe_token_matches(&conn_id, &presented) {
+        Ok(())
+    } else {
+        Err(Error::config(
+            "safe mode: confirm the connection first (editor.safeMode returns the token once the \
+             connection test passes)",
+        ))
+    }
 }
 
 /// The config a driver dials with: the profile's own, plus the password the keychain holds for it.
@@ -274,6 +301,35 @@ pub fn load_grid(session: &mut Session, tab_index: usize) -> Result<()> {
     // re-bind a grid that became editable would stay read-only until the tab was reopened.
     if let Some(reference) = session.tabs[tab_index].grid.table.clone() {
         bind_grid_table(session, tab_index, reference)?;
+    }
+    // A query result that was made editable reloads by running its own statement again: the rows on
+    // screen are that statement's, and replacing them with a `SELECT *` of the table would be a
+    // different question answered in the same pane.
+    if let Some(editable) = session.tabs[tab_index].sql.editable.clone() {
+        let statement = session
+            .tabs
+            .get(tab_index)
+            .and_then(|tab| tab.sql.statements.get(editable.statement))
+            .cloned();
+        if let Some(statement) = statement {
+            let result = run_sql(session, conn_index, &statement, None);
+            let tab = session
+                .tabs
+                .get_mut(tab_index)
+                .ok_or_else(|| Error::not_found("tab is gone"))?;
+            match result {
+                Ok(rs) => {
+                    tab.grid.result = rs;
+                    tab.grid.error = None;
+                    tab.grid.elapsed_ms = tab.grid.result.elapsed_ms;
+                }
+                Err(e) => {
+                    tab.grid.error = Some(e.to_string());
+                    tab.grid.result = ResultSet::default();
+                }
+            }
+            return Ok(());
+        }
     }
     let (sql, table) = grid_select(
         session

@@ -3,7 +3,7 @@
 use egui::RichText;
 use nook_engine::{Level, Session};
 
-use crate::app::{BlobEditor, QuickLook, RowJson, UiState};
+use crate::app::{BlobEditor, FilterForm, QuickLook, RowJson, UiState};
 use crate::table::{TableColumn, TableEvent, TableView};
 use crate::theme::{self as design, Tokens};
 
@@ -112,6 +112,12 @@ pub fn show(
     let editable = tab.grid.editable();
     let filter_count = tab.grid.filter_count();
     let counts = tab.grid.pending_counts();
+    // The rectangle the phase-3 selection covers, as the rows a bulk edit would touch.
+    let selected_rows: Vec<usize> = match (tab.grid.anchor, tab.grid.cursor) {
+        (Some(a), Some(c)) => (a.0.min(c.0)..=a.0.max(c.0)).collect(),
+        _ => Vec::new(),
+    };
+    let bulk_rows = selected_rows.len();
 
     let mut reload = false;
     // The toolbar only records the click: the capture runs one `SELECT` per expanded key, and the
@@ -244,6 +250,17 @@ pub fn show(
                     command = Some(("grid.deleteRow", serde_json::json!({"row": row})));
                 }
             }
+            // Bulk edit over the phase-3 rectangle: the rows the drag covered, one column at a
+            // time. The engine stages one pending edit per row through the same path the inline
+            // editor uses, so Apply is still one transaction.
+            if design::ghost_button(ui, tokens, "Set column", editable && bulk_rows > 1)
+                .on_hover_text(format!(
+                    "Set one column across the {bulk_rows} selected rows"
+                ))
+                .clicked()
+            {
+                state.bulk_edit = Some((tab_index, String::new(), String::new()));
+            }
 
             // Form view: one record as a vertical form. A flag on the UI state, not the engine's:
             // the engine command is stateless and reads whatever row it is handed.
@@ -296,15 +313,20 @@ pub fn show(
         });
     });
 
-    // `.fchips`: one chip per active filter, the add chip, the match count and `Clear all`.
+    // `.fchips`: one chip per applied condition, the add chip, the match count and `Clear all`.
+    //
+    // The chips are the engine's `GridState::filters`, not a copy: a condition removed here is
+    // removed by re-running `grid.filters` with the rest, so the SQL the grid runs and the chips it
+    // shows can never describe different filters. A clause typed by hand through `grid.filter` has
+    // no conditions, so it shows as one chip of its own text — the escape hatch still works.
     //
     // ponytail: egui has no dashed stroke, so the add chip draws a solid hairline at the design's
     // weight instead of its dashes; upgrade path: stroke the dashes by hand along the chip's top
     // and bottom edges.
-    let field_id = egui::Id::new(("grid-filter-field", tab_index));
-    let mut field_open = ui
-        .data_mut(|d| d.get_temp::<bool>(field_id))
-        .unwrap_or(false);
+    let conditions = tab.grid.filters.clone();
+    let mut removed: Option<usize> = None;
+    let mut apply_conditions: Option<Vec<nook_engine::filter::Filter>> = None;
+    let mut preview_wanted: Option<Vec<serde_json::Value>> = None;
     let fchips = design::band_fill(
         ui,
         design::filter_row_h(design::FCHIP_H),
@@ -312,24 +334,30 @@ pub fn show(
         design::S4,
         egui::Align::Center,
         |ui| {
-            if filter_count > 0 {
-                design::chip(ui, tokens, &filter, tokens.text);
-            }
-            if field_open || !state.filter_edit.is_empty() {
-                let mut filter_edit = state.filter_edit.clone();
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut filter_edit)
-                        .desired_width(320.0)
-                        .hint_text("WHERE clause, e.g. city = 'London'"),
-                );
-                if response.changed() {
-                    state.filter_edit = filter_edit.clone();
+            for (position, condition) in conditions.iter().enumerate() {
+                let label = condition_label(condition);
+                if design::chip(ui, tokens, &label, tokens.text)
+                    .on_hover_text("Click to remove this condition")
+                    .interact(egui::Sense::click())
+                    .clicked()
+                {
+                    removed = Some(position);
                 }
-                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    command = Some(("grid.filter", serde_json::json!({"where": filter_edit})));
-                    field_open = false;
-                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    field_open = false;
+            }
+            if conditions.is_empty() && filter_count > 0 {
+                design::chip(ui, tokens, &filter, tokens.text)
+                    .on_hover_text("A WHERE clause typed by hand; Clear all removes it");
+            }
+            if state.filter_form.is_some() {
+                if let Some(form) = filter_form_ui(ui, tokens, &columns, state) {
+                    match form {
+                        FilterFormOutcome::Apply(filter) => {
+                            let mut next = conditions.clone();
+                            next.push(filter);
+                            apply_conditions = Some(next);
+                        }
+                        FilterFormOutcome::Close => state.filter_form = None,
+                    }
                 }
             } else {
                 let add = egui::Frame::new()
@@ -350,7 +378,7 @@ pub fn show(
                         )
                     });
                 if add.response.interact(egui::Sense::click()).clicked() {
-                    field_open = true;
+                    state.filter_form = Some(FilterForm::default());
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -358,7 +386,26 @@ pub fn show(
                     && design::accent_button(ui, tokens, "Clear all", true).clicked()
                 {
                     state.filter_edit.clear();
+                    state.filter_form = None;
                     command = Some(("grid.clearFilter", serde_json::json!({})));
+                }
+                if filter_count > 0
+                    && design::ghost_button(ui, tokens, "View SQL", true)
+                        .on_hover_text(
+                            "Show the WHERE these conditions compile to and how many rows it \
+                             selects",
+                        )
+                        .clicked()
+                {
+                    state.filter_sql_open = !state.filter_sql_open;
+                    if state.filter_sql_open {
+                        // The band is painted from the engine's answer, which needs a round trip;
+                        // the closure only asks for it, because the session is borrowed here.
+                        preview_wanted =
+                            Some(conditions.iter().map(condition_json).collect::<Vec<_>>());
+                    } else {
+                        state.filter_preview = None;
+                    }
                 }
                 ui.label(
                     RichText::new(matches_note(total, rows.len()))
@@ -369,8 +416,116 @@ pub fn show(
             });
         },
     );
-    ui.data_mut(|d| d.insert_temp(field_id, field_open));
+    if let Some(position) = removed {
+        let next: Vec<nook_engine::filter::Filter> = conditions
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != position)
+            .map(|(_, c)| c.clone())
+            .collect();
+        apply_conditions = Some(next);
+    }
+    if let Some(next) = apply_conditions {
+        command = Some((
+            "grid.filters",
+            serde_json::json!({ "filters": next.iter().map(condition_json).collect::<Vec<_>>() }),
+        ));
+    }
     design::band_hairline(ui, tokens, fchips);
+
+    // The compiled WHERE, on demand: the preview the plan calls the honest way to teach what the
+    // grid is doing. It costs one COUNT(*), so it is shown only while the toggle is on.
+    if filter_count > 0 && state.filter_sql_open {
+        let note = match &state.filter_preview {
+            Some((tab, text)) if *tab == tab_index => text.clone(),
+            // The toggle is on but the answer has not landed (or belongs to another tab): show the
+            // clause the grid is actually running rather than nothing.
+            _ => {
+                if filter.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("WHERE {}", filter.trim())
+                }
+            }
+        };
+        let rect = design::band_fill(
+            ui,
+            design::filter_row_h(design::FCHIP_H),
+            tokens.panel,
+            design::S4,
+            egui::Align::Center,
+            |ui| {
+                ui.label(
+                    RichText::new(note)
+                        .size(design::T_XS)
+                        .monospace()
+                        .color(tokens.text_dim),
+                );
+            },
+        );
+        design::band_hairline(ui, tokens, rect);
+    }
+
+    // The bulk-edit form: one column, one value, over the rows the drag selected. It sits above the
+    // page so the selection it acts on is the one still painted below it.
+    if let Some((tab, column, value)) = state.bulk_edit.clone() {
+        if tab == tab_index {
+            let band = design::band_fill(
+                ui,
+                design::TOOLBAR_H,
+                tokens.panel_alt,
+                design::S4,
+                egui::Align::Center,
+                |ui| {
+                    ui.label(
+                        RichText::new(format!("Set {bulk_rows} rows ·"))
+                            .size(design::T_XS)
+                            .color(tokens.text_dim),
+                    );
+                    let mut column = column;
+                    egui::ComboBox::from_id_salt(("bulk-column", tab_index))
+                        .selected_text(if column.is_empty() {
+                            "column".to_owned()
+                        } else {
+                            column.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            for name in &columns {
+                                if ui.selectable_label(column == *name, name).clicked() {
+                                    column = name.clone();
+                                }
+                            }
+                        });
+                    let mut value = value;
+                    ui.add(
+                        egui::TextEdit::singleline(&mut value)
+                            .hint_text("value")
+                            .desired_width(160.0),
+                    );
+                    if let Some(slot) = state.bulk_edit.as_mut() {
+                        *slot = (tab_index, column.clone(), value.clone());
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let ready = !column.is_empty() && bulk_rows > 1;
+                        if design::primary_button(ui, tokens, "Stage", ready).clicked() {
+                            command = Some((
+                                "grid.bulkEdit",
+                                serde_json::json!({
+                                    "column": column,
+                                    "value": value,
+                                    "rows": selected_rows,
+                                }),
+                            ));
+                        }
+                        if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                            state.bulk_edit = None;
+                        }
+                    });
+                },
+            );
+            design::band_top_hairline(ui, tokens, band);
+        }
+    }
 
     // `.errband` over the page that failed, then the `.stalestrip` that says what was asked for.
     if let Some(e) = &error {
@@ -515,6 +670,29 @@ pub fn show(
     // open one, and a stale `editing` would bring the editor back if the next load succeeds.
     if !editable {
         state.table(tab_index).stop_edit();
+    }
+    // One round trip on the toggle, never per frame: the count is what the preview is for, and a
+    // count every frame is a query every frame.
+    if let Some(filters) = preview_wanted {
+        match session.run(
+            "grid.filterPreview",
+            serde_json::json!({ "filters": filters }),
+        ) {
+            Ok(out) => {
+                let where_clause = out["where"].as_str().unwrap_or_default().to_string();
+                let rows = out["rows"].as_u64().unwrap_or(0);
+                let text = if where_clause.is_empty() {
+                    format!("no filter · {rows} rows")
+                } else {
+                    format!("WHERE {where_clause} · {rows} rows")
+                };
+                state.filter_preview = Some((tab_index, text));
+            }
+            Err(e) => state.filter_preview = Some((tab_index, format!("{e}"))),
+        }
+        // The band above was painted before this answer existed, so the frame that asked is not the
+        // frame that shows it.
+        ui.ctx().request_repaint();
     }
     // The catalog knows which columns point elsewhere; the grid paints those as links.
     let foreign_keys: Vec<String> = session
@@ -988,13 +1166,33 @@ pub fn show(
                 .id_salt(format!("pending-scroll-{tab_index}"))
                 .max_height(120.0)
                 .show(ui, |ui| {
+                    // Raw mode: each statement is the one the apply will run, and the pencil opens
+                    // it for editing. The engine maps an edited statement back to its pending edit
+                    // by WHERE and refuses anything it cannot map, so this field can never append
+                    // SQL to the buffer — see `grid.rawMode`.
                     for statement in &pending_statements {
-                        ui.label(
-                            RichText::new(statement)
-                                .size(design::T_SM)
-                                .monospace()
-                                .color(tokens.text_dim),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(statement)
+                                    .size(design::T_SM)
+                                    .monospace()
+                                    .color(tokens.text_dim),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if design::ghost_button(ui, tokens, "Edit", true)
+                                        .on_hover_text(
+                                            "Change this statement's value; it is mapped back to \
+                                             the pending edit",
+                                        )
+                                        .clicked()
+                                    {
+                                        state.raw_edit = Some((tab_index, statement.clone()));
+                                    }
+                                },
+                            );
+                        });
                     }
                 });
             // `.dfoot`: one transaction for the whole buffer, so the note says what Apply does and
@@ -1045,6 +1243,44 @@ pub fn show(
         });
     }
 
+    // The raw-mode field, when one statement is open for review. It sits under the drawer and above
+    // the footer, and it is a review surface: the field takes the planner's statement shape and the
+    // engine decides whether it maps back to an edit.
+    if let Some((tab, sql)) = state.raw_edit.clone() {
+        if tab == tab_index {
+            let band = design::band_fill(
+                ui,
+                design::TOOLBAR_H,
+                tokens.panel_alt,
+                design::S4,
+                egui::Align::Center,
+                |ui| {
+                    // The field's text lives in `state.raw_edit`, so a keystroke survives the frame:
+                    // take it out, hand it to the widget, put the edited text back.
+                    let mut text = sql.clone();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .font(tokens.mono(design::T_SM))
+                            .desired_width(ui.available_width() - 150.0),
+                    );
+                    if let Some((_, slot)) = state.raw_edit.as_mut() {
+                        *slot = text.clone();
+                    }
+                    let edited = text;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if design::primary_button(ui, tokens, "Set", true).clicked() {
+                            command = Some(("grid.rawMode", serde_json::json!({ "sql": edited })));
+                        }
+                        if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                            state.raw_edit = None;
+                        }
+                    });
+                },
+            );
+            design::band_top_hairline(ui, tokens, band);
+        }
+    }
+
     if let Some((id, params)) = command {
         if let Some(conn_index) = session.tabs[tab_index].conn {
             let mut params = params;
@@ -1056,6 +1292,14 @@ pub fn show(
             }
             match session.run(id, params) {
                 Ok(_) => {
+                    // The reviewed statement landed: the field has done its job, and the drawer
+                    // below now shows the re-planned SQL.
+                    if id == "grid.rawMode" {
+                        state.raw_edit = None;
+                    }
+                    if id == "grid.bulkEdit" {
+                        state.bulk_edit = None;
+                    }
                     // The page under the band can change: a sort, filter, page turn or reload moves
                     // every row, and a look left pointing at row N would then show a different
                     // record's value. The look is dropped rather than re-resolved — it named a
@@ -1526,6 +1770,143 @@ fn read_only_note(
 /// and `grid.filter`, `grid.clearFilter` and `grid.sort` clear it again because they change which rows
 /// the grid is asking for — so there is no count to print until the server has counted, and the honest
 /// fact is the page in hand rather than a match total that is really just this page's length.
+/// What a filter chip says: the condition as a person reads it, not as SQL. The value is shown
+/// verbatim so a chip never hides what will be sent.
+fn condition_label(condition: &nook_engine::filter::Filter) -> String {
+    let value = match &condition.value {
+        None => String::new(),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .map(scalar_label)
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(other) => scalar_label(other),
+    };
+    match condition.op.as_str() {
+        "is null" | "is not null" => format!("{} {}", condition.column, condition.op),
+        _ => format!("{} {} {}", condition.column, condition.op, value),
+    }
+}
+
+fn scalar_label(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The condition back as the JSON `grid.filters` takes, so removing a chip re-sends the rest
+/// through the same compiler that built them.
+fn condition_json(condition: &nook_engine::filter::Filter) -> serde_json::Value {
+    let mut out = serde_json::json!({
+        "column": condition.column,
+        "op": condition.op,
+    });
+    if let Some(value) = &condition.value {
+        out["value"] = value.clone();
+    }
+    out
+}
+
+enum FilterFormOutcome {
+    /// The user pressed Add: this condition joins the list.
+    Apply(nook_engine::filter::Filter),
+    /// The user pressed Cancel or Escape.
+    Close,
+}
+
+/// The condition builder: a column picker over the grid's own columns, the closed operator list and
+/// one value field. A value typed here is data — the engine quotes it — so the field never parses
+/// SQL and never needs to.
+fn filter_form_ui(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    columns: &[String],
+    state: &mut UiState,
+) -> Option<FilterFormOutcome> {
+    let mut form = state.filter_form.clone()?;
+    let mut outcome = None;
+    egui::ComboBox::from_id_salt("filter-column")
+        .selected_text(if form.column.is_empty() {
+            "column".to_string()
+        } else {
+            form.column.clone()
+        })
+        .width(120.0)
+        .show_ui(ui, |ui| {
+            for column in columns {
+                if ui
+                    .selectable_label(&form.column == column, column)
+                    .clicked()
+                {
+                    form.column = column.clone();
+                }
+            }
+        });
+    egui::ComboBox::from_id_salt("filter-op")
+        .selected_text(if form.op.is_empty() {
+            "op".to_string()
+        } else {
+            form.op.clone()
+        })
+        .width(84.0)
+        .show_ui(ui, |ui| {
+            for op in nook_engine::filter::OPERATORS {
+                if ui.selectable_label(form.op == *op, *op).clicked() {
+                    form.op = (*op).to_string();
+                }
+            }
+        });
+    // `is null` and `is not null` take no value, so the field is not offered for them: a box the
+    // engine ignores is a box that teaches the wrong thing.
+    if !matches!(form.op.as_str(), "is null" | "is not null") {
+        ui.add(
+            egui::TextEdit::singleline(&mut form.value)
+                .desired_width(140.0)
+                .hint_text("value"),
+        );
+    }
+    if design::accent_button(ui, tokens, "Add", true).clicked() {
+        outcome = Some(FilterFormOutcome::Apply(condition_from_form(&form)));
+    }
+    if design::ghost_button(ui, tokens, "Cancel", true).clicked()
+        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+    {
+        outcome = Some(FilterFormOutcome::Close);
+    }
+    if !matches!(outcome, Some(FilterFormOutcome::Close)) {
+        state.filter_form = Some(form);
+    }
+    outcome
+}
+
+/// The condition the form describes. A list operator splits on commas, and `between` needs exactly
+/// two — the compiler refuses what does not fit, so this does not guess a shape.
+fn condition_from_form(form: &crate::app::FilterForm) -> nook_engine::filter::Filter {
+    let op = if form.op.is_empty() {
+        "=".to_string()
+    } else {
+        form.op.clone()
+    };
+    let value = match op.as_str() {
+        "is null" | "is not null" => None,
+        "in" | "between" => Some(serde_json::Value::Array(
+            form.value
+                .split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| serde_json::Value::String(v.to_string()))
+                .collect(),
+        )),
+        _ => Some(serde_json::Value::String(form.value.clone())),
+    };
+    nook_engine::filter::Filter {
+        column: form.column.clone(),
+        op,
+        value,
+    }
+}
+
 fn matches_note(total: Option<u64>, rows: usize) -> String {
     match total {
         Some(n) => design::matches_label(n),

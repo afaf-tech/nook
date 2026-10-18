@@ -347,6 +347,59 @@ pub fn db_password(cfg: &ConnectionConfig) -> Result<Option<String>> {
     keychain_lookup(&cfg.id)
 }
 
+/// The keychain account a connection's safe-mode token lives under. Separate from the connection's
+/// own id so `db_password` and `ssh_account` cannot reach it by accident.
+fn safe_account(conn: &str) -> String {
+    format!("nook.safemode.{conn}")
+}
+
+/// The safe-mode token for a connection, created on first use.
+///
+/// The token is 128 bits from the standard library's randomly seeded hasher — no dependency, and
+/// enough entropy that guessing it is not the way in. What it protects against is a stray script or a
+/// slip of the mouse, not a local attacker who can already read the keychain; that ceiling is the
+/// one the setting's own help text states.
+pub fn safe_token(conn: &str) -> Result<String> {
+    let account = safe_account(conn);
+    if let Some(existing) = keychain_lookup(&account)? {
+        return Ok(existing);
+    }
+    let token = random_token();
+    keychain_store(&account, &token)?;
+    Ok(token)
+}
+
+/// True when `candidate` is this connection's safe-mode token. A missing token (no keychain, or never
+/// enabled) is `false`: the gate fails closed.
+pub fn safe_token_matches(conn: &str, candidate: &str) -> bool {
+    keychain_lookup(&safe_account(conn))
+        .ok()
+        .flatten()
+        .is_some_and(|token| token == candidate)
+}
+
+/// Forget the token, so the next enable mints a new one.
+pub fn forget_safe_token(conn: &str) -> Result<()> {
+    keychain_delete(&safe_account(conn))
+}
+
+fn random_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::with_capacity(32);
+    for _ in 0..2 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u64(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or_default(),
+        );
+        out.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    out
+}
+
 pub fn keychain_delete(id: &str) -> Result<()> {
     if !keychain_available() {
         return Ok(());

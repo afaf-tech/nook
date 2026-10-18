@@ -229,6 +229,17 @@ pub fn show(
     if let Some(text) = actions.copy {
         ui.ctx().copy_text(text);
     }
+    if actions.make_editable {
+        if let Err(e) = session.run(
+            "grid.editQueryResult",
+            serde_json::json!({ "statement": register.active }),
+        ) {
+            session.log(
+                nook_engine::Level::Error,
+                format!("grid.editQueryResult: {e}"),
+            );
+        }
+    }
     if actions.rerun {
         let text = session.tabs[tab_index].sql.text.clone();
         let mut params = serde_json::json!({ "sql": text });
@@ -249,6 +260,8 @@ struct Actions {
     copy: Option<String>,
     /// Run the tab's script again.
     rerun: bool,
+    /// Make the active statement's result editable (`grid.editQueryResult`).
+    make_editable: bool,
 }
 
 /// The bands one frame painted, so the caller — and the tests below — can measure the stack.
@@ -588,6 +601,46 @@ fn status_bar(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = f32::from(design::S5);
+                // Editable or not is a fact about the result, so the button says which: once the
+                // statement's source resolved it reads `Editable` and stops being a button, and
+                // before that it offers the command, which answers with its own reason when the
+                // result is a GROUP BY, a JOIN, or a table with no key.
+                let editable = sql.editable.as_ref();
+                let label = if editable.is_some() {
+                    "Editable"
+                } else {
+                    "Edit rows"
+                };
+                let response = design::toolbar_button(
+                    ui,
+                    tokens,
+                    label,
+                    None,
+                    tokens.panel_alt,
+                    Emphasis::Plain,
+                    editable.is_none() && run.result.is_some(),
+                    |_| {},
+                );
+                match editable {
+                    Some(source) => {
+                        response.on_hover_text(format!(
+                            "{} · keyed by {}",
+                            source.table.key(),
+                            source.key.join(", ")
+                        ));
+                    }
+                    None => {
+                        if response
+                            .on_hover_text(
+                                "Edit this statement's rows like a data tab. Needs one table, its \
+                                 primary key in the SELECT, and no GROUP BY, DISTINCT, JOIN or UNION.",
+                            )
+                            .clicked()
+                        {
+                            actions.make_editable = true;
+                        }
+                    }
+                }
                 // `Export` routes through `grid.export`, which reads the *active tab's* data grid, and
                 // a query tab has none — the engine refuses it after the file picker has already
                 // asked the user for a path. So the button is painted disabled with the engine's own

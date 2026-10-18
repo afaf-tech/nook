@@ -58,10 +58,56 @@ pub fn commands() -> Vec<CommandSpec> {
         )
         .params(r#"{"sql":"update …; delete …;"}"#)
         .help("BEGIN, run every statement, COMMIT — or ROLLBACK at the first failure."),
+        CommandSpec::new(
+            "editor.safeMode",
+            "Safe mode: confirm before a commit",
+            "Query",
+            safe_mode,
+        )
+        .params(r#"{"enabled":true}"#)
+        .help("When on, grid.apply and every destructive command additionally require the connection's token in \"safe_token\". The token is minted into the keychain and handed back only after a live conn.test passes, so a rotated password fails. It stops a stray script and a slip of the mouse, not a local attacker who can already read the keychain — they have the credentials."),
         CommandSpec::new("sql.stop", "Stop", "Query", stop).help(
             "Cancelling a running statement is not possible yet; each run is bounded by max_rows.",
         ),
     ]
+}
+
+/// Toggle safe mode, and — when the caller is enabling it and asks to confirm — hand back the token
+/// the commit commands will require. The token comes from the keychain and is only returned after a
+/// live `conn.test`, which is what makes this a real check rather than a flag the app compares itself.
+fn safe_mode(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let enabled = p.strict_bool_opt("enabled", session.settings.safe_mode)?;
+    session.settings.safe_mode = enabled;
+    let conn = p.conn_id().or_else(|| {
+        session
+            .active_conn
+            .and_then(|i| session.conns.get(i))
+            .map(|c| c.cfg.id.clone())
+    });
+    if !enabled {
+        if let Some(conn) = conn.as_deref() {
+            crate::profiles::forget_safe_token(conn)?;
+        }
+        return Ok(json!({ "safe_mode": false, "token": null }));
+    }
+    let Some(conn) = conn else {
+        // Turning it on with no connection is fine — the gate only has something to check at the
+        // moment of a commit, and that names a connection.
+        return Ok(json!({ "safe_mode": true, "token": null }));
+    };
+    if !p.bool_opt("confirm", false) {
+        return Ok(json!({
+            "safe_mode": true,
+            "conn": conn,
+            "token": null,
+            "note": "pass \"confirm\": true to prove the connection and get the token",
+        }));
+    }
+    // The proof: a real connect with the stored credentials. A rotated password fails here, which is
+    // the property a locally compared string would not have.
+    session.run("conn.test", json!({ "conn": conn }))?;
+    let token = crate::profiles::safe_token(&conn)?;
+    Ok(json!({ "safe_mode": true, "conn": conn, "token": token }))
 }
 
 fn new_query(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
@@ -91,6 +137,12 @@ fn begin_run(session: &mut Session, ran_script: &str, statements: Vec<String>) {
             tab.sql.ran_script = ran_script.to_owned();
             tab.sql.last_result = None;
             tab.sql.elapsed_ms = 0.0;
+            // A run replaces the rows an editability resolution was made against. Keeping the marker
+            // would let `grid.editCell` write a `posts.id` into `users`, keyed by a primary key read
+            // from a different statement's page — so the new result is read-only until it is asked
+            // for again, and the grid binding and pending edits that belonged to the old rows go.
+            tab.sql.editable = None;
+            tab.grid.clear();
         }
     }
 }

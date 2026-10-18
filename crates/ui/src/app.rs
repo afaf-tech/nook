@@ -504,11 +504,34 @@ pub struct UiState {
     /// The BLOB editor band: the cell it edits and the hex buffer being typed into it. `None` is
     /// closed. The buffer is UI state, not the engine's — nothing is staged until Save runs.
     pub blob_editor: Option<BlobEditor>,
+    /// The filter builder's open popover: the column, operator and value being typed. `None` is
+    /// closed. The applied conditions live on the engine's grid tab — this is only the half-typed
+    /// one, so a cancelled popover stages nothing.
+    pub filter_form: Option<FilterForm>,
+    /// The raw-mode editor: the pending statement being reviewed, per tab. `Some` opens the field,
+    /// with the statement the engine planned as its starting text.
+    pub raw_edit: Option<(usize, String)>,
+    /// The bulk-edit form: the tab, the column, and the value to set across the selection.
+    pub bulk_edit: Option<(usize, String, String)>,
+    /// Whether the compiled WHERE clause is shown under the chips. A view flag: the clause is on
+    /// the engine's grid tab either way.
+    pub filter_sql_open: bool,
+    /// `grid.filterPreview`'s answer for the tab it was asked on: the WHERE and the row count, the
+    /// two facts the preview exists to show. One round trip per toggle, never per frame.
+    pub filter_preview: Option<(usize, String)>,
     /// Quick Look on one cell of the data grid. The tab is part of the key because the band reads
     /// whatever grid is painting — a look left over from another tab would inspect a cell that tab
     /// never selected. The record is the engine's answer, captured once when the look opens: a
     /// 1 MB blob re-hex-dumped every frame would block the UI thread.
     pub quick_look: Option<QuickLook>,
+}
+
+/// The condition the filter builder is composing, before `grid.filters` takes it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FilterForm {
+    pub column: String,
+    pub op: String,
+    pub value: String,
 }
 
 /// The BLOB editor band's state: which cell, and the hex the user is typing.
@@ -596,6 +619,11 @@ impl Default for UiState {
             row_json: None,
             blob_editor: None,
             quick_look: None,
+            filter_form: None,
+            raw_edit: None,
+            bulk_edit: None,
+            filter_sql_open: false,
+            filter_preview: None,
         }
     }
 }

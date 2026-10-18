@@ -27,6 +27,12 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.filter", "Filter rows", "Data", filter)
             .params(r#"{"where":"status = 'live'"}"#)
             .help("A raw WHERE clause, shown in the grid's filter bar."),
+        CommandSpec::new("grid.filters", "Filter rows with conditions", "Data", filters)
+            .params(r#"{"filters":[{"column":"status","op":"=","value":"live"},{"column":"total","op":">","value":100}]}"#)
+            .help("A list of conditions compiled to the same WHERE clause `grid.filter` takes: column and value are quoted, the operator is a closed list (=, !=, <, <=, >, >=, like, ilike, in, is null, is not null, between). An empty list clears the filter."),
+        CommandSpec::new("grid.filterPreview", "Preview the filter SQL", "Data", filter_preview)
+            .params(r#"{"filters":[{"column":"status","op":"=","value":"live"}]}"#)
+            .help("The WHERE clause the conditions compile to, and the COUNT(*) that would run with it, without touching the grid. Refuses exactly what `grid.filters` would refuse."),
         CommandSpec::new("grid.clearFilter", "Clear the filter", "Data", clear_filter),
         CommandSpec::new("grid.countRows", "Count rows", "Data", count_rows),
         CommandSpec::new("grid.editCell", "Edit a cell", "Data", edit_cell)
@@ -46,6 +52,20 @@ pub fn commands() -> Vec<CommandSpec> {
         .params(r#"{"row":0}"#),
         CommandSpec::new("grid.pending", "Show pending edits", "Data", pending),
         CommandSpec::new("grid.revert", "Discard pending edits", "Data", revert),
+        CommandSpec::new("grid.bulkEdit", "Set a column across rows", "Data", bulk_edit)
+            .params(r#"{"column":"status","value":"archived","rows":[3,4,9]}"#)
+            .help("Stages one cell edit per row, exactly as the inline editor would: the same pending list, the same one-transaction grid.apply. `rows` are page rows; a row outside the page is a named error, and the batch is capped at max_rows with `skipped` saying how many were left."),
+        CommandSpec::new(
+            "grid.editQueryResult",
+            "Make a query result editable",
+            "Data",
+            edit_query_result,
+        )
+        .params(r#"{"statement":0}"#)
+        .help("Resolves the source table and primary key of one statement of the last run, so its rows can be edited like a data tab. Refused — with the reason — for anything whose rows are not one-to-one with a table row: GROUP BY, DISTINCT, JOIN, UNION, an aggregate, a CTE, a subquery, or a projection that leaves out a key column."),
+        CommandSpec::new("grid.rawMode", "The SQL a pending edit will run", "Data", raw_mode)
+            .params(r#"{"index":0,"sql":"UPDATE users SET status = 'x' WHERE id = 3"}"#)
+            .help("Without \"sql\" it lists every pending edit with the statement it will run. With it, the statement is mapped back to exactly one pending edit by its WHERE clause and that edit's value is replaced. A statement that does not map to one pending edit is refused and the list is left alone — arbitrary SQL belongs in the query editor."),
         CommandSpec::new("grid.apply", "Apply changes", "Data", apply)
             .shortcut("cmd+s")
             .help("Runs the pending statements on the server, then reloads the page."),
@@ -105,6 +125,9 @@ fn active_grid_tab(session: &Session) -> Result<usize> {
         .tabs
         .get(index)
         .ok_or_else(|| Error::internal("active tab is gone"))?;
+    // A data tab always qualifies; a query tab does once `grid.editQueryResult` resolved its source
+    // and bound the grid to it, which is what lets the same pending list, the same planner and the
+    // same one-transaction apply serve both.
     if tab.kind != TabKind::Data && tab.grid.table.is_none() {
         return Err(Error::config(no_grid_reason()));
     }
@@ -306,6 +329,99 @@ fn filter(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     Ok(grid_summary(session, index))
 }
 
+/// The conditions a request carries, parsed by the one compiler. A request with no `filters` key
+/// is an empty list — clearing — while a `filters` that is not a list is refused rather than
+/// silently read as empty, which would drop a filter the caller meant to set.
+fn filters_arg(p: &Params) -> Result<Vec<crate::filter::Filter>> {
+    match p.raw().get("filters") {
+        None => Ok(Vec::new()),
+        Some(serde_json::Value::Array(items)) => {
+            items.iter().map(crate::filter::Filter::from_json).collect()
+        }
+        Some(other) => Err(Error::config(format!(
+            "parameter \"filters\" must be a list, got {}",
+            crate::json_kind(other)
+        ))),
+    }
+}
+
+fn dialect_of(session: &Session, index: usize) -> nook_core::Dialect {
+    session
+        .tabs
+        .get(index)
+        .and_then(|tab| tab.payload.get("dialect"))
+        .and_then(|v| v.as_str())
+        .and_then(super::parse_dialect)
+        .unwrap_or(nook_core::Dialect::Sqlite)
+}
+
+fn filters(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let parsed = filters_arg(p)?;
+    let where_clause = crate::filter::compile(&parsed, dialect_of(session, index))?;
+    {
+        let tab = session
+            .tabs
+            .get_mut(index)
+            .ok_or_else(|| Error::internal("tab is gone"))?;
+        tab.grid.filter = where_clause.clone();
+        tab.grid.filters = parsed.clone();
+        tab.grid.page = 0;
+        // The count described the rows the grid was asking for; this asks for a different set.
+        tab.grid.total_rows = None;
+    }
+    load_grid(session, index)?;
+    let mut summary = grid_summary(session, index);
+    summary["where"] = json!(where_clause);
+    summary["conditions"] = json!(parsed.len());
+    Ok(summary)
+}
+
+fn filter_preview(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let parsed = filters_arg(p)?;
+    let dialect = dialect_of(session, index);
+    let where_clause = crate::filter::compile(&parsed, dialect)?;
+    let table = session.tabs[index]
+        .grid
+        .table
+        .clone()
+        .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
+    // The count is the point of the preview: it is what tells a user their filter selects 3 rows
+    // rather than 30,000, before the grid spends a round trip showing them.
+    let count_sql = if where_clause.is_empty() {
+        format!(
+            "SELECT count(*) FROM {}",
+            nook_core::quote_qualified(table.schema.as_deref(), &table.table, dialect)
+        )
+    } else {
+        format!(
+            "SELECT count(*) FROM {} WHERE {}",
+            nook_core::quote_qualified(table.schema.as_deref(), &table.table, dialect),
+            where_clause
+        )
+    };
+    let conn = session.tabs[index]
+        .conn
+        .ok_or_else(|| Error::config("this tab has no connection"))?;
+    let rows = session
+        .driver_for(conn)?
+        .run(&count_sql, 1)?
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    Ok(json!({
+        "where": where_clause,
+        "conditions": parsed.len(),
+        "count_sql": count_sql,
+        "rows": rows,
+        "applied": false,
+    }))
+}
+
 fn clear_filter(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
     {
@@ -314,6 +430,7 @@ fn clear_filter(session: &mut Session, _p: &Params) -> Result<serde_json::Value>
             .get_mut(index)
             .ok_or_else(|| Error::internal("tab is gone"))?;
         tab.grid.filter.clear();
+        tab.grid.filters.clear();
         tab.grid.page = 0;
         tab.grid.total_rows = None;
     }
@@ -637,6 +754,264 @@ fn duplicate_row(session: &mut Session, p: &Params) -> Result<serde_json::Value>
     record_edit(session, index, EditKind::InsertRow, 0, None, None, values)
 }
 
+/// The most rows one bulk edit will stage. A batch bigger than this is a sign the caller meant a
+/// table-wide `UPDATE`, which belongs in the SQL editor where the row count is visible as SQL.
+const BULK_LIMIT: usize = 200;
+
+fn bulk_edit(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    // Before the type is read: a schema edit since the tab was bound would coerce with the old
+    // type, and a stale page would plan the edit behind it.
+    sync_grid_table(session, index)?;
+    let column = p.str_arg("column")?;
+    let rows: Vec<usize> = match p.raw().get("rows") {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .map(|n| n as usize)
+                    .ok_or_else(|| Error::config("every entry of \"rows\" must be a row number"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(other) => {
+            return Err(Error::config(format!(
+                "parameter \"rows\" must be a list, got {}",
+                crate::json_kind(other)
+            )))
+        }
+        None => return Err(Error::config("pass \"rows\": the page rows to set")),
+    };
+    // Coerce to the declared column type, the same rule `grid.editCell` follows: '42' becomes 42
+    // for an int column, and a value of `null` is a real NULL rather than the string.
+    let raw = p.cell("value").unwrap_or(Value::Null);
+    let value = {
+        let tab = &session.tabs[index];
+        let info = tab
+            .grid
+            .columns
+            .iter()
+            .find(|c| c.name == column)
+            .ok_or_else(|| Error::not_found(format!("no column '{column}' in this table")))?;
+        if matches!(raw, Value::Null) {
+            Value::Null
+        } else {
+            Value::coerce(&raw.as_text(), &info.type_name).map_err(Error::config)?
+        }
+    };
+    // The cap comes first, and the bounds check covers only the rows that will be staged: a row
+    // beyond the cap is not going to be touched, so refusing the batch for it would report a
+    // problem with a row the command was never going to look at.
+    let staged_rows: Vec<usize> = rows.iter().copied().take(BULK_LIMIT).collect();
+    let skipped = rows.len() - staged_rows.len();
+    let page_rows = session.tabs[index].grid.result.row_count();
+    if let Some(bad) = staged_rows.iter().find(|r| **r >= page_rows) {
+        return Err(Error::config(format!(
+            "row {bad} is not on this page (it holds {page_rows}); fetch the page that has it"
+        )));
+    }
+    // A key column set to one value across several rows is a uniqueness collision the server would
+    // refuse on the second statement — after the first had already been staged. Say it up front.
+    let is_key = session.tabs[index]
+        .grid
+        .primary_key
+        .iter()
+        .any(|k| k == &column);
+    if is_key && rows.len() > 1 {
+        return Err(Error::config(format!(
+            "'{column}' is part of the primary key: one value across {} rows would collide.              Set a key on one row at a time.",
+            rows.len()
+        )));
+    }
+    for row in &staged_rows {
+        record_edit(
+            session,
+            index,
+            EditKind::SetCell,
+            *row,
+            Some(column.clone()),
+            Some(value.clone()),
+            vec![],
+        )?;
+    }
+    Ok(json!({
+        "staged": staged_rows.len(),
+        "skipped": skipped,
+        "pending": session.tabs[index].grid.pending.len(),
+        "column": column,
+    }))
+}
+
+/// The statements a pending edit will run, and the one door into changing one of them. The review
+/// surface never accepts a statement it cannot map back to a pending edit: appending arbitrary SQL to
+/// the pending list is how a review pane becomes a way to run SQL without saying so.
+fn raw_mode(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let list = |session: &Session| {
+        session.tabs[index]
+            .grid
+            .pending
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                json!({
+                    "index": i,
+                    "kind": format!("{:?}", e.kind).to_lowercase(),
+                    "column": e.column,
+                    "sql": e.sql,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let Some(sql) = p.str_opt("sql") else {
+        return Ok(json!({ "edits": list(session) }));
+    };
+    let at = p.int_opt("index", -1);
+    let (new_set, new_where) = split_statement(&sql).ok_or_else(|| {
+        Error::config("raw mode takes the UPDATE the planner emits, with a WHERE clause")
+    })?;
+    // The match is by WHERE clause: it is the only part of the statement that identifies the record,
+    // and the planner writes it from the primary key alone, so two pending edits never share one.
+    let matches: Vec<usize> = session.tabs[index]
+        .grid
+        .pending
+        .iter()
+        .enumerate()
+        // Exact, not case-folded: the WHERE is the primary key the planner wrote, and folding the
+        // case would make `'x'` and `'X'` the same record.
+        .filter(|(_, e)| {
+            split_statement(&e.sql).map(|(_, w)| w).as_deref() == Some(new_where.as_str())
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let target = match (at, matches.as_slice()) {
+        (n, _) if n >= 0 => {
+            let n = n as usize;
+            if n >= session.tabs[index].grid.pending.len() {
+                return Err(Error::not_found(format!("no pending edit {n}")));
+            }
+            n
+        }
+        (_, [only]) => *only,
+        (_, []) => {
+            return Err(Error::config(
+                "no pending edit has that WHERE clause; nothing was changed",
+            ))
+        }
+        (_, many) => {
+            return Err(Error::config(format!(
+                "{} pending edits share that WHERE clause; pass \"index\" to say which",
+                many.len()
+            )))
+        }
+    };
+    let edit = &session.tabs[index].grid.pending[target];
+    let value = match edit.kind {
+        EditKind::SetCell => parse_set_value(&new_set, &edit.column)?,
+        _ => {
+            return Err(Error::config(
+                "raw mode edits one cell: an insert or a delete has no single value to change",
+            ))
+        }
+    };
+    // Re-plan against the table as it is now, so the statement the review shows is the statement the
+    // apply will run — and a column that changed type rejects the literal here rather than at commit.
+    let key = session.tabs[index].grid.pending[target].key.clone();
+    let column = edit.column.clone();
+    let (planned, _) = plan_edit(
+        session,
+        index,
+        &EditRequest {
+            kind: EditKind::SetCell,
+            row: edit.row,
+            column: Some(&column),
+            value: Some(&value),
+            insert: &[],
+            key: Some(&key),
+        },
+    )?;
+    let tab = session
+        .tabs
+        .get_mut(index)
+        .ok_or_else(|| Error::internal("tab is gone"))?;
+    let edit = &mut tab.grid.pending[target];
+    edit.value = value;
+    edit.sql = planned.clone();
+    Ok(json!({ "index": target, "sql": planned, "edits": list(session) }))
+}
+
+/// A planner statement split at its `WHERE`: `(before, where)`, both in the statement's own case —
+/// the literal keeps its case because it is going to be read back into a value. The planner is the
+/// only producer, and it writes the keyword in upper case, so the split is on the last ` WHERE ` it
+/// wrote; a `WHERE` inside a literal is inside quotes and cannot match that shape.
+fn split_statement(sql: &str) -> Option<(String, String)> {
+    let at = sql.rfind(" WHERE ")?;
+    Some((
+        sql[..at].trim().to_string(),
+        sql[at + 7..]
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .to_string(),
+    ))
+}
+
+/// The literal after `SET <column> =` in a planner statement, parsed back into a value. Only the
+/// shapes `sql_literal` writes are accepted: a single-quoted string (with `''` for a quote), a
+/// number, `NULL`, or `X'hex'`.
+fn parse_set_value(set: &str, column: &str) -> Result<Value> {
+    let upper = set.to_ascii_uppercase();
+    let at = upper.find(" SET ").ok_or_else(|| {
+        Error::config("raw mode takes an UPDATE: the statement has no SET clause")
+    })?;
+    let assignments = &set[at + 5..];
+    let column_upper = column.to_ascii_uppercase();
+    // The planner writes one assignment per UPDATE; a hand-written multi-column SET is not a shape
+    // this maps back to a single pending edit, so it is refused rather than half-applied.
+    let (name, literal) = assignments
+        .split_once('=')
+        .ok_or_else(|| Error::config("the SET clause is not `column = value`"))?;
+    let name = name
+        .trim()
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim_matches('\'');
+    if !name.eq_ignore_ascii_case(&column_upper) {
+        return Err(Error::config(format!(
+            "this edit changes '{column}'; the statement sets '{name}'"
+        )));
+    }
+    let literal = literal.trim().trim_end_matches(';').trim();
+    if literal.eq_ignore_ascii_case("null") {
+        return Ok(Value::Null);
+    }
+    if let Some(hex) = literal
+        .strip_prefix("X'")
+        .or_else(|| literal.strip_prefix("x'"))
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        let bytes = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
+            .collect::<std::result::Result<Vec<u8>, _>>()
+            .map_err(|_| Error::config("that hex literal is not hex"))?;
+        return Ok(Value::Bytes(bytes));
+    }
+    if let Some(text) = literal
+        .strip_prefix('\'')
+        .and_then(|r| r.strip_suffix('\''))
+    {
+        return Ok(Value::text(text.replace("''", "'")));
+    }
+    if let Ok(n) = literal.parse::<i64>() {
+        return Ok(Value::Int(n));
+    }
+    if let Ok(f) = literal.parse::<f64>() {
+        return Ok(Value::Float(f));
+    }
+    Err(Error::config(
+        "that SET value is not a literal the planner writes (string, number, NULL or X'hex')",
+    ))
+}
+
 fn pending(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     let index = active_grid_tab(session)?;
     let tab = &session.tabs[index];
@@ -663,7 +1038,10 @@ fn revert(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     Ok(json!({ "discarded": discarded }))
 }
 
-fn apply(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
+fn apply(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    // The commit's own gate, before anything is planned: safe mode wants the connection's token, and
+    // a caller that cannot present it never reaches the statements.
+    super::require_safe_mode(session, p)?;
     let index = active_grid_tab(session)?;
     // Plan every pending edit again, against the table as it is now. A statement planned before the
     // table changed cannot be trusted: the columns it names may be gone, and a stale `WHERE` matches
@@ -744,6 +1122,111 @@ fn apply(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
     load_grid(session, index)?;
     session.log(Level::Success, format!("{applied} changes applied"));
     Ok(json!({ "applied": applied, "grid": grid_summary(session, index) }))
+}
+
+/// Make one statement's result editable, honestly: the source table must be exactly one table, it
+/// must have a primary key, and the projection must carry every key column. Each of those is a
+/// refusal that names itself, because a result made editable without its key is a result whose
+/// writes would hit whichever row happens to sit at that index.
+fn edit_query_result(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = session
+        .active_tab
+        .ok_or_else(|| Error::internal("no active tab"))?;
+    let statement = p.int_opt("statement", 0).max(0) as usize;
+    // A data tab's grid already edits its table; this command exists for the query tab, and saying
+    // so beats "the last run has 0 statements" to someone looking at a full grid.
+    if session.tabs[index].kind != crate::TabKind::Query {
+        return Err(Error::config(
+            "grid.editQueryResult works on a query tab: open one and run the statement first",
+        ));
+    }
+    let sql = session
+        .tabs
+        .get(index)
+        .and_then(|tab| tab.sql.statements.get(statement))
+        .cloned()
+        .ok_or_else(|| {
+            Error::not_found(format!(
+                "no statement {statement}; the last run has {}",
+                session.tabs[index].sql.statements.len()
+            ))
+        })?;
+    let source = crate::sqltext::single_select_source(&sql).map_err(Error::config)?;
+    let conn_index = session.tabs[index]
+        .conn
+        .ok_or_else(|| Error::config("this tab has no connection"))?;
+    let table = TableRef {
+        schema: source.schema().map(str::to_string),
+        table: source.name().to_string(),
+    };
+    let info = session
+        .conns
+        .get(conn_index)
+        .and_then(|c| c.catalog.as_ref())
+        .and_then(|cat| cat.find_table(table.schema.as_deref(), &table.table))
+        .cloned()
+        .ok_or_else(|| {
+            Error::not_found(format!(
+                "{} is not in the catalog; refresh the connection and try again",
+                table.key()
+            ))
+        })?;
+    let key = info.primary_key();
+    if key.is_empty() {
+        return Err(Error::unsupported(format!(
+            "{} has no primary key, so its rows cannot be told apart; add one in the designer              (schema.setPrimaryKey) and run the statement again",
+            table.key()
+        )));
+    }
+    // Without the key in the projection there is nothing to write the WHERE from. Guessing which
+    // row is meant is how a client updates the wrong record.
+    if let Some(columns) = &source.columns {
+        let missing: Vec<&str> = key
+            .iter()
+            .map(String::as_str)
+            .filter(|k| !columns.iter().any(|c| c == k))
+            .collect();
+        if !missing.is_empty() {
+            return Err(Error::config(format!(
+                "the result does not select the primary key column{} {}; add {} to the SELECT",
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(", "),
+                missing.join(", ")
+            )));
+        }
+    }
+    let editable = crate::EditableSource {
+        statement,
+        table: table.clone(),
+        key: key.clone(),
+    };
+    // The rows the statement returned become the tab's grid page, and the table becomes its binding:
+    // from here the edit, pending and apply commands run unchanged, because they read the same
+    // `GridState` a data tab fills. `load_grid` re-runs the statement rather than selecting the
+    // table, so an apply or a refresh cannot replace these rows with a different question's answer.
+    let page = session.tabs[index]
+        .sql
+        .results
+        .get(statement)
+        .and_then(|run| run.result.clone())
+        .ok_or_else(|| Error::config(format!("statement {statement} produced no rows to edit")))?;
+    bind_grid_table(session, index, table.clone())?;
+    if let Some(tab) = session.tabs.get_mut(index) {
+        tab.sql.editable = Some(editable.clone());
+        tab.grid.result = page;
+        tab.grid.page = 0;
+        tab.grid.filter.clear();
+        tab.grid.filters.clear();
+        tab.grid.order.clear();
+        tab.grid.total_rows = None;
+        tab.grid.error = None;
+    }
+    Ok(json!({
+        "statement": statement,
+        "table": table.key(),
+        "key": key,
+        "read_only": false,
+    }))
 }
 
 fn export(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
