@@ -133,11 +133,9 @@ pub fn call_tool(
         || name == "conn.pin"
         || name == "conn.reorder"
         || name == "conn.setColor";
-    if !local {
-        if !map.contains_key("conn") && !map.contains_key("from") {
-            if let Some(default) = session.active_conn.map(|i| session.conns[i].cfg.id.clone()) {
-                map.insert("conn".into(), json!(default));
-            }
+    if !local && !map.contains_key("conn") && !map.contains_key("from") {
+        if let Some(default) = session.active_conn.map(|i| session.conns[i].cfg.id.clone()) {
+            map.insert("conn".into(), json!(default));
         }
     }
     let mut needed: Vec<String> = Vec::new();

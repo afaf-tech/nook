@@ -66,6 +66,12 @@ pub fn commands() -> Vec<CommandSpec> {
             .params(r#"{"row":0}"#)
             .help("The record at `row` as a vertical form: one field per column with its type, value and whether it is a key. Read-only over the page the grid already holds."),
         CommandSpec::new("grid.copyAsSql", "Copy rows as INSERT", "Data", copy_as_sql),
+        CommandSpec::new("grid.copyTsv", "Copy as spreadsheet TSV", "Data", copy_tsv)
+            .params(r#"{"header":true,"anchor":[0,0],"cursor":[5,3]}"#)
+            .help("The selection rectangle (or the whole page) as tab-separated text: a paste into Excel or Sheets lands as a table. Embedded newlines are escaped and wrapped; NULL is an empty cell."),
+        CommandSpec::new("grid.selection", "Read or set the selection rectangle", "Data", grid_selection)
+            .params(r#"{"anchor":[0,0],"cursor":[5,3]}"#)
+            .help("anchor is where the drag started, cursor is the live corner. Without params it reads the current rectangle; both corners are clamped to the page and returned normalised (min, max)."),
     ]
 }
 
@@ -948,6 +954,121 @@ fn copy_as_sql(session: &mut Session, _p: &Params) -> Result<serde_json::Value> 
     }))
 }
 
+/// Read a `[row, column]` pair from the params, validating it against the page.
+fn pair_arg(p: &Params, key: &str, rows: usize, columns: usize) -> Result<(usize, usize)> {
+    let raw = p
+        .raw()
+        .get(key)
+        .ok_or_else(|| Error::config(format!("missing parameter '{key}'")))?;
+    let serde_json::Value::Array(items) = raw else {
+        return Err(Error::config(format!(
+            "parameter '{key}' must be [row, column], got {}",
+            crate::json_kind(raw)
+        )));
+    };
+    if items.len() != 2 {
+        return Err(Error::config(format!(
+            "parameter '{key}' must be [row, column], got {} items",
+            items.len()
+        )));
+    }
+    let (Some(row), Some(col)) = (items[0].as_i64(), items[1].as_i64()) else {
+        return Err(Error::config(format!(
+            "parameter '{key}' must hold two integers"
+        )));
+    };
+    if row < 0 || row as usize >= rows {
+        return Err(Error::not_found(format!(
+            "row {row} is outside the page (it holds {rows} rows)"
+        )));
+    }
+    if col < 0 || col as usize >= columns {
+        return Err(Error::not_found(format!(
+            "column {col} is outside the page (it holds {columns} columns)"
+        )));
+    }
+    Ok((row as usize, col as usize))
+}
+
+/// The rectangle as normalised inclusive ranges: (min_row..=max_row, min_col..=max_col).
+fn rect_of(
+    anchor: (usize, usize),
+    cursor: (usize, usize),
+) -> (
+    std::ops::RangeInclusive<usize>,
+    std::ops::RangeInclusive<usize>,
+) {
+    (
+        anchor.0.min(cursor.0)..=anchor.0.max(cursor.0),
+        anchor.1.min(cursor.1)..=anchor.1.max(cursor.1),
+    )
+}
+
+/// The grid's copy: TSV over the selection rectangle (or the whole page). The formatting lives in
+/// `ResultSet::to_tsv`, so the engine and the UI cannot drift apart.
+fn copy_tsv(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let header = p.strict_bool_opt("header", true)?;
+    let tab = &session.tabs[index];
+    let rows = tab.grid.result.rows.len();
+    let columns = tab.grid.result.columns.len();
+    let rect = if p.raw().contains_key("anchor") || p.raw().contains_key("cursor") {
+        let anchor = pair_arg(p, "anchor", rows, columns)?;
+        let cursor = pair_arg(p, "cursor", rows, columns)?;
+        Some(rect_of(anchor, cursor))
+    } else if let (Some(a), Some(c)) = (tab.grid.anchor, tab.grid.cursor) {
+        // A copy with no rectangle copies what the user selected: the stored anchor/cursor
+        // pair, so a Cmd+C after a drag does not re-send the corners. Stored corners are
+        // clamped against the page in case it shrank underneath them.
+        let a = (
+            a.0.min(rows.saturating_sub(1)),
+            a.1.min(columns.saturating_sub(1)),
+        );
+        let c = (
+            c.0.min(rows.saturating_sub(1)),
+            c.1.min(columns.saturating_sub(1)),
+        );
+        Some(rect_of(a, c))
+    } else {
+        None
+    };
+    let tsv = tab.grid.result.to_tsv(rect, header);
+    Ok(json!({ "tsv": tsv }))
+}
+
+/// Read or set the selection rectangle. Setting normalises the corners (min, max) so a caller
+/// never has to guess which corner the drag started from.
+fn grid_selection(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let rows = session.tabs[index].grid.result.rows.len();
+    let columns = session.tabs[index].grid.result.columns.len();
+    if p.raw().contains_key("anchor") || p.raw().contains_key("cursor") {
+        let anchor = pair_arg(p, "anchor", rows, columns)?;
+        let cursor = pair_arg(p, "cursor", rows, columns)?;
+        let (a, c) = (
+            (anchor.0.min(cursor.0), anchor.1.min(cursor.1)),
+            (anchor.0.max(cursor.0), anchor.1.max(cursor.1)),
+        );
+        let tab = &mut session.tabs[index];
+        tab.grid.anchor = Some(a);
+        tab.grid.cursor = Some(c);
+    }
+    let tab = &session.tabs[index];
+    let (anchor, cursor) = match (tab.grid.anchor, tab.grid.cursor) {
+        (Some(a), Some(c)) => (a, c),
+        // No selection yet: a degenerate rectangle at the first cell, so callers reading before
+        // the first click get a shape, not a null to special-case.
+        _ => ((0, 0), (0, 0)),
+    };
+    let (rows_range, cols_range) = rect_of(anchor, cursor);
+    Ok(json!({
+        "anchor": [anchor.0, anchor.1],
+        "cursor": [cursor.0, cursor.1],
+        "rows": rows_range.count(),
+        "columns": cols_range.count(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,8 +1206,8 @@ mod tests {
         table.columns[0].primary_key = false;
         session.tabs[tab].grid.primary_key.clear();
         // The catalog edit that `schema.setPrimaryKey` performs through refresh_catalog.
-        session.conns[0].catalog.as_mut().unwrap().schemas[0].tables[0].columns[0]
-            .primary_key = true;
+        session.conns[0].catalog.as_mut().unwrap().schemas[0].tables[0].columns[0].primary_key =
+            true;
         // A real in-memory SQLite behind the connection: the reload actually runs a page SELECT.
         let mut db = nook_drivers::sqlite::Sqlite::memory().expect("memory db");
         nook_drivers::Driver::run_script(

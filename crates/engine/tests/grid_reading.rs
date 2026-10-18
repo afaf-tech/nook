@@ -1,0 +1,206 @@
+//! Phase 3, steps 1–2: TSV copy and rectangle selection. `grid.copyTsv` must return the same
+//! bytes a spreadsheet paste expects; `grid.selection` must read and set the rectangle so the
+//! pointer's work is scriptable without synthesising mouse events.
+
+use nook_engine::cmd::open_now;
+use nook_engine::{Conn, Session};
+use serde_json::json;
+
+struct Fixture {
+    session: Session,
+    conn: String,
+    path: std::path::PathBuf,
+}
+
+impl Fixture {
+    fn new(tag: &str) -> Fixture {
+        let dir = std::env::temp_dir().join("nook-grid-reading");
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("NOOK_CONFIG_DIR", dir.join("config"));
+        let path = dir.join(format!("{tag}-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let cfg = nook_core::ConnectionConfig::parse(&format!("sqlite:{}", path.display()))
+            .expect("a sqlite URI parses");
+        let conn = cfg.id.clone();
+        let mut session = Session::new();
+        session.conns.push(Conn::new(cfg));
+        let index = session.conn_index(&conn).expect("registered");
+        open_now(&mut session, index).expect("sqlite opens");
+        Fixture {
+            session,
+            conn,
+            path,
+        }
+    }
+
+    fn sql(&mut self, sql: &str) -> serde_json::Value {
+        self.session
+            .run("sql.run", json!({"sql": sql, "conn": self.conn}))
+            .expect("sql runs")
+    }
+
+    /// Open the grid for a table and make it the active tab.
+    fn open_grid(&mut self, table: &str) {
+        self.session
+            .run("grid.open", json!({"conn": self.conn, "table": table}))
+            .expect("grid opens");
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[test]
+fn copy_tsv_returns_a_spreadsheet_table() {
+    let mut f = Fixture::new("copy-tsv");
+    f.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, note TEXT)");
+    f.sql("INSERT INTO t (id, note) VALUES (1, 'line1\nline2'), (2, NULL)");
+    f.open_grid("t");
+    let out = f
+        .session
+        .run("grid.copyTsv", json!({"header": true}))
+        .expect("copy");
+    let tsv = out["tsv"].as_str().expect("the text");
+    // Header, escaped newline in a wrapper, NULL as an empty cell.
+    assert_eq!(tsv, "id\tnote\n1\t\"line1\\nline2\"\n2\t\n", "{tsv:?}");
+    // Without the header.
+    let out = f
+        .session
+        .run("grid.copyTsv", json!({"header": false}))
+        .expect("copy");
+    assert_eq!(out["tsv"].as_str().unwrap(), "1\t\"line1\\nline2\"\n2\t\n");
+}
+
+#[test]
+fn copy_tsv_slices_the_selection_rectangle() {
+    let mut f = Fixture::new("copy-sel");
+    f.sql("CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER)");
+    f.sql("INSERT INTO t VALUES (1,2,3),(4,5,6),(7,8,9)");
+    f.open_grid("t");
+    // The rectangle rows 0..=1, columns 0..=1 (a and b of the first two rows).
+    let out = f
+        .session
+        .run(
+            "grid.copyTsv",
+            json!({"header": true, "anchor": [0, 0], "cursor": [1, 1]}),
+        )
+        .expect("copy");
+    assert_eq!(out["tsv"].as_str().unwrap(), "a\tb\n1\t2\n4\t5\n");
+}
+
+#[test]
+fn selection_reads_and_sets_the_rectangle() {
+    let mut f = Fixture::new("selection");
+    f.sql("CREATE TABLE t (a INTEGER, b INTEGER)");
+    f.sql("INSERT INTO t VALUES (1,2),(3,4)");
+    f.open_grid("t");
+    // Setting: anchor and cursor define the rectangle; the corners come back normalised.
+    let out = f
+        .session
+        .run(
+            "grid.selection",
+            json!({"anchor": [1, 1], "cursor": [0, 0]}),
+        )
+        .expect("set");
+    assert_eq!(out["anchor"], json!([0, 0]), "{out:?}");
+    assert_eq!(out["cursor"], json!([1, 1]), "{out:?}");
+    assert_eq!(out["rows"], json!(2));
+    assert_eq!(out["columns"], json!(2));
+    // Reading back with no params returns the same rectangle.
+    let out = f.session.run("grid.selection", json!({})).expect("read");
+    assert_eq!(out["cursor"], json!([1, 1]));
+    // A degenerate rectangle is one cell: rows 1, columns 1.
+    let out = f
+        .session
+        .run(
+            "grid.selection",
+            json!({"anchor": [1, 1], "cursor": [1, 1]}),
+        )
+        .expect("collapse");
+    assert_eq!(out["rows"], json!(1));
+    assert_eq!(out["columns"], json!(1));
+}
+
+#[test]
+fn selection_out_of_range_is_a_named_error() {
+    let mut f = Fixture::new("selection-oob");
+    f.sql("CREATE TABLE t (a INTEGER)");
+    f.sql("INSERT INTO t VALUES (1)");
+    f.open_grid("t");
+    let err = f
+        .session
+        .run(
+            "grid.selection",
+            json!({"anchor": [0, 0], "cursor": [9, 0]}),
+        )
+        .unwrap_err();
+    assert!(err.message().contains("9"), "must name the row: {err:?}");
+    let err = f
+        .session
+        .run(
+            "grid.selection",
+            json!({"anchor": [0, 0], "cursor": [0, 5]}),
+        )
+        .unwrap_err();
+    assert!(err.message().contains("5"), "must name the column: {err:?}");
+}
+
+#[test]
+fn copy_tsv_junk_is_rejected() {
+    let mut f = Fixture::new("copy-junk");
+    f.sql("CREATE TABLE t (a INTEGER)");
+    f.sql("INSERT INTO t VALUES (1)");
+    f.open_grid("t");
+    // A header that is neither boolean, number nor the accepted word forms is a named error.
+    let err = f
+        .session
+        .run("grid.copyTsv", json!({"header": [1, 2]}))
+        .unwrap_err();
+    assert!(err.message().contains("header"), "{err:?}");
+    let err = f
+        .session
+        .run("grid.selection", json!({"anchor": "x", "cursor": [0, 0]}))
+        .unwrap_err();
+    assert!(err.message().contains("anchor"), "{err:?}");
+    // A three-item corner is rejected with the count.
+    let err = f
+        .session
+        .run(
+            "grid.selection",
+            json!({"anchor": [0, 0, 0], "cursor": [0, 0]}),
+        )
+        .unwrap_err();
+    assert!(err.message().contains("3"), "{err:?}");
+}
+
+#[test]
+fn copy_tsv_without_params_uses_the_stored_selection() {
+    let mut f = Fixture::new("copy-stored");
+    f.sql("CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER)");
+    f.sql("INSERT INTO t VALUES (1,2,3),(4,5,6)");
+    f.open_grid("t");
+    // A selection made earlier (a drag, or grid.selection) is what a bare copy copies.
+    f.session
+        .run(
+            "grid.selection",
+            json!({"anchor": [0, 0], "cursor": [0, 1]}),
+        )
+        .expect("set selection");
+    let out = f
+        .session
+        .run("grid.copyTsv", json!({"header": true}))
+        .expect("copy");
+    assert_eq!(out["tsv"].as_str().unwrap(), "a\tb\n1\t2\n");
+    // Explicit corners still override the stored rectangle.
+    let out = f
+        .session
+        .run(
+            "grid.copyTsv",
+            json!({"header": false, "anchor": [1, 2], "cursor": [1, 2]}),
+        )
+        .expect("copy");
+    assert_eq!(out["tsv"].as_str().unwrap(), "6\n");
+}

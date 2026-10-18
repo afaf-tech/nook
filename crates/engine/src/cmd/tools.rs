@@ -845,7 +845,7 @@ struct IndexEntry {
 /// needs a hook in every `conn.refresh`, and this costs one pass over parsed catalogs.
 /// ponytail: rebuilt per query; move to a cached index when a user's catalog is big enough to
 /// notice, and add the invalidation hook then.
-fn build_index<'a>(catalogs: &[(&str, &'a nook_model::Catalog)]) -> Vec<IndexEntry> {
+fn build_index(catalogs: &[(&str, &nook_model::Catalog)]) -> Vec<IndexEntry> {
     let mut out = Vec::new();
     for (conn, catalog) in catalogs {
         for schema in &catalog.schemas {
@@ -859,13 +859,8 @@ fn build_index<'a>(catalogs: &[(&str, &'a nook_model::Catalog)]) -> Vec<IndexEnt
                     conn: (*conn).to_string(),
                     schema: Some(schema.name.clone()),
                     name: t.name.clone(),
-                    haystack: format!(
-                        "{}.{} {}",
-                        schema.name,
-                        t.name,
-                        columns.join(" ")
-                    )
-                    .to_ascii_lowercase(),
+                    haystack: format!("{}.{} {}", schema.name, t.name, columns.join(" "))
+                        .to_ascii_lowercase(),
                 });
             }
         }
@@ -1001,8 +996,10 @@ fn server_search(session: &mut Session, p: &Params) -> Result<serde_json::Value>
     let limit = p.int_opt("limit", 100).clamp(1, 500) as usize;
     let entries = session_index(session);
     // Objects only: server search is a catalog search, not a tab search.
-    let objects: Vec<IndexEntry> =
-        entries.into_iter().filter(|e| e.kind == "table" || e.kind == "view").collect();
+    let objects: Vec<IndexEntry> = entries
+        .into_iter()
+        .filter(|e| e.kind == "table" || e.kind == "view")
+        .collect();
     let hits = score(&objects, &query, limit);
     Ok(json!({
         "hits": hits.iter().map(|h| json!({

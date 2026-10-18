@@ -164,7 +164,6 @@ impl Table {
     }
 }
 
-
 /// A trigger as the catalog reports it: the event wiring plus the body, for display and DDL.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Trigger {
@@ -426,6 +425,67 @@ impl ResultSet {
         out
     }
 
+    /// The grid's copy format: TSV, because a spreadsheet paste is the point. No quoting — a
+    /// quoted cell would arrive with its quotes in Excel — except a cell holding a newline,
+    /// which is escaped as a literal `\n` and wrapped, the way Excel itself round-trips it.
+    /// `selection` is an inclusive row/column range; `header` prepends the column names.
+    pub fn to_tsv(
+        &self,
+        selection: Option<(
+            std::ops::RangeInclusive<usize>,
+            std::ops::RangeInclusive<usize>,
+        )>,
+        header: bool,
+    ) -> String {
+        // No rows and no selection: nothing to paste. A `0..=len-1` with len 0 would still
+        // iterate once and emit a phantom empty row into the spreadsheet.
+        if selection.is_none() && (self.rows.is_empty() || self.columns.is_empty()) {
+            return String::new();
+        }
+        let (rows, cols) = selection.unwrap_or((
+            0..=self.rows.len().saturating_sub(1),
+            0..=self.columns.len().saturating_sub(1),
+        ));
+        let mut out = String::new();
+        if header && !self.columns.is_empty() {
+            let cells: Vec<String> = cols
+                .clone()
+                .filter_map(|i| self.columns.get(i).map(|c| c.replace('\t', "\\t")))
+                .collect();
+            out.push_str(&cells.join("\t"));
+            out.push('\n');
+        }
+        for row in rows {
+            let cells: Vec<String> = cols
+                .clone()
+                .map(|i| {
+                    let text = self
+                        .rows
+                        .get(row)
+                        .and_then(|r| r.get(i))
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                        .as_text();
+                    if text.contains('\n') || text.contains('\r') {
+                        // Both escapes apply in the wrapped branch too: a cell holding a
+                        // newline *and* a tab must not leak a phantom column.
+                        format!(
+                            "\"{}\"",
+                            text.replace('\t', "\\t")
+                                .replace('\r', "\\r")
+                                .replace('\n', "\\n")
+                        )
+                    } else {
+                        text.replace('\t', "\\t")
+                    }
+                })
+                .collect();
+            out.push_str(&cells.join("\t"));
+            out.push('\n');
+        }
+        out
+    }
+
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
         out.push_str("| ");
@@ -571,6 +631,40 @@ mod tests {
         assert!(sql.contains("VALUES (2, NULL);"));
         assert_eq!(rs.clone().bound(1).row_count(), 1);
         assert!(rs.bound(1).truncated);
+    }
+
+    #[test]
+    fn tsv_escapes_embedded_newlines_and_tabs() {
+        let rs = ResultSet {
+            columns: vec!["id".into(), "note".into()],
+            column_types: vec!["int".into(), "text".into()],
+            rows: vec![
+                vec![Value::Int(1), Value::text("line1\nline2")],
+                vec![Value::Int(2), Value::text("a\tb")],
+                vec![Value::Int(3), Value::Null],
+            ],
+            ..ResultSet::default()
+        };
+        // NULL is an empty cell; embedded newline and tab are escaped as literals, wrapped
+        // only for the newline cell — the Excel paste-back convention.
+        assert_eq!(
+            rs.to_tsv(None, true),
+            "id\tnote\n1\t\"line1\\nline2\"\n2\ta\\tb\n3\t\n"
+        );
+        // Without the header row.
+        assert_eq!(
+            rs.to_tsv(None, false),
+            "1\t\"line1\\nline2\"\n2\ta\\tb\n3\t\n"
+        );
+        // A rectangle (rows 0..=1, column 1) slices the same rules.
+        assert_eq!(
+            rs.to_tsv(Some((0..=1, 1..=1)), true),
+            "note\n\"line1\\nline2\"\na\\tb\n"
+        );
+        // An empty result is empty text — a filter that matches nothing must not paste a
+        // phantom row into the spreadsheet.
+        assert_eq!(ResultSet::default().to_tsv(None, true), "");
+        assert_eq!(ResultSet::default().to_tsv(None, false), "");
     }
 
     #[test]

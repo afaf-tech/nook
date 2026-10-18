@@ -735,7 +735,7 @@ mod tests {
         let mut picked: Option<usize> = None;
         let mut menu = |ui: &mut egui::Ui, row: usize| {
             picked = Some(row);
-            ui.button("Rename column");
+            let _ = ui.button("Rename column");
         };
         let mut table_view = view(&columns, &rows, false, 120.0);
         table_view.row_menu = Some(&mut menu);
@@ -807,13 +807,7 @@ mod tests {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 let before = ui.cursor().top();
                 let mut inline = view(&columns, &rows, true, 0.0);
-                let event = show(
-                    ui,
-                    &tokens,
-                    &mut inline,
-                    &mut state,
-                    id,
-                );
+                let event = show(ui, &tokens, &mut inline, &mut state, id);
                 assert_eq!(event, TableEvent::None);
                 advanced = ui.cursor().top() - before;
             });

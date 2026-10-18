@@ -2650,12 +2650,13 @@ impl eframe::App for NookApp {
         // only on input, so a "no input for 2 s" frame never arrives in the plain window — the
         // wake-up has to be scheduled (`request_repaint_after`), the same way `tick_jobs` ticks.
         // The snapshot is compared before writing, so an idle app never touches the store.
-        self.tab_persist_at.get_or_insert_with(std::time::Instant::now);
-        if self.tab_persist_at.unwrap().elapsed() >= std::time::Duration::from_secs(2) {
+        let started = *self
+            .tab_persist_at
+            .get_or_insert_with(std::time::Instant::now);
+        if started.elapsed() >= std::time::Duration::from_secs(2) {
             self.tab_persist_at = Some(std::time::Instant::now());
             let snap = self.session.tab_snapshot();
-            if Some(&snap) != self.last_tab_snapshot.as_ref()
-                && self.session.persist_tabs().is_ok()
+            if Some(&snap) != self.last_tab_snapshot.as_ref() && self.session.persist_tabs().is_ok()
             {
                 // Advance the marker only when the write landed: a failed write (locked nook.db)
                 // must be retried on the next tick, not swallowed until the tabs change again.

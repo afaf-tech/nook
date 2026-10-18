@@ -115,6 +115,25 @@ impl Params {
         }
     }
 
+    /// `bool_opt`, but junk is a named error instead of the default: for commands whose output
+    /// changes shape with the flag (a header row, a confirmation), a silently ignored bad flag
+    /// hides the caller's mistake.
+    pub fn strict_bool_opt(&self, key: &str, default: bool) -> Result<bool> {
+        match self.0.get(key) {
+            Some(serde_json::Value::Bool(b)) => Ok(*b),
+            Some(serde_json::Value::String(s)) => Ok(matches!(
+                s.to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )),
+            Some(serde_json::Value::Number(n)) => Ok(n.as_i64().unwrap_or(0) != 0),
+            Some(other) => Err(Error::config(format!(
+                "parameter '{key}' must be a boolean, got {}",
+                json_kind(other)
+            ))),
+            None => Ok(default),
+        }
+    }
+
     /// A list of strings, accepting either a JSON array or a comma-separated string.
     pub fn list(&self, key: &str) -> Vec<String> {
         match self.0.get(key) {
@@ -149,7 +168,7 @@ impl Params {
     }
 }
 
-fn json_kind(v: &serde_json::Value) -> &'static str {
+pub fn json_kind(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
         serde_json::Value::Bool(_) => "boolean",
@@ -376,6 +395,9 @@ pub struct GridState {
     pub filter: String,
     pub pending: Vec<PendingEdit>,
     pub cursor: Option<(usize, usize)>,
+    /// The drag origin of the selection rectangle. `cursor` is the live corner; a plain click
+    /// collapses both to the same cell.
+    pub anchor: Option<(usize, usize)>,
     pub total_rows: Option<u64>,
     pub error: Option<String>,
     pub elapsed_ms: f64,
@@ -393,6 +415,7 @@ impl GridState {
         self.filter.clear();
         self.pending.clear();
         self.cursor = None;
+        self.anchor = None;
         self.total_rows = None;
         self.error = None;
         self.elapsed_ms = 0.0;
@@ -962,7 +985,10 @@ impl Session {
             .map(|t| SnapshotTab {
                 kind: kind_name(t.kind),
                 title: &t.title,
-                conn: t.conn.and_then(|i| self.conns.get(i)).map(|c| c.cfg.id.clone()),
+                conn: t
+                    .conn
+                    .and_then(|i| self.conns.get(i))
+                    .map(|c| c.cfg.id.clone()),
                 sql: &t.sql.text,
             })
             .collect();
@@ -988,7 +1014,10 @@ impl Session {
             return;
         };
         let Ok(snap) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            self.log(Level::Warn, "tab snapshot is not valid JSON; starting fresh");
+            self.log(
+                Level::Warn,
+                "tab snapshot is not valid JSON; starting fresh",
+            );
             return;
         };
         let Some(entries) = snap["tabs"].as_array() else {
@@ -1037,7 +1066,10 @@ impl Session {
                 }
             };
             if let Some(other) = unknown_kind {
-                self.log(Level::Warn, format!("unknown tab kind '{other}'; restoring as Query"));
+                self.log(
+                    Level::Warn,
+                    format!("unknown tab kind '{other}'; restoring as Query"),
+                );
             }
             let mut tab = Tab::new(id, kind, title);
             tab.conn = conn;
@@ -1125,8 +1157,7 @@ pub fn ok() -> serde_json::Value {
 pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
-    LOCK.lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Helpers shared by the tests that touch the filesystem.
