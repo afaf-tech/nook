@@ -649,9 +649,21 @@ fn a_bidirectional_sync_reports_a_row_it_cannot_settle() {
     // Row 1 matches. Row 2 is on b only: from a→b it is a delete, from b→a an insert. Those are
     // the same evidence read two ways, so the row is a conflict — not a merge, and not a side
     // picked by whoever ran the command last.
-    let out = f.run(
+    // `dry_run: false` alone must not be enough: the gate is `confirm: true`.
+    let ungated = f.run(
         "sync.bidirectional",
         json!({"a": f.conn.clone(), "b": b.clone(), "tables": ["t"], "dry_run": false}),
+    );
+    assert_eq!(ungated["dry_run"], json!(true), "{ungated}");
+    assert_eq!(ungated["applied"], json!(0), "{ungated}");
+    assert_eq!(f.count("t"), 1, "an unconfirmed sync wrote to the source");
+
+    let out = f.run(
+        "sync.bidirectional",
+        json!({
+            "a": f.conn.clone(), "b": b.clone(), "tables": ["t"],
+            "dry_run": false, "confirm": true,
+        }),
     );
     assert_eq!(out["a_to_b"], json!(0), "{out}");
     assert_eq!(out["b_to_a"], json!(0), "{out}");

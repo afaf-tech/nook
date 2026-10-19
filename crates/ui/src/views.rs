@@ -1956,15 +1956,29 @@ pub fn transfer(
                 serde_json::json!({"from": from, "to": to, "dry_run": true, "tables": list})
             }
             "sync.bidirectional" => {
-                // Dry by default: the card reports the conflicts first, and a second press with
-                // `dry_run: false` is what writes.
+                // First press previews, second applies — and the engine wants `confirm` too,
+                // because `dry_run: false` alone is not consent. Keyed by command: a preview of
+                // the delete half must not count as consent for the merge.
+                let first = session.tabs[tab_index]
+                    .payload
+                    .get("sync_kind")
+                    .and_then(|v| v.as_str())
+                    != Some("sync.bidirectional");
                 serde_json::json!({
                     "a": from, "b": to, "tables": list,
-                    "dry_run": !session.tabs[tab_index].payload.contains_key("sync"),
+                    "dry_run": first, "confirm": !first,
                 })
             }
             "sync.dataDelete" => {
-                serde_json::json!({"from": from, "to": to, "tables": list})
+                let first = session.tabs[tab_index]
+                    .payload
+                    .get("sync_kind")
+                    .and_then(|v| v.as_str())
+                    != Some("sync.dataDelete");
+                serde_json::json!({
+                    "from": from, "to": to, "tables": list,
+                    "dry_run": first, "confirm": !first,
+                })
             }
             "sync.structure" => serde_json::json!({"from": from, "to": to, "apply": true}),
             _ => serde_json::json!({"from": from, "to": to}),
@@ -1985,6 +1999,9 @@ pub fn transfer(
                     session.tabs[tab_index]
                         .payload
                         .insert("sync".into(), value.clone());
+                    session.tabs[tab_index]
+                        .payload
+                        .insert("sync_kind".into(), serde_json::json!(id));
                 }
                 if id == "transfer.speedTest" {
                     // Kept for the card's own line, not just the raw JSON in the output pane.

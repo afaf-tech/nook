@@ -40,8 +40,8 @@ pub fn commands() -> Vec<CommandSpec> {
             .params(r#"{"rules":[{"column":"total","on_conflict":"newer","by":"updated_at"}]}"#)
             .help("Validate and report per-column resolution: source, target, newer (by a timestamp) or skip."),
         CommandSpec::new("sync.bidirectional", "Bi-directional sync", "Sync", sync_bidirectional)
-            .params(r#"{"a":"local","b":"staging","tables":["orders"],"dry_run":true}"#)
-            .help("Two passes with conflict rules deciding. A row changed on both sides is reported, never silently overwritten."),
+            .params(r#"{"a":"local","b":"staging","tables":["orders"],"confirm":true,"dry_run":true}"#)
+            .help("Two passes with conflict rules deciding. Dry run by default; confirm:true to apply. A row changed on both sides is reported, never silently overwritten."),
         CommandSpec::new("backup.dump", "Backup", "Backup", dump)
             .params(r#"{"conn":"local","path":"~/backups/shop.sql","schema_only":false}"#)
             .help("SQLite writes a portable .sql script; Postgres and MySQL use pg_dump/mysqldump."),
@@ -467,7 +467,9 @@ fn sync_bidirectional(session: &mut Session, p: &Params) -> Result<serde_json::V
     };
     let tables = tables_of(p);
     let rules = conflict_rules(p)?;
-    let dry_run = p.bool_opt("dry_run", true);
+    // Both halves of a sync write; both need the same gate. `dry_run: false` alone must never be
+    // enough to change two databases.
+    let dry_run = p.bool_opt("dry_run", true) || !p.bool_opt("confirm", false);
     let batch = p.int_opt("batch", 500).clamp(1, 20_000) as usize;
     let a_catalog = session.catalog_of(a)?.clone();
     let b_catalog = session.catalog_of(b)?.clone();
