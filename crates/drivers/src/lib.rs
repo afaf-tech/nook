@@ -65,6 +65,68 @@ pub trait Driver: Send {
 
     fn catalog(&mut self) -> Result<Catalog>;
 
+    /// The server's own id for this session, for a cancellation issued from another connection.
+    /// `None` when the engine has no such concept (SQLite) — and then `cancel` refuses rather than
+    /// pretending it worked.
+    fn backend_pid(&self) -> Option<u32> {
+        None
+    }
+
+    /// Cancel whatever `backend_pid` names, from *this* connection. The caller dials a sibling for
+    /// this, because the connection running the statement is busy running it.
+    fn cancel(&mut self, _pid: u64) -> Result<()> {
+        Err(Error::unsupported(format!(
+            "{} cannot cancel a running statement from another session",
+            self.kind().label()
+        )))
+    }
+
+    /// How fine-grained `cancel` is, in the words the user sees. SQLite has no out-of-band cancel at
+    /// all, so it stops between pages and says exactly that instead of claiming a stop.
+    fn cancel_granularity(&self) -> &'static str {
+        "at the next page boundary"
+    }
+
+    /// Run one statement, handing rows to `sink` a page at a time.
+    ///
+    /// `sink` returns whether to keep going, which is how a cancel is honoured between pages. The
+    /// default has no true streaming — it runs the statement whole and then hands the rows over in
+    /// pages, which is what makes the live row count move. Drivers whose reader can pause override
+    /// this (SQLite does, and that is where its page-boundary cancel comes from).
+    fn run_stream(
+        &mut self,
+        sql: &str,
+        limit: usize,
+        page_rows: usize,
+        sink: &mut dyn FnMut(ResultSet) -> bool,
+    ) -> Result<ResultSet> {
+        let rs = self.run(sql, limit)?;
+        let page_rows = page_rows.clamp(1, limit.max(1));
+        if rs.rows.is_empty() {
+            return Ok(rs);
+        }
+        let total = rs.rows.len();
+        let mut start = 0;
+        while start < total {
+            let end = (start + page_rows).min(total);
+            let page = ResultSet {
+                columns: rs.columns.clone(),
+                column_types: rs.column_types.clone(),
+                rows: rs.rows[start..end].to_vec(),
+                affected: 0,
+                last_insert_id: None,
+                elapsed_ms: 0.0,
+                notices: Vec::new(),
+                truncated: end == total && rs.truncated,
+            };
+            start = end;
+            if !sink(page) {
+                break;
+            }
+        }
+        Ok(rs)
+    }
+
     /// Page of a table, ordered and filtered by the grid.
     fn fetch_table(
         &mut self,
@@ -196,6 +258,23 @@ pub trait Driver: Send {
 
     fn explain(&mut self, sql: &str) -> Result<ResultSet> {
         self.run(&format!("EXPLAIN {sql}"), 1000)
+    }
+
+    /// The plan as a tree, normalised.
+    ///
+    /// Each engine can describe a plan structurally — Postgres and MySQL as JSON, SQLite as a flat
+    /// list with parent ids. Where an engine cannot, this falls back to the text `explain` returns,
+    /// as one node: a plan drawn as a single box is honest, a plan guessed from text is not.
+    fn explain_plan(&mut self, sql: &str, analyze: bool) -> Result<nook_model::plan::Plan> {
+        let _ = analyze;
+        let rs = self.explain(sql)?;
+        let text = rs
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|v| v.display()).collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(nook_model::plan::Plan::single("PLAN", &text))
     }
 
     // ---- transactions ----

@@ -51,6 +51,9 @@ pub enum View {
     #[default]
     Grid,
     Json,
+    /// The execution plan as a tree. Offered only when the tab has one: a plan view with no plan
+    /// would be a button that paints nothing.
+    Plan,
 }
 
 impl View {
@@ -58,6 +61,7 @@ impl View {
         match self {
             View::Grid => "Grid",
             View::Json => "JSON",
+            View::Plan => "Plan",
         }
     }
 
@@ -65,15 +69,25 @@ impl View {
         match self {
             View::Grid => "Copy",
             View::Json => "Copy JSON",
+            View::Plan => "Copy plan",
         }
     }
 
-    fn all() -> [View; 2] {
-        [View::Grid, View::Json]
+    /// Every view, with `Plan` present only when the tab carries a plan to draw.
+    fn offered(has_plan: bool) -> Vec<View> {
+        let mut all = vec![View::Grid, View::Json];
+        if has_plan {
+            all.push(View::Plan);
+        }
+        all
     }
 
-    /// The view a control-protocol `view` asks for: exactly the labels the segment paints, so
-    /// `ui.setResultView` cannot accept a name this register has no button for.
+    fn all() -> [View; 3] {
+        [View::Grid, View::Json, View::Plan]
+    }
+
+    /// The view a control-protocol `view` asks for. Every view here is one the register can paint:
+    /// `Plan` on a tab with no plan draws its own "press Explain" sentence rather than a blank.
     pub fn from_name(name: &str) -> Option<View> {
         View::all()
             .into_iter()
@@ -156,6 +170,8 @@ impl Register {
             // and it is the same serialisation `grid.copyTsv` hands the control channel.
             View::Grid => result.to_tsv(None, true),
             View::Json => json_text(result),
+            // The plan's own text form is the normalised tree, which is what the panel shows.
+            View::Plan => plan_text(state),
         }
     }
 
@@ -195,6 +211,53 @@ pub fn json_text(result: &ResultSet) -> String {
     serde_json::to_string_pretty(&result.to_json()).unwrap_or_default()
 }
 
+/// The tab's plan as indented text, which is what Copy puts on the clipboard in the Plan view.
+pub fn plan_text(state: &SqlState) -> String {
+    let Some(plan) = state.plan.as_ref() else {
+        return String::new();
+    };
+    let nodes = plan["nodes"].as_array().cloned().unwrap_or_default();
+    let root = plan["root"].as_u64().unwrap_or(0) as usize;
+    let expensive = plan["expensive"].as_u64().map(|v| v as usize);
+    let mut out = String::new();
+    walk_plan(&nodes, root, 0, expensive, &mut out);
+    out
+}
+
+fn walk_plan(
+    nodes: &[serde_json::Value],
+    id: usize,
+    depth: usize,
+    expensive: Option<usize>,
+    out: &mut String,
+) {
+    let Some(node) = nodes.get(id) else { return };
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+    out.push_str(node["label"].as_str().unwrap_or("node"));
+    let detail = node["detail"].as_str().unwrap_or_default();
+    if !detail.is_empty() {
+        out.push_str("  ");
+        out.push_str(detail);
+    }
+    let cost = node["cost"].as_f64().unwrap_or(0.0);
+    if cost > 0.0 {
+        out.push_str(&format!("  cost {cost:.1}"));
+    }
+    if expensive == Some(id) {
+        out.push_str("  <-- most expensive");
+    }
+    out.push('\n');
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            if let Some(child) = child.as_u64() {
+                walk_plan(nodes, child as usize, depth + 1, expensive, out);
+            }
+        }
+    }
+}
+
 /// Paint the register into the rest of `ui`, reading the tab's SQL state and dispatching what the
 /// user asked for through the command registry.
 pub fn show(
@@ -213,6 +276,10 @@ pub fn show(
     let id = egui::Id::new(("register", tab_index));
 
     let mut actions = Actions::default();
+    let running_note = session
+        .runner
+        .running_for_tab(tab.id)
+        .map(|job| format!("running · {} rows so far · job {}", job.rows, job.id));
     let sql = &tab.sql;
     // Dirty cells read the tab's pending list, which is the same source the data grid paints from.
     let pending = super::grid::dirty_cells(tab);
@@ -226,6 +293,7 @@ pub fn show(
         id,
         state.table(tab_index),
         &pending,
+        running_note.as_deref(),
         &mut actions,
     );
 
@@ -287,6 +355,7 @@ struct Layout {
     error: Option<Rect>,
     void: Option<Rect>,
     json: Option<Rect>,
+    plan: Option<Rect>,
     footer: Option<Rect>,
     /// The row pitch the grid widget was handed, from the density preference.
     row_h: f32,
@@ -303,6 +372,7 @@ fn paint(
     id: egui::Id,
     table: &mut TableState,
     pending: &[(usize, usize)],
+    running: Option<&str>,
     actions: &mut Actions,
 ) -> Layout {
     // The design stacks its bands with no gap between them — each one's hairline is the next one's
@@ -327,7 +397,7 @@ fn paint(
 
     marks.tabs = Some(tabs(ui, tokens, sql, register));
     marks.bar = Some(status_bar(
-        ui, tokens, register, sql, run, max_rows, actions,
+        ui, tokens, register, sql, run, max_rows, running, actions,
     ));
 
     match (run.result.as_ref(), run.error.as_deref()) {
@@ -340,6 +410,9 @@ fn paint(
             marks.void = Some(void(ui, tokens));
         }
         (Some(result), _) => match register.view {
+            View::Plan => {
+                marks.plan = Some(plan_panel(ui, tokens, sql, ui.available_height()));
+            }
             View::Json => {
                 let rows = result.row_count();
                 let height = if rows == 0 {
@@ -617,6 +690,7 @@ fn status_bar(
     sql: &SqlState,
     run: &StatementRun,
     max_rows: usize,
+    running: Option<&str>,
     actions: &mut Actions,
 ) -> Rect {
     let ink = if run.error.is_some() {
@@ -633,7 +707,17 @@ fn status_bar(
         |ui| {
             ui.spacing_mut().item_spacing.x = f32::from(design::S5);
             ui.label(RichText::new(stat_text(run)).size(design::T_SM).color(ink));
-            design::note_pill(ui, tokens, &register.note(sql, max_rows), Some(tokens.info));
+            // A background run's own sentence wins: the note describes what the result *is*, and
+            // while a run is in flight the honest answer is the count so far, not a total that is
+            // still moving.
+            match running {
+                Some(note) => {
+                    design::note_pill(ui, tokens, note, Some(tokens.warn));
+                }
+                None => {
+                    design::note_pill(ui, tokens, &register.note(sql, max_rows), Some(tokens.info));
+                }
+            }
             if register.stale(&sql.text) {
                 design::note_pill(ui, tokens, STALE_NOTE, Some(tokens.warn));
             }
@@ -710,7 +794,8 @@ fn status_bar(
                 {
                     actions.copy = Some(register.clipboard(sql));
                 }
-                let labels: Vec<(&str, bool)> = View::all()
+                let offered = View::offered(sql.plan.is_some());
+                let labels: Vec<(&str, bool)> = offered
                     .iter()
                     .map(|view| (view.label(), *view == register.view))
                     .collect();
@@ -724,7 +809,7 @@ fn status_bar(
                     2.0,
                     tokens.text,
                 ) {
-                    register.view = View::all()[index];
+                    register.view = offered[index];
                 }
             });
         },
@@ -893,6 +978,13 @@ fn footer(
                             .color(tokens.text_dim),
                     );
                 }
+                View::Plan => {
+                    ui.label(
+                        RichText::new("the plan as a tree · the most expensive node is marked")
+                            .font(tokens.mono(design::T_XS))
+                            .color(tokens.text_dim),
+                    );
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The pill describes the result, so it changes when the result does: a statement
@@ -1048,6 +1140,160 @@ fn json_view(ui: &mut Ui, tokens: &Tokens, text: &str, height: f32, id: egui::Id
         });
     // The content, not the viewport: the band's own height is what its lines come to.
     out.inner
+}
+
+/// The execution plan as a tree: one box per node, indented children joined by an elbow, cost as a
+/// bar, and the node with the largest cost share marked. The UI parses nothing — `sql.explainVisual`
+/// hands it the normalised tree.
+fn plan_panel(ui: &mut Ui, tokens: &Tokens, sql: &SqlState, height: f32) -> Rect {
+    let Some(plan) = sql.plan.as_ref() else {
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), height.max(80.0)),
+            Sense::hover(),
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "no plan yet — press Explain",
+            tokens.font(design::T_SM),
+            tokens.text_dim,
+        );
+        return rect;
+    };
+    let nodes = plan["nodes"].as_array().cloned().unwrap_or_default();
+    let root = plan["root"].as_u64().unwrap_or(0) as usize;
+    let expensive = plan["expensive"].as_u64().map(|v| v as usize);
+    let rows = count_nodes(&nodes, root);
+    let row_h = design::row_h(nook_engine::Density::Comfortable).max(24.0);
+    let content_h = rows as f32 * row_h + 2.0 * f32::from(design::S5);
+    let out = egui::ScrollArea::both()
+        .id_salt(egui::Id::new("plan-panel"))
+        .max_height(height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            let (rect, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), content_h.max(height)),
+                Sense::hover(),
+            );
+            let painter = ui.painter();
+            painter.rect_filled(rect, CornerRadius::ZERO, tokens.panel);
+            let max_cost = nodes
+                .iter()
+                .map(|n| n["cost"].as_f64().unwrap_or(0.0))
+                .fold(0.0_f64, f64::max);
+            let mut y = rect.top() + f32::from(design::S5);
+            paint_plan_node(
+                painter, tokens, &nodes, root, 0, rect, &mut y, row_h, max_cost, expensive,
+            );
+            rect
+        });
+    out.inner
+}
+
+fn count_nodes(nodes: &[serde_json::Value], id: usize) -> usize {
+    let Some(node) = nodes.get(id) else { return 0 };
+    1 + node["children"]
+        .as_array()
+        .map(|kids| {
+            kids.iter()
+                .filter_map(|k| k.as_u64())
+                .map(|k| count_nodes(nodes, k as usize))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_plan_node(
+    painter: &egui::Painter,
+    tokens: &Tokens,
+    nodes: &[serde_json::Value],
+    id: usize,
+    depth: usize,
+    rect: Rect,
+    y: &mut f32,
+    row_h: f32,
+    max_cost: f64,
+    expensive: Option<usize>,
+) {
+    let Some(node) = nodes.get(id) else { return };
+    let indent = f32::from(design::S5) + depth as f32 * f32::from(design::S7);
+    let hot = expensive == Some(id);
+    let label = node["label"].as_str().unwrap_or("node");
+    let detail = node["detail"].as_str().unwrap_or_default();
+    let cost = node["cost"].as_f64().unwrap_or(0.0);
+
+    // The elbow: a short vertical tick from the parent's row into this one.
+    if depth > 0 {
+        painter.vline(
+            rect.left() + indent - f32::from(design::S3),
+            (*y - row_h * 0.5)..=(*y + row_h * 0.5),
+            Stroke::new(1.0, tokens.stroke),
+        );
+    }
+    let ink = if hot { tokens.warn } else { tokens.text };
+    painter.text(
+        egui::pos2(rect.left() + indent, *y + row_h * 0.5),
+        egui::Align2::LEFT_CENTER,
+        label,
+        tokens.font(design::T_SM),
+        ink,
+    );
+    if !detail.is_empty() {
+        let after = rect.left() + indent + 8.0 * label.chars().count() as f32;
+        painter.text(
+            egui::pos2(after.min(rect.right() - 160.0), *y + row_h * 0.5),
+            egui::Align2::LEFT_CENTER,
+            detail,
+            tokens.mono(design::T_XS),
+            tokens.text_dim,
+        );
+    }
+    // The cost bar: this node's share of the most expensive node, so a bar is comparable at a glance.
+    if max_cost > 0.0 && cost > 0.0 {
+        let width = 90.0 * (cost / max_cost) as f32;
+        let bar = Rect::from_min_size(
+            egui::pos2(rect.right() - width - 8.0, *y + row_h * 0.5 - 3.0),
+            Vec2::new(width.max(2.0), 6.0),
+        );
+        painter.rect_filled(bar, CornerRadius::same(2), if hot { tokens.warn } else { tokens.accent });
+        painter.text(
+            egui::pos2(rect.right() - 8.0, *y + row_h * 0.5),
+            egui::Align2::RIGHT_CENTER,
+            format!("{cost:.1}"),
+            tokens.mono(design::T_XS),
+            tokens.text_dim,
+        );
+    }
+    if hot {
+        painter.text(
+            egui::pos2(rect.left() + indent, *y + row_h * 0.5 - 1.0),
+            egui::Align2::LEFT_BOTTOM,
+            "",
+            tokens.font(design::T_XS),
+            tokens.warn,
+        );
+    }
+    *y += row_h;
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            if let Some(child) = child.as_u64() {
+                paint_plan_node(
+                    painter,
+                    tokens,
+                    nodes,
+                    child as usize,
+                    depth + 1,
+                    rect,
+                    y,
+                    row_h,
+                    max_cost,
+                    expensive,
+                );
+            }
+        }
+    }
 }
 
 /// `.jb`'s text as one job: a 20px line pitch, and the design's inks — keys and `null` in
@@ -1471,6 +1717,7 @@ mod tests {
                         egui::Id::new(("register", 0)),
                         table,
                         pending,
+                        None,
                         actions,
                     );
                 });
@@ -2350,16 +2597,50 @@ mod tests {
     }
 
     /// The control channel's two faces of one list: the names a `view` may be, and the refusal that
+    /// The plan view's own text is the tree the engine normalised: indented children, cost, and the
+    /// expensive node marked. The UI parses nothing, so this is the whole of what a reader sees.
+    #[test]
+    fn the_plan_text_indents_children_and_marks_the_expensive_node() {
+        let sql = SqlState {
+            plan: Some(serde_json::json!({
+            "root": 0,
+            "expensive": 1,
+            "nodes": [
+                { "id": 0, "label": "NESTED LOOP", "detail": "", "cost": 10.0, "children": [1, 2] },
+                { "id": 1, "label": "SEQ SCAN", "detail": "on users", "cost": 90.0, "children": [] },
+                { "id": 2, "label": "INDEX SCAN", "detail": "on users_email", "cost": 5.0, "children": [] }
+            ]
+            })),
+            ..SqlState::default()
+        };
+        let text = plan_text(&sql);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].starts_with("NESTED LOOP"), "{text}");
+        assert!(lines[1].starts_with("  SEQ SCAN"), "a child is indented: {text}");
+        assert!(lines[1].contains("on users"), "{text}");
+        assert!(lines[1].contains("most expensive"), "{text}");
+        assert!(lines[2].starts_with("  INDEX SCAN"), "{text}");
+        assert!(!lines[2].contains("most expensive"), "{text}");
+    }
+
+    /// A tab with no plan says so instead of drawing an empty tree.
+    #[test]
+    fn a_tab_with_no_plan_has_no_plan_text() {
+        assert_eq!(plan_text(&SqlState::default()), "");
+    }
+
     /// lists them. Both read `View::label`, the same string the segment paints.
     #[test]
     fn the_view_names_are_the_labels_the_segment_paints() {
-        assert_eq!(View::names(), "grid, json");
+        assert_eq!(View::names(), "grid, json, plan");
         for view in View::all() {
             assert_eq!(View::from_name(view.label()), Some(view));
         }
         assert_eq!(View::from_name(" Grid "), Some(View::Grid));
         assert_eq!(View::from_name("JSON"), Some(View::Json));
-        // `text` is the design's third segment and nothing renders it, so it is refused rather than
+        assert_eq!(View::from_name("PLAN"), Some(View::Plan));
+        // `text` is the design's segment and nothing renders it, so it is refused rather than
         // quietly mapped onto the grid.
         assert_eq!(View::from_name("text"), None);
         assert_eq!(View::from_name(""), None);

@@ -889,6 +889,8 @@ impl UiState {
             "processes" => "monitor.processes",
             "status" => "monitor.status",
             "variables" => "monitor.variables",
+            "locks" => "monitor.locks",
+            "replication" => "monitor.replication",
             _ => "monitor.dashboard",
         };
         let params = serde_json::json!({ "conn": session.conns[conn].cfg.id });
@@ -1008,6 +1010,21 @@ impl NookApp {
     }
 
     /// Run every job that has come due: the app is the scheduler.
+    /// Apply whatever the background workers produced, and keep the frame coming while one runs.
+    ///
+    /// The pump itself never waits: it takes the messages that are already there. The repaint is
+    /// what turns a finished page into a visible row — without it, an idle window would show the
+    /// rows whenever the user next moved the mouse.
+    fn pump_runner(&mut self, ctx: &egui::Context) {
+        let changed = self.session.pump();
+        if changed > 0 {
+            ctx.request_repaint();
+        }
+        if self.session.runner.jobs().any(|j| j.state.is_running()) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+        }
+    }
+
     fn tick_jobs(&mut self) {
         if self.last_job_tick.elapsed().as_secs() < 30 {
             return;
@@ -3211,6 +3228,7 @@ impl eframe::App for NookApp {
         self.drain_ai_outcomes(&ctx);
         self.shortcuts(&ctx);
         self.tick_jobs();
+        self.pump_runner(&ctx);
 
         // Phase 1: snapshot the tabs at most every two seconds of wall-clock time. egui repaints
         // only on input, so a "no input for 2 s" frame never arrives in the plain window — the

@@ -24,16 +24,27 @@ pub struct Postgres {
     cfg: ConnectionConfig,
     database: String,
     in_tx: bool,
+    /// `pg_backend_pid()`, read once at open. Stable for the connection's life, and the id another
+    /// session needs to cancel this one's work.
+    pid: Option<u32>,
 }
 
 impl Postgres {
     pub fn open(cfg: &ConnectionConfig) -> Result<Self> {
-        let client = connect(cfg)?;
+        let mut client = connect(cfg)?;
+        // One round-trip at open, so a cancel never has to interrupt the connection it wants to
+        // cancel. A failure here is not fatal: the session works, cancellation says it cannot.
+        let pid = client
+            .query_opt("SELECT pg_backend_pid()", &[])
+            .ok()
+            .flatten()
+            .map(|row| row.get::<_, i32>(0) as u32);
         Ok(Postgres {
             client,
             database: cfg.database.clone(),
             in_tx: false,
             cfg: cfg.clone(),
+            pid,
         })
     }
 
@@ -593,6 +604,54 @@ impl Driver for Postgres {
         }
         rs.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(rs)
+    }
+
+    fn explain_plan(&mut self, sql: &str, analyze: bool) -> Result<nook_model::plan::Plan> {
+        // JSON where the server can produce it: parsing Postgres's text plan is brittle in exactly
+        // the way a normaliser exists to avoid.
+        let head = if analyze {
+            "EXPLAIN (ANALYZE, FORMAT JSON, BUFFERS)"
+        } else {
+            "EXPLAIN (FORMAT JSON)"
+        };
+        let rs = self.run(&format!("{head} {sql}"), 100)?;
+        let text = rs
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .map(|v| v.display())
+            .ok_or_else(|| Error::query("the server returned no plan"))?;
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| Error::query(format!("the plan is not JSON: {e}")))?;
+        nook_model::plan::from_postgres(&json)
+            .ok_or_else(|| Error::query("the plan has no \"Plan\" node"))
+    }
+
+    fn backend_pid(&self) -> Option<u32> {
+        // `pg_backend_pid()` is the session's own id, and it is stable for the life of the
+        // connection — no round-trip needed here, and none is possible: `&self`.
+        self.pid
+    }
+
+    fn cancel(&mut self, pid: u64) -> Result<()> {
+        // The sibling connection runs this, never the one being cancelled.
+        let sql = format!("SELECT pg_cancel_backend({pid})");
+        let messages = self.simple(&sql)?;
+        let ok = messages
+            .iter()
+            .find_map(|m| match m {
+                SimpleQueryMessage::Row(r) => r.get(0),
+                _ => None,
+            })
+            .map(|v| v == "t" || v == "true")
+            .unwrap_or(false);
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::query(format!(
+                "pg_cancel_backend({pid}) reported that the backend was not cancelled"
+            )))
+        }
     }
 
     fn catalog(&mut self) -> Result<Catalog> {

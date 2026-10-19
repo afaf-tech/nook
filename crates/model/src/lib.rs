@@ -12,6 +12,7 @@ pub mod ddl;
 pub mod diagram;
 pub mod diff;
 pub mod edit;
+pub mod plan;
 
 pub use diagram::{
     forward_engineer, layout as layout_diagram, Diagram, DiagramDocument, DiagramEdge, DiagramNode,

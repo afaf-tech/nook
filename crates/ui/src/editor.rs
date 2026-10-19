@@ -169,12 +169,12 @@ pub fn caret_note(caret: Caret) -> String {
     format!("Ln {}, Col {}", caret.line, caret.column)
 }
 
-/// The engine's own sentence for `sql.stop`, which is what the disabled Stop says when the pointer
-/// rests on it: the button cannot describe the engine differently from the engine.
+/// The engine's own sentence for `sql.stop`, which is what a Stop with nothing to stop says when the
+/// pointer rests on it: the button cannot describe the engine differently from the engine.
 pub fn stop_reason() -> &'static str {
     nook_engine::find("sql.stop")
         .map(|spec| spec.help)
-        .unwrap_or("Stopping a run is not possible yet")
+        .unwrap_or("Stopping a run is not possible")
 }
 
 /// Paint the editor register and, under it, the results register.
@@ -195,7 +195,16 @@ pub fn show(
     let text = session.tabs[tab_index].sql.text.clone();
     let caret = caret_in(&text, state.caret.map_or(0, |caret| caret.index));
 
-    layout.toolbar = Some(toolbar(ui, caret, &text, tokens, &mut actions));
+    let tab_id = session.tabs[tab_index].id;
+    let running_job = session.runner.running_for_tab(tab_id).cloned();
+    layout.toolbar = Some(toolbar(
+        ui,
+        caret,
+        &text,
+        tokens,
+        &mut actions,
+        running_job.as_ref(),
+    ));
     // The find bar sits above the script when it is open: it edits the text below it, so it belongs
     // between the toolbar and the editor rather than floating over the code.
     find_bar(ui, session, tab_index, state, tokens, &mut actions);
@@ -314,7 +323,18 @@ pub fn show_pane(
         return layout;
     };
     let caret = caret_in(&split.text, 0);
-    layout.toolbar = Some(toolbar(ui, caret, &split.text, tokens, &mut actions));
+    // The right pane has its own editor; a background run belongs to the tab, so the same job is
+    // what Stop would cancel from either side.
+    let tab_id = session.tabs[tab_index].id;
+    let running_job = session.runner.running_for_tab(tab_id).cloned();
+    layout.toolbar = Some(toolbar(
+        ui,
+        caret,
+        &split.text,
+        tokens,
+        &mut actions,
+        running_job.as_ref(),
+    ));
     // The pane's Run runs *its* text: `sql.run` is handed the script explicitly, so the engine does
     // not fall back to the left pane's editor text.
     if let Some((command, mut params)) = actions.command.take() {
@@ -324,6 +344,8 @@ pub fn show_pane(
             // replacing the left pane's.
             params["pane"] = serde_json::Value::String("right".into());
         }
+        // The right pane stays blocking: its rows live in `SplitState`, and `pump` appends to the
+        // tab's own run, so an async run here would land in the wrong pane. Named in `docs/gaps.md`.
         if let Err(e) = session.run(command, params) {
             session.log(Level::Warn, e.to_string());
         }
@@ -626,7 +648,14 @@ fn parameter_chips(ui: &mut Ui, session: &mut Session, tab_index: usize, tokens:
     );
 }
 
-fn toolbar(ui: &mut Ui, caret: Caret, text: &str, tokens: &Tokens, actions: &mut Actions) -> Rect {
+fn toolbar(
+    ui: &mut Ui,
+    caret: Caret,
+    text: &str,
+    tokens: &Tokens,
+    actions: &mut Actions,
+    running_job: Option<&nook_engine::runner::Job>,
+) -> Rect {
     let index = caret_statement(text, Some(caret)).unwrap_or(0);
     let rect = design::band_fill(
         ui,
@@ -666,19 +695,29 @@ fn toolbar(ui: &mut Ui, caret: Caret, text: &str, tokens: &Tokens, actions: &mut
             {
                 actions.command = Some(("sql.runStatement", serde_json::json!({"index": index})));
             }
-            // `.btn.off`: painted, not offered. It carries the registry's own help, so the control
-            // cannot promise a cancellation the engine does not implement.
-            design::toolbar_button(
+            // Enabled exactly when there is a background run to stop: the button's own state is the
+            // answer to "can I stop this", and it carries the registry's help when it cannot.
+            let running = running_job.map(|job| job.id);
+            if design::toolbar_button(
                 ui,
                 tokens,
                 "Stop",
                 Some(Mark::Stop),
                 tokens.panel_high,
                 Emphasis::Plain,
-                false,
+                running.is_some(),
                 |_| {},
             )
-            .on_hover_text(stop_reason());
+            .on_hover_text(match running_job {
+                Some(job) => format!("Cancel background run {} ({} rows so far)", job.id, job.rows),
+                None => stop_reason().to_string(),
+            })
+            .clicked()
+            {
+                if let Some(id) = running {
+                    actions.command = Some(("sql.cancel", serde_json::json!({ "job": id })));
+                }
+            }
             vdiv(ui, tokens);
             if design::toolbar_button(
                 ui,
@@ -693,7 +732,8 @@ fn toolbar(ui: &mut Ui, caret: Caret, text: &str, tokens: &Tokens, actions: &mut
             .on_hover_text("Ask the server for the plan")
             .clicked()
             {
-                actions.command = Some(("sql.explain", serde_json::json!({})));
+                // The visual form, which also fills the tab's plan so the register can draw it.
+                actions.command = Some(("sql.explainVisual", serde_json::json!({})));
             }
             if design::toolbar_button(
                 ui,
@@ -1193,6 +1233,20 @@ fn dispatch(
             }
         }
     }
+    // A one-statement run goes to the background: the frame keeps drawing, rows land as they
+    // arrive, and Stop has a job to cancel. A script stays blocking, because the runner streams one
+    // statement — pretending otherwise would drop the rest of it.
+    let id = match id {
+        "sql.run"
+            if params["sql"]
+                .as_str()
+                .map(|sql| nook_engine::cmd::sql::split(sql).len() == 1)
+                .unwrap_or(false) =>
+        {
+            "sql.runAsync"
+        }
+        id => id,
+    };
     match session.run(id, params) {
         // `sql.explain` records its own plan as the tab's run, the way `sql.run` does: the engine owns
         // what a run leaves behind, so the register shows a plan without the UI re-shaping it. Only
@@ -1669,6 +1723,19 @@ mod tests {
             events,
             ..Default::default()
         };
+        // A one-statement run goes to the background, so a test frame has to pump the way the app's
+        // frame does: take whatever the worker sent, and wait for a run that is still going so a
+        // frame after a click paints the result the click asked for.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            session.pump();
+            if !session.runner.jobs().any(|j| j.state.is_running())
+                || std::time::Instant::now() > deadline
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let mut layout = Layout::default();
         let mut out = ctx.run_ui(input, |ui| {
             let mut child = ui.new_child(
@@ -2492,7 +2559,10 @@ mod tests {
         let mut world = world("export", "select 1 as a;\n");
         let _ = frame(&ctx, &mut world, Vec::new(), 1.0);
         let run = click_hit(&ctx, &mut world, "Run", 1.02);
-        let f = frame(&ctx, &mut world, run, 1.05);
+        let _ = frame(&ctx, &mut world, run, 1.05);
+        // The run is in the background, so the click's own frame paints the editor and the rows
+        // land on the next one — which is what `frame` waits for.
+        let f = frame(&ctx, &mut world, Vec::new(), 1.08);
         let export = f.label("Export");
         // Hover it long enough for the tooltip. egui hides a tooltip while a click is more recent
         // than the last pointer movement, and `Run` was clicked a moment ago — so the pointer has to

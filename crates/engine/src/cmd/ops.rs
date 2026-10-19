@@ -1062,6 +1062,13 @@ fn notify_webhook(job: &Job, error: &Error, ms: u128, at: u64, session: &mut Ses
         "elapsed_ms": ms,
         "at": at,
     });
+    post_json(&job.webhook, &body, &job.id, session);
+}
+
+/// POST one JSON body to a URL with the system curl. Shared by the job webhook and `monitor.alerts`,
+/// so an alert and a failed job arrive at the same endpoint in the same shape rather than in two
+/// dialects. A failure is logged and swallowed: a notification must never mask the thing it reports.
+pub(crate) fn post_json(url: &str, body: &serde_json::Value, label: &str, session: &mut Session) {
     let bin = std::env::var("NOOK_CURL_BIN").unwrap_or_else(|_| "curl".to_string());
     let args = [
         "-sS".to_string(),
@@ -1073,7 +1080,7 @@ fn notify_webhook(job: &Job, error: &Error, ms: u128, at: u64, session: &mut Ses
         "@-".to_string(),
         "--max-time".to_string(),
         "10".to_string(),
-        job.webhook.clone(),
+        url.to_string(),
     ];
     let payload = serde_json::to_string(&body).unwrap_or_default();
     match std::process::Command::new(&bin)
@@ -1092,17 +1099,17 @@ fn notify_webhook(job: &Job, error: &Error, ms: u128, at: u64, session: &mut Ses
                 Ok(status) if status.success() => {}
                 Ok(status) => session.log(
                     Level::Warn,
-                    format!("webhook for '{}' failed with {status}", job.id),
+                    format!("webhook for '{label}' failed with {status}"),
                 ),
                 Err(e) => session.log(
                     Level::Warn,
-                    format!("webhook for '{}' did not finish: {e}", job.id),
+                    format!("webhook for '{label}' did not finish: {e}"),
                 ),
             }
         }
         Err(e) => session.log(
             Level::Warn,
-            format!("webhook for '{}' could not run: {e}", job.id),
+            format!("webhook for '{label}' could not run: {e}"),
         ),
     }
 }

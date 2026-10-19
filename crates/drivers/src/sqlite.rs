@@ -223,6 +223,97 @@ impl Driver for Sqlite {
         })
     }
 
+    fn run_stream(
+        &mut self,
+        sql: &str,
+        limit: usize,
+        page_rows: usize,
+        sink: &mut dyn FnMut(ResultSet) -> bool,
+    ) -> Result<ResultSet> {
+        if sql.trim().is_empty() {
+            return Err(Error::query("empty statement"));
+        }
+        self.guard_write(sql)?;
+        let started = Instant::now();
+        let limit = limit.max(1);
+        let page_rows = page_rows.clamp(1, limit);
+        let mut stmt = self.conn.prepare(sql).map_err(|e| map_err(e, sql))?;
+        if stmt.column_count() == 0 {
+            let affected = stmt.execute([]).map_err(|e| map_err(e, sql))? as u64;
+            let last = self.conn.last_insert_rowid();
+            return Ok(ResultSet {
+                affected,
+                last_insert_id: if last > 0 { Some(last as u64) } else { None },
+                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                ..ResultSet::default()
+            });
+        }
+        let declared: Vec<(String, Option<String>)> = stmt
+            .columns()
+            .iter()
+            .map(|c| (c.name().to_string(), c.decl_type().map(|s| s.to_string())))
+            .collect();
+        let columns: Vec<String> = declared.iter().map(|(n, _)| n.clone()).collect();
+        let mut types: Vec<String> = declared
+            .iter()
+            .map(|(_, d)| d.clone().unwrap_or_default())
+            .collect();
+        let mut total = 0usize;
+        let mut truncated = false;
+        let mut page: Vec<Vec<Value>> = Vec::with_capacity(page_rows.min(1024));
+        {
+            let mut rows = stmt.query([]).map_err(|e| map_err(e, sql))?;
+            while let Some(row) = rows.next().map_err(|e| map_err(e, sql))? {
+                if total >= limit {
+                    truncated = true;
+                    break;
+                }
+                let mut vals = Vec::with_capacity(columns.len());
+                for (i, declared_type) in types.iter_mut().enumerate() {
+                    let v = value_from(row.get_ref(i).map_err(|e| map_err(e, sql))?);
+                    if declared_type.is_empty() && total == 0 {
+                        *declared_type = v.type_name().to_ascii_uppercase();
+                    }
+                    vals.push(v);
+                }
+                page.push(vals);
+                total += 1;
+                if page.len() >= page_rows {
+                    // The page boundary is the only place SQLite can stop: it has no out-of-band
+                    // cancel, and the reader is inside one `sqlite3_step`.
+                    let batch = ResultSet {
+                        columns: columns.clone(),
+                        column_types: types.clone(),
+                        rows: std::mem::take(&mut page),
+                        ..ResultSet::default()
+                    };
+                    if !sink(batch) {
+                        break;
+                    }
+                }
+            }
+        }
+        if !page.is_empty() {
+            let batch = ResultSet {
+                columns: columns.clone(),
+                column_types: types.clone(),
+                rows: page,
+                ..ResultSet::default()
+            };
+            sink(batch);
+        }
+        Ok(ResultSet {
+            columns,
+            column_types: types,
+            rows: Vec::new(),
+            affected: 0,
+            last_insert_id: None,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            notices: vec![],
+            truncated,
+        })
+    }
+
     fn run_prepared(&mut self, sql: &str, values: &[Value], limit: usize) -> Result<ResultSet> {
         if sql.trim().is_empty() {
             return Err(Error::query("empty statement"));
@@ -420,6 +511,25 @@ impl Driver for Sqlite {
 
     fn explain(&mut self, sql: &str) -> Result<ResultSet> {
         self.run(&format!("EXPLAIN QUERY PLAN {sql}"), 1000)
+    }
+
+    fn explain_plan(&mut self, sql: &str, _analyze: bool) -> Result<nook_model::plan::Plan> {
+        // `EXPLAIN QUERY PLAN` returns `(id, parent, notused, detail)`: a tree already, with the
+        // server's own ids. SQLite has no ANALYZE form of this, so `analyze` is not offered rather
+        // than silently ignored by the caller.
+        let rs = self.run(&format!("EXPLAIN QUERY PLAN {sql}"), 1000)?;
+        let rows: Vec<(i64, i64, String)> = rs
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r.first().and_then(|v| v.as_i64()).unwrap_or(0),
+                    r.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
+                    r.get(3).map(|v| v.display()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        Ok(nook_model::plan::from_sqlite(&rows))
     }
 
     fn begin(&mut self) -> Result<()> {

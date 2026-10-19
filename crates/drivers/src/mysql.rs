@@ -18,6 +18,8 @@ pub struct MySql {
     cfg: ConnectionConfig,
     database: String,
     in_tx: bool,
+    /// `CONNECTION_ID()`, read once at open. MySQL cancels by connection id.
+    pid: Option<u32>,
 }
 
 impl MySql {
@@ -62,7 +64,9 @@ impl MySql {
             database: cfg.database.clone(),
             in_tx: false,
             cfg: cfg.clone(),
+            pid: None,
         };
+        me.pid = me.one("SELECT CONNECTION_ID()").and_then(|v| v.parse().ok());
         if let Some(db) = me.one("SELECT DATABASE()") {
             if !db.is_empty() {
                 me.database = db;
@@ -328,6 +332,35 @@ impl Driver for MySql {
         }
         rs.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(rs)
+    }
+
+    fn explain_plan(&mut self, sql: &str, analyze: bool) -> Result<nook_model::plan::Plan> {
+        // MySQL has `EXPLAIN ANALYZE` only from 8.0.18, and its output is a text tree, not JSON. The
+        // JSON form is the one every 8.x server has, so that is what this asks for.
+        let _ = analyze;
+        let rs = self.run(&format!("EXPLAIN FORMAT=JSON {sql}"), 100)?;
+        let text = rs
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .map(|v| v.display())
+            .ok_or_else(|| Error::query("the server returned no plan"))?;
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| Error::query(format!("the plan is not JSON: {e}")))?;
+        nook_model::plan::from_mysql(&json)
+            .ok_or_else(|| Error::query("the plan has no \"query_block\""))
+    }
+
+    fn backend_pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    fn cancel(&mut self, pid: u64) -> Result<()> {
+        // The sibling connection runs this, never the one being cancelled. `KILL QUERY` stops the
+        // statement and leaves the session alone, which is what a Stop button means.
+        self.conn
+            .query_drop(format!("KILL QUERY {pid}"))
+            .map_err(|e| Error::query(format!("KILL QUERY {pid}: {e}")))
     }
 
     fn catalog(&mut self) -> Result<Catalog> {

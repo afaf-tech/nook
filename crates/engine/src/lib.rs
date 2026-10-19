@@ -19,6 +19,7 @@ pub mod jobs;
 pub mod parity;
 pub mod profiles;
 pub mod report;
+pub mod runner;
 pub mod sqltext;
 pub mod store;
 pub mod tunnel;
@@ -502,6 +503,9 @@ pub struct SqlState {
     /// Values bound to this tab's named parameters. `Some(None)` is an explicit NULL, which is a
     /// different query from `None` (unbound): one returns rows, the other refuses to run.
     pub params: std::collections::BTreeMap<String, Option<String>>,
+    /// The normalised plan of the last visual explain, so the register can offer a plan view. A plan
+    /// is not rows: drawing it as a table is what `sql.explainVisual` exists to stop.
+    pub plan: Option<serde_json::Value>,
 }
 
 /// The right-hand editor of a split tab. Deliberately the same shape as the left pane's own fields:
@@ -684,6 +688,8 @@ pub struct Session {
     pub pins: Vec<String>,
     pub messages: Vec<Message>,
     pub settings: Settings,
+    /// Background runs (`sql.runAsync`). Owns the workers and their pages.
+    pub runner: crate::runner::Runner,
     next_tab_id: u64,
     /// Start directory for file dialogs and relative dumps.
     pub home: std::path::PathBuf,
@@ -724,6 +730,7 @@ impl Session {
             pins: Vec::new(),
             messages: Vec::new(),
             settings,
+            runner: crate::runner::Runner::new(),
             next_tab_id: 1,
             home,
         };
@@ -1146,6 +1153,46 @@ impl Session {
     }
 
     /// Run a command by id. Unknown ids and unavailable commands are errors, never panics.
+    /// Apply whatever the background workers have produced since the last frame.
+    ///
+    /// This is the one place a page reaches a tab: the worker sends pages, and this appends them to
+    /// the run the tab is watching, so a growing result is a `ResultSet` that keeps getting rows —
+    /// not a second result type. Returns how many jobs changed state, so a caller can tell whether
+    /// the frame needs repainting.
+    pub fn pump(&mut self) -> usize {
+        let messages = self.runner.drain();
+        let mut changed = 0;
+        for (id, message) in messages {
+            let tab_id = self.runner.job(id).and_then(|j| j.tab);
+            let Some(tab_id) = tab_id else { continue };
+            let Some(index) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                // The tab was closed mid-run. The job still finishes; nobody is watching it.
+                continue;
+            };
+            changed += 1;
+            match message {
+                crate::runner::Message::Page(page) => {
+                    append_page(&mut self.tabs[index], page);
+                }
+                crate::runner::Message::Done { elapsed_ms, affected } => {
+                    finish_run(&mut self.tabs[index], elapsed_ms, affected, None);
+                }
+                crate::runner::Message::Failed(error) => {
+                    finish_run(&mut self.tabs[index], 0.0, 0, Some(error));
+                }
+                crate::runner::Message::Cancelled => {
+                    finish_run(
+                        &mut self.tabs[index],
+                        0.0,
+                        0,
+                        Some("cancelled".to_string()),
+                    );
+                }
+            }
+        }
+        changed
+    }
+
     pub fn run(&mut self, id: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let spec = find(id).ok_or_else(|| Error::not_found(format!("unknown command '{id}'")))?;
         let params = Params::from_json(params)?;
@@ -1168,6 +1215,78 @@ impl Session {
     pub fn command_ids() -> Vec<&'static str> {
         registry().iter().map(|c| c.id).collect()
     }
+}
+
+/// Append a page to the statement run the tab is watching, creating that run on the first page.
+///
+/// The run in progress is one `StatementRun` whose `result` grows: the register paints a live row
+/// count from `result.row_count()`, and nothing in the UI needs a second "still loading" shape.
+fn append_page(tab: &mut Tab, page: ResultSet) {
+    if tab.kind != TabKind::Query {
+        return;
+    }
+    let sql = &mut tab.sql;
+    let run = match sql.results.last_mut() {
+        Some(run) if run.error.is_none() => run,
+        _ => {
+            sql.results.push(StatementRun {
+                statement: String::new(),
+                result: Some(ResultSet::default()),
+                elapsed_ms: 0.0,
+                error: None,
+            });
+            // `push` above guarantees a last entry.
+            match sql.results.last_mut() {
+                Some(run) => run,
+                None => return,
+            }
+        }
+    };
+    let target = run.result.get_or_insert_with(ResultSet::default);
+    if target.columns.is_empty() {
+        target.columns = page.columns.clone();
+        target.column_types = page.column_types.clone();
+    }
+    target.rows.extend(page.rows);
+    target.truncated |= page.truncated;
+    target.notices.extend(page.notices);
+    sql.last_result = Some(target.clone());
+    sql.elapsed_ms = target.elapsed_ms;
+}
+
+/// Stop the run the tab is watching: stamp the timing, or the failure, on its last entry.
+fn finish_run(tab: &mut Tab, elapsed_ms: f64, affected: u64, error: Option<String>) {
+    if tab.kind != TabKind::Query {
+        return;
+    }
+    let sql = &mut tab.sql;
+    // A run that failed before its first page never created an entry, and a failure the user cannot
+    // see is the worst kind: create it here so the register has something to paint.
+    if sql.results.is_empty() {
+        sql.results.push(StatementRun {
+            statement: sql.ran_script.clone(),
+            result: None,
+            elapsed_ms,
+            error: None,
+        });
+    }
+    let Some(run) = sql.results.last_mut() else {
+        return;
+    };
+    run.elapsed_ms = elapsed_ms;
+    if let Some(target) = run.result.as_mut() {
+        target.affected += affected;
+        target.elapsed_ms = elapsed_ms;
+    }
+    match error {
+        Some(e) => run.error = Some(e),
+        None => {
+            if let Some(target) = run.result.as_ref() {
+                sql.last_result = Some(target.clone());
+            }
+        }
+    }
+    sql.elapsed_ms = sql.total_ms();
 }
 
 fn default_snippets() -> Vec<Snippet> {

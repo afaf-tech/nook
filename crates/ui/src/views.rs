@@ -1243,14 +1243,18 @@ pub fn monitor(
                 &[
                     ("Dashboard", kind == "dashboard"),
                     ("Sessions", kind == "processes"),
+                    ("Locks", kind == "locks"),
+                    ("Replication", kind == "replication"),
                     ("Status", kind == "status"),
                     ("Variables", kind == "variables"),
                 ],
             ) {
                 requested = Some(match index {
                     1 => "processes",
-                    2 => "status",
-                    3 => "variables",
+                    2 => "locks",
+                    3 => "replication",
+                    4 => "status",
+                    5 => "variables",
                     _ => "dashboard",
                 });
             }
@@ -1319,6 +1323,52 @@ pub fn monitor(
                 RichText::new("click a session row to terminate that connection")
                     .size(11.0)
                     .color(tokens.text_faint),
+            );
+        }
+        "locks" => {
+            let locks = payload["locks"].as_array().cloned().unwrap_or_default();
+            let column_specs = specs(
+                &["blocked", "blocking", "wait_s", "query"],
+                &["text", "text", "text", "text"],
+            );
+            let rows = rows_from(&locks, &["blocked_pid", "blocking_pid", "wait_s", "blocked_query"]);
+            let height = (ui.available_height() - 40.0).max(160.0);
+            list(
+                ui,
+                tokens,
+                List {
+                    gutter: true,
+                    columns: &column_specs,
+                    rows: &rows,
+                    height,
+                    id: egui::Id::new(("locks", tab_index)),
+                    empty: payload["note"].as_str().unwrap_or("no blocking locks"),
+                    row_menu: None,
+                },
+                state.table(tab_index),
+            );
+        }
+        "replication" => {
+            let replicas = payload["replicas"].as_array().cloned().unwrap_or_default();
+            let column_specs = specs(
+                &["client", "state", "sync", "lag_s", "bytes_behind"],
+                &["text", "text", "text", "int8", "int8"],
+            );
+            let rows = rows_from(&replicas, &["client", "state", "sync", "lag_s", "bytes_behind"]);
+            let height = (ui.available_height() - 40.0).max(160.0);
+            list(
+                ui,
+                tokens,
+                List {
+                    gutter: true,
+                    columns: &column_specs,
+                    rows: &rows,
+                    height,
+                    id: egui::Id::new(("replicas", tab_index)),
+                    empty: payload["note"].as_str().unwrap_or("no replicas"),
+                    row_menu: None,
+                },
+                state.table(tab_index),
             );
         }
         "status" | "variables" => {

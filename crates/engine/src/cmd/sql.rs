@@ -84,9 +84,30 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("sql.parameterised", "Parameterised queries", "Query", parameterised)
             .params(r#"{"sql":"select * from u where email = :email","params":{"email":"a@b.c"}}"#)
             .help("The capability: report what this script needs, and run it as a prepared statement when every value is bound."),
-        CommandSpec::new("sql.stop", "Stop", "Query", stop).help(
-            "Cancelling a running statement is not possible yet; each run is bounded by max_rows.",
-        ),
+        CommandSpec::new("sql.runAsync", "Run in the background", "Query", run_async)
+            .params(r#"{"sql":"select * from big","job":true}"#)
+            .help("Same as \"sql.run\", but returns a job id immediately; pages land in the tab as they are read."),
+        CommandSpec::new("sql.jobStatus", "Job status", "Query", job_status)
+            .params(r#"{"job":3}"#)
+            .help("State, rows so far, pages and elapsed time of a background run."),
+        CommandSpec::new("sql.jobs", "List background runs", "Query", jobs)
+            .params(r#"{}"#)
+            .help("Every background run this session has started, newest last."),
+        CommandSpec::new("sql.explainVisual", "Visual explain", "Query", explain_visual)
+            .params(r#"{"sql":"select * from users","analyze":false}"#)
+            .help("The plan as a tree: nodes, costs, edges and the most expensive node. \"sql.explain\" returns the server's own rows."),
+        CommandSpec::new("sql.planVisualiser", "Plan visualiser", "Query", plan_visualiser)
+            .params(r#"{"sql":"select * from users"}"#)
+            .help("The visual explain for the current tab, as the tree the canvas draws."),
+        CommandSpec::new("sql.profiler", "Profile a statement", "Query", profiler)
+            .params(r#"{"sql":"select * from users","runs":10}"#)
+            .help("Run a read-only statement N times and report min, median, max and mean, with whether the runs varied."),
+        CommandSpec::new("sql.cancel", "Cancel a background run", "Query", cancel_job)
+            .params(r#"{"job":3}"#)
+            .help("Asks the server to cancel the job's own backend where the engine allows it, and always sets the flag the worker checks between pages."),
+        CommandSpec::new("sql.stop", "Stop", "Query", stop).params(r#"{"job":3}"#)
+            .shortcut("cmd+.")
+            .help("Cancels the background run this tab is waiting on. A statement that is not running in the background cannot be stopped."),
     ]
 }
 
@@ -999,10 +1020,232 @@ fn run_in_transaction(session: &mut Session, p: &Params) -> Result<serde_json::V
     }))
 }
 
-fn stop(_session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
-    Err(Error::unsupported(
-        "statement cancellation is not implemented; every run is bounded by the max_rows preference",
-    ))
+/// The plan as a tree. Each driver normalises its own output; the UI draws what it gets.
+fn explain_visual(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let sql = sql_from_params_or_editor(session, p)?;
+    let analyze = p.bool_opt("analyze", false);
+    let statement = split(&sql)
+        .first()
+        .cloned()
+        .ok_or_else(|| Error::config("there is nothing to explain"))?;
+    if analyze && !is_read_only(&statement) {
+        return Err(Error::config(
+            "EXPLAIN ANALYZE runs the statement; profiling a write would change the data",
+        ));
+    }
+    let conn = session.resolve_conn(p)?;
+    let plan = session.driver_for(conn)?.explain_plan(&statement, analyze)?;
+    let mut out = plan.to_json();
+    out["statement"] = serde_json::json!(statement);
+    out["analyze"] = serde_json::json!(analyze);
+    out["nodes_total"] = serde_json::json!(plan.nodes.len());
+    // The plan lives on the tab so the register can offer its own view of it: a plan is not rows,
+    // and drawing it as rows is the thing this command exists to stop.
+    if let Ok(tab) = session.active_tab_mut() {
+        tab.sql.plan = Some(out.clone());
+    }
+    Ok(out)
+}
+
+/// The visual explain for this tab, so a caller that already has the editor text does not repeat it.
+fn plan_visualiser(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    explain_visual(session, p)
+}
+
+/// A statement safe to run many times: reading it changes nothing.
+fn is_read_only(sql: &str) -> bool {
+    let head = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    matches!(head.as_str(), "SELECT" | "WITH" | "SHOW" | "EXPLAIN")
+}
+
+/// Run a statement N times and report the spread.
+///
+/// A profiler that reports one number teaches the wrong lesson: the interesting fact is often that
+/// the second run took a tenth as long. So the report always says whether the runs varied, and it
+/// refuses a write outright — running an `UPDATE` fifty times is a data incident, not a measurement.
+fn profiler(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let sql = sql_from_params_or_editor(session, p)?;
+    let statement = split(&sql)
+        .first()
+        .cloned()
+        .ok_or_else(|| Error::config("there is nothing to profile"))?;
+    if !is_read_only(&statement) {
+        return Err(Error::config(format!(
+            "refusing to profile a statement that is not read-only: {} … — running it repeatedly would change the data",
+            statement
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_ascii_uppercase()
+        )));
+    }
+    let runs = p.int_opt("runs", 5).clamp(1, 50) as usize;
+    let conn = session.resolve_conn(p)?;
+    let max_rows = session.settings.max_rows;
+    let mut elapsed: Vec<f64> = Vec::with_capacity(runs);
+    let mut rows = 0usize;
+    let mut plan = None;
+    for _ in 0..runs {
+        let started = std::time::Instant::now();
+        let rs = {
+            let driver = session.driver_for(conn)?;
+            driver.run(&statement, max_rows)?
+        };
+        elapsed.push(started.elapsed().as_secs_f64() * 1000.0);
+        rows = rs.row_count();
+        if plan.is_none() {
+            plan = session
+                .driver_for(conn)
+                .ok()
+                .and_then(|d| d.explain_plan(&statement, false).ok())
+                .map(|p| p.to_json());
+        }
+    }
+    let mut sorted = elapsed.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let min = *sorted.first().unwrap_or(&0.0);
+    let max = *sorted.last().unwrap_or(&0.0);
+    let median = if sorted.len() % 2 == 0 {
+        let mid = sorted.len() / 2;
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[sorted.len() / 2]
+    };
+    let mean = elapsed.iter().sum::<f64>() / elapsed.len() as f64;
+    // 20% is the threshold the spec names: below it, the spread is noise on a shared machine.
+    let varied = max > min * 1.2;
+    let round = |v: f64| (v * 100.0).round() / 100.0;
+    Ok(json!({
+        "statement": statement,
+        "runs": elapsed.iter().map(|v| round(*v)).collect::<Vec<_>>(),
+        "count": runs,
+        "rows": rows,
+        "min_ms": round(min),
+        "median_ms": round(median),
+        "max_ms": round(max),
+        "mean_ms": round(mean),
+        "varied": varied,
+        "note": if varied {
+            format!("the runs varied by more than 20% ({} ms to {} ms); treat the median as the measurement", round(min), round(max))
+        } else {
+            "the runs agreed to within 20%".to_string()
+        },
+        "plan": plan,
+    }))
+}
+
+/// Cancel by job id. The runner asks the driver, which dials a sibling connection: the one running
+/// the statement is busy running it, so it cannot be the one asking.
+fn cancel_job(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let id = job_id(p)?;
+    let job = session
+        .runner
+        .job(id)
+        .ok_or_else(|| Error::not_found(format!("no background run {id}")))?;
+    let conn = job.conn.clone();
+    let index = session
+        .conn_index(&conn)
+        .map_err(|_| Error::not_found(format!("the connection {conn} is no longer open")))?;
+    let cfg = session.conns[index].cfg.clone();
+    // The worker dialled with the profile's password; the sibling has to as well, or the cancel
+    // connection is refused while the statement it wants to stop keeps running.
+    let effective = crate::cmd::dial_config(&cfg)?;
+    let granularity = session.runner.cancel(&effective, id)?;
+    let job = session.runner.job(id).cloned();
+    session.log(
+        Level::Info,
+        format!("cancelling background run {id}: stops {granularity}"),
+    );
+    Ok(serde_json::json!({
+        "job": id,
+        "cancelled": true,
+        "granularity": granularity,
+        "state": job.map(|j| j.state.label().to_string()).unwrap_or_default(),
+    }))
+}
+
+/// Stop the run this tab is waiting on. Without a tab-bound job there is nothing to stop, and saying
+/// so is the honest answer: a synchronous `sql.run` is inside one blocking call and cannot be
+/// interrupted from the frame that is waiting for it.
+fn stop(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    if p.int_opt("job", 0) > 0 {
+        return cancel_job(session, p);
+    }
+    let tab = session.active_tab()?.id;
+    let running = session.runner.running_for_tab(tab).map(|j| j.id);
+    match running {
+        Some(id) => {
+            let mut map = p.raw().clone();
+            map.insert("job".into(), serde_json::json!(id));
+            let params = Params::from_json(serde_json::Value::Object(map))?;
+            cancel_job(session, &params)
+        }
+        None => Err(Error::config(
+            "nothing is running in the background on this tab; a run started with \"sql.run\" \
+             cannot be interrupted — use \"sql.runAsync\" for a statement that may take a while",
+        )),
+    }
+}
+
+fn job_id(p: &Params) -> Result<u64> {
+    let id = p.int_opt("job", 0);
+    if id <= 0 {
+        return Err(Error::config(
+            "pass \"job\": the id \"sql.runAsync\" returned",
+        ));
+    }
+    Ok(id as u64)
+}
+
+fn jobs(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
+    let list: Vec<serde_json::Value> = session.runner.jobs().map(|j| j.to_json()).collect();
+    Ok(serde_json::json!({ "jobs": list, "count": list.len() }))
+}
+
+fn job_status(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let id = job_id(p)?;
+    let job = session
+        .runner
+        .job(id)
+        .ok_or_else(|| Error::not_found(format!("no background run {id}")))?;
+    Ok(job.to_json())
+}
+
+/// Start a run in the background. Everything that can fail before a worker exists — resolving the
+/// connection, reading the keychain, parsing the SQL into statements — happens here, on the calling
+/// thread, so a refusal is the caller's error rather than a job that fails a second later.
+fn run_async(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let sql = sql_from_params_or_editor(session, p)?;
+    let index = session.resolve_conn(p)?;
+    let cfg = crate::cmd::dial_config(&session.conns[index].cfg)?;
+    let limit = match p.int_opt("limit", 0) {
+        n if n > 0 => n.clamp(1, 5_000_000) as usize,
+        _ => session.settings.max_rows,
+    };
+    let page_rows = match p.int_opt("page", 0) {
+        n if n > 0 => n.clamp(1, 100_000) as usize,
+        _ => 1_000,
+    };
+    let tab = session.active_tab().ok().map(|t| t.id);
+    begin_run(session, &sql, split(&sql), pane_is_right(p));
+    let id = session
+        .runner
+        .start(cfg, sql.clone(), limit, page_rows, tab);
+    session.log(
+        Level::Info,
+        format!("background run {id} started; the editor stays usable"),
+    );
+    Ok(serde_json::json!({
+        "job": id,
+        "state": "running",
+        "limit": limit,
+        "page": page_rows,
+        "tab": tab,
+    }))
 }
 
 /// Split a script into statements, keeping the trailing semicolons.

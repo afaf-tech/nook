@@ -180,16 +180,28 @@ process table. This is the pre-existing path for SSH and database passwords too,
 
 ## Known design choices and their ceilings
 
-- **The editor pane carries no running state.** The design's `.prog` hairline, its `Executing…` pill
-  and its running footer are not painted: `sql.run` is a blocking call on the UI thread, so a frame
-  that says a statement is running would be a frame the app cannot draw while it runs. `Stop` exists
-  and is painted disabled, with the command registry's own `sql.stop` help as its hover text, so the
-  control cannot describe the engine differently from the engine. The ceiling is a driver-level cancel
-  with a job id the UI can poll; until then the run is bounded by `max_rows` (see `docs/gaps.md` §7).
-- **The register has two views, grid and JSON.** `docs/edge-cases.md` and the design's mockup show a
-  `Text` view too; it is not built, and `ui.setResultView` lists only the two it accepts. The upgrade
-  path is one more `View` arm beside the JSON one, which is the same serialisation with different
-  wrapping.
+- **`sql.runAsync` is opt-in; `sql.run` still blocks.** The async path exists and is what `Stop`
+  cancels, but the editor's Run button still calls `sql.run`: converting the remaining blocking call
+  sites is named in `docs/gaps.md` §7 as the open work. The pane paints no spinner of its own — it
+  paints the run's live row count, which is the same number the register's note shows, because two
+  places describing one run differently is the failure this avoids.
+- **Cancel needs a second connection.** A server cannot be asked to cancel the statement the only
+  connection is busy executing, so `Runner::cancel` dials a sibling from the same profile (password
+  included, via `dial_config`) and issues `pg_cancel_backend` / `KILL QUERY`. SQLite has no such call:
+  it stops at a page boundary and the command says exactly that instead of claiming a stop.
+- **A server-side cancel is `Cancelled`, not `Failed`.** Postgres answers a cancelled statement with
+  an error; the worker's own flag is the only thing that knows the user asked, so the flag decides
+  the verdict.
+- **A background run's pages land in one `StatementRun` that grows.** There is no second result type:
+  `SqlState::results[..].result` gains rows, and the register paints its `row_count()` live. The
+  ceiling is that the rows still accumulate in memory, bounded by `max_rows` — streaming to disk is
+  phase 5's `export.stream`.
+- **The plan view is offered only when the tab has a plan.** `sql.explainVisual` normalises each
+  engine's own output (`FORMAT JSON` on Postgres and MySQL, the `(id, parent, detail)` rows on
+  SQLite) into `nook_model::plan::Plan`; the UI parses nothing. The ceiling is a tree, not a flame
+  graph: no cost heat-map across edges.
+- **The register has three views, grid, JSON and plan.** `docs/edge-cases.md` and the design's mockup
+  show a `Text` view too; it is not built, and `ui.setResultView` lists only the three it accepts.
 - **A result tab cannot be closed.** The register's tab row is one tab per statement of the last run —
   the run's own shape — so closing one would ask what the editor should then run. Re-running a script
   reopens every tab it holds; the upgrade path is a per-tab `closed` flag the next run respects.

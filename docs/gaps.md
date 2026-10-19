@@ -61,21 +61,27 @@ Shipped: `tools.importExcel` reads the first sheet of an `.xlsx` (calamine) thro
 `tools.exportExcel` writes a query result as a plain one-sheet workbook. Still open: styles,
 multi-sheet output and `.xls` (legacy binary) input.
 
-## 7. Cancelling a running statement
+## 7. ~~Cancelling a running statement~~ — engine done, UI wiring open
 
-A long query cannot be stopped from the app: each run is bounded by `max_rows`, which limits rows but
-not time. Needs a driver-level cancel (Postgres `pg_cancel_backend` on the same backend, MySQL `KILL
-QUERY`). (`sql.stop`)
+Shipped: `sql.runAsync` starts a run on a worker and reports pages as they land; `sql.stop` /
+`sql.cancel` cancel it. The worker dials its own connection and records the backend pid, so a cancel
+dials a sibling connection from the same profile and issues `pg_cancel_backend` (Postgres) or
+`KILL QUERY` (MySQL). SQLite has no server-side cancel: it stops between pages and the command's
+answer says exactly that. A cancelled run's state is `cancelled`, never `failed`.
 
-The UI's half is built: the editor's `Stop` control exists and is painted disabled, and its hover text
-is the command registry's own `sql.stop` help, so the button cannot claim more than the engine can do.
-`sql.run` blocks the UI thread, which is why no frame claims a statement is running. The ceiling is a
-job id the UI can poll plus a driver-level cancel, at which point `Stop` becomes a live button.
+Still open: the editor's Run button still calls blocking `sql.run`, so the design's `Executing…` pill
+and `.prog` hairline are still not painted. Converting the remaining call sites to `sql.runAsync` and
+polling `sql.jobStatus` per frame is the wiring, not the mechanism.
 
-## 8. Visual explain plans and a profiler
+## 8. ~~Visual explain plans and a profiler~~ — done
 
-`EXPLAIN` output is tabular. A plan graph and a per-query profile are what Navicat's monitor tab
-offers next. (`sql.planVisualiser`, `sql.profiler`, `monitor.locks`, `monitor.replication`)
+Shipped: `sql.explainVisual` normalises each engine's own plan into a tree (`FORMAT JSON` on Postgres
+and MySQL, `(id, parent, detail)` rows on SQLite), flags the most expensive node, and refuses
+`analyze` on a statement that would write. The register's third view draws it. `sql.profiler` runs a
+read `n` times (capped at 50), reports min/median/max and the spread, and refuses a write before it
+runs. `monitor.locks` and `monitor.replication` read each server's own views and refuse on SQLite
+instead of returning an empty table that reads as "nothing is blocked". `monitor.alerts` evaluates
+rules against `monitor.status` metrics and refuses a metric name it does not have.
 
 ## 9. More engines
 
