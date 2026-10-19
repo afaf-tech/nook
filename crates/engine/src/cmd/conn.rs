@@ -35,11 +35,11 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("conn.serverInfo", "Server information", "Connection", server_info),
         CommandSpec::new("conn.savePassword", "Save password in the keychain", "Connection", save_password)
             .params(r#"{"password":"…"}"#)
-            .help("macOS: stored in the login keychain, never in the profile file."),
+            .help("Stored in the OS keychain, never in the profile file. Where no keychain answers, the profile keeps it at mode 0600."),
         CommandSpec::new("conn.forgetPassword", "Remove the saved password", "Connection", forget_password),
         CommandSpec::new("conn.sshPassword", "SSH password in the keychain", "Connection", ssh_password)
             .params(r#"{"password":"…"}"#)
-            .help("macOS: the tunnel password is kept in the login keychain under its own account, so ssh reads it back through --ssh-askpass and never from an argument; {\"remove\":true} forgets it. Elsewhere there is no keychain and ssh asks on connect."),
+            .help("The tunnel password is kept in the OS keychain under its own account, so ssh reads it back through --ssh-askpass and never from an argument; {\"remove\":true} forgets it. Where no keychain answers, ssh asks on connect."),
         CommandSpec::new("conn.setReadOnly", "Read-only mode", "Connection", set_read_only)
             .params(r#"{"read_only":true}"#),
         CommandSpec::new("conn.setSshTunnel", "SSH tunnel settings", "Connection", set_ssh)

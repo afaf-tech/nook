@@ -89,7 +89,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Connection",
         "conn.savePassword",
         "Save password",
-        "macOS login keychain, never the profile file",
+        "the OS keychain: security on macOS, secret-tool on linux; windows keeps the profile at 0600",
     ),
     (
         "Connection",
@@ -161,7 +161,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Connection",
         "conn.sshPassword",
         "SSH by password",
-        "macOS login keychain under a separate account; ssh reads it back through --ssh-askpass",
+        "the OS keychain under a separate account; ssh reads it back through --ssh-askpass",
     ),
     (
         "Connection",
@@ -416,13 +416,13 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Query",
         "sql.stop",
         "Stop a running statement",
-        "not implemented; runs are row-bounded instead",
+        "cancels a background run; rows already read stay",
     ),
     (
         "Query",
         "sql.parameterised",
         "Parameterised queries",
-        "not implemented; literals are escaped on the client",
+        ":name bound as a real prepared statement, not spliced into the sql",
     ),
     (
         "Query",
@@ -434,13 +434,13 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Query",
         "sql.profiler",
         "Query profiler",
-        "not implemented; EXPLAIN covers the common case",
+        "per-statement timings over a run, with the slowest named",
     ),
     (
         "Query",
         "sql.planVisualiser",
         "Visual explain plan",
-        "explain output is tabular, not drawn",
+        "the explain plan as a tree the canvas draws, node by node",
     ),
     // ---------------------------------------------------------------- Import/Export
     (
@@ -630,7 +630,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Automation",
         "job.agent",
         "Deploy jobs to an automation agent",
-        "not implemented; jobs run on this machine",
+        "pushes a job bundle to a remote `nook-cli job serve` over SSH",
     ),
     (
         "Automation",
@@ -674,25 +674,25 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Monitor",
         "monitor.charts",
         "Live charts",
-        "the dashboard data feeds the report charts",
+        "a saved board re-asked on a cadence; the ui tick asks, no second timer",
     ),
     (
         "Monitor",
         "monitor.locks",
         "Lock and deadlock reports",
-        "not implemented",
+        "blocking pairs, with the waiting query and its blocker",
     ),
     (
         "Monitor",
         "monitor.replication",
         "Replication status",
-        "not implemented",
+        "replica lag and state per server",
     ),
     (
         "Monitor",
         "monitor.alerts",
         "Threshold alerts",
-        "not implemented",
+        "threshold rules; a tripped rule runs a job or posts a webhook",
     ),
     // ---------------------------------------------------------------- Privileges
     (
@@ -727,7 +727,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Privileges",
         "priv.audit",
         "Privilege audit report",
-        "not implemented",
+        "every grant per object, and where it came from",
     ),
     // ---------------------------------------------------------------- Report and modeler
     (
@@ -752,19 +752,19 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Report",
         "report.designer",
         "Report designer with layout",
-        "not implemented; charts are live views",
+        "a saved report: sql, chart kind, label and tile layout",
     ),
     (
         "Report",
         "report.biDashboard",
         "BI dashboard",
-        "not implemented",
+        "a board of saved reports on a 12-column grid",
     ),
     (
         "Report",
         "report.export",
         "Export a report",
-        "export the underlying result as csv or markdown",
+        "a report or a whole board as one self-contained html file, or csv",
     ),
     (
         "Modeler",
@@ -842,7 +842,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Tools",
         "tools.dataProfiling",
         "Data profiling",
-        "not implemented; use an aggregate report",
+        "per column: null share, distincts, commonest values, shape guess",
     ),
     (
         "Tools",
@@ -902,7 +902,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Platform",
         "platform.cli",
         "Command line tool",
-        "nook-cli exists and shares command ids; not a command itself",
+        "the binary's version, command count and whether it is on PATH",
     ),
     (
         "Platform",
@@ -947,7 +947,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "AI",
         "ai.setKey",
         "AI API key",
-        "stored in the login keychain, never in the profile file",
+        "stored in the OS keychain, never in the profile file",
     ),
     (
         "AI",
@@ -991,5 +991,54 @@ mod tests {
         assert_eq!(before, ids.len(), "duplicate catalog ids");
         assert!(before > 150, "the catalog should be a real feature list");
         assert!(catalog().iter().all(|e| !e.label.trim().is_empty()));
+    }
+
+    #[test]
+    fn no_note_promises_a_keychain_only_one_platform_has() {
+        // Phase 9 added a Linux backend, so a note naming macOS as the only keychain is a claim about
+        // a platform we no longer mean. `conn.savePassword`, `conn.sshPassword` and `ai.setKey` all
+        // said "macOS login keychain" after that landed.
+        for entry in catalog() {
+            assert!(
+                !entry.note.contains("macOS login keychain"),
+                "{}: the keychain is not macOS-only any more: {:?}",
+                entry.id,
+                entry.note
+            );
+        }
+        for spec in crate::registry() {
+            assert!(
+                !spec.help.contains("macOS: "),
+                "{}: the help still opens with a macOS-only claim: {:?}",
+                spec.id,
+                spec.help
+            );
+        }
+    }
+
+    #[test]
+    fn a_note_never_claims_a_shipped_command_is_missing() {
+        // The catalog is what `nook-cli parity` prints, and the parity count is computed from ids. So
+        // the count can rise while the rows beside it still say the feature is missing — which is
+        // exactly what happened to the fourteen ids the phase-9 pass closed.
+        let registry = crate::registry();
+        let mut wrong: Vec<String> = Vec::new();
+        for entry in catalog() {
+            let shipped = registry.iter().any(|c| c.id == entry.id);
+            // Only one direction is a lie. An open entry may describe its gap however it likes
+            // ("catalogued, no driver yet", "not yet run green"); a shipped one may not say the
+            // feature is missing.
+            if shipped && entry.note.contains("not implemented") {
+                wrong.push(format!(
+                    "{}: the command exists, note = {:?}",
+                    entry.id, entry.note
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the catalog disagrees with the registry:\n{}",
+            wrong.join("\n")
+        );
     }
 }

@@ -50,6 +50,7 @@ pub enum JobKind {
     SyncStructure,
     Datagen,
     Report,
+    Alerts,
 }
 
 impl JobKind {
@@ -63,22 +64,26 @@ impl JobKind {
             JobKind::SyncStructure => "structure synchronization",
             JobKind::Datagen => "generate data",
             JobKind::Report => "report",
+            JobKind::Alerts => "alerts",
         }
     }
     pub fn parse(s: &str) -> Option<JobKind> {
         match s.to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
-            "query" | "sql" => Some(JobKind::Query),
+            "query" | "runquery" | "sql" => Some(JobKind::Query),
             "backup" | "dump" => Some(JobKind::Backup),
             "restore" => Some(JobKind::Restore),
-            "transfer" => Some(JobKind::Transfer),
-            "syncdata" | "datasync" => Some(JobKind::SyncData),
-            "syncstructure" | "structuresync" => Some(JobKind::SyncStructure),
-            "datagen" | "generate" => Some(JobKind::Datagen),
+            "transfer" | "datatransfer" => Some(JobKind::Transfer),
+            "syncdata" | "datasync" | "datasynchronization" => Some(JobKind::SyncData),
+            "syncstructure" | "structuresync" | "structuresynchronization" => {
+                Some(JobKind::SyncStructure)
+            }
+            "datagen" | "generate" | "generatedata" => Some(JobKind::Datagen),
             "report" => Some(JobKind::Report),
+            "alerts" | "alert" => Some(JobKind::Alerts),
             _ => None,
         }
     }
-    pub fn all() -> [JobKind; 8] {
+    pub fn all() -> [JobKind; 9] {
         [
             JobKind::Query,
             JobKind::Backup,
@@ -88,6 +93,7 @@ impl JobKind {
             JobKind::SyncStructure,
             JobKind::Datagen,
             JobKind::Report,
+            JobKind::Alerts,
         ]
     }
 }
@@ -264,6 +270,9 @@ impl Job {
             JobKind::SyncStructure => "sync.structure",
             JobKind::Datagen => "tools.datagen",
             JobKind::Report => "report.chart",
+            // The rule set, not one rule: the command evaluates every enabled rule against the
+            // metrics already collected and POSTs whatever tripped.
+            JobKind::Alerts => "monitor.alerts",
         }
     }
 
@@ -530,5 +539,60 @@ mod tests {
         assert!(store.get("a").is_some());
         assert!(store.get("missing").is_none());
         assert!(store.remove("missing").is_err());
+    }
+
+    use super::*;
+
+    #[test]
+    fn every_kind_maps_to_a_command_that_exists() {
+        // A job kind whose command id is not registered is a scheduler that cannot run it, which is
+        // what `monitor.alerts` was until its help text was checked against the registry.
+        let registry = crate::registry();
+        for kind in JobKind::all() {
+            let job = Job::new("probe", "probe", kind);
+            let id = job.command_id();
+            assert!(
+                registry.iter().any(|c| c.id == id),
+                "{kind:?} drives {id}, which is not a registered command"
+            );
+        }
+    }
+
+    #[test]
+    fn the_create_help_lists_every_kind() {
+        // `job.create`'s help is the only place a user learns which kinds exist, and a static string
+        // cannot be derived from the enum. Adding a kind without naming it there is how `alerts`
+        // shipped undocumented.
+        let help = crate::registry()
+            .iter()
+            .find(|c| c.id == "job.create")
+            .expect("job.create is registered")
+            .help;
+        // The name a caller types, which is the enum's own snake_case name — not the label, which is
+        // prose ("run query") for the job list.
+        for kind in JobKind::all() {
+            let name = match kind {
+                JobKind::Query => "query",
+                JobKind::Backup => "backup",
+                JobKind::Restore => "restore",
+                JobKind::Transfer => "transfer",
+                JobKind::SyncData => "sync_data",
+                JobKind::SyncStructure => "sync_structure",
+                JobKind::Datagen => "datagen",
+                JobKind::Report => "report",
+                JobKind::Alerts => "alerts",
+            };
+            assert!(
+                help.contains(name),
+                "job.create's help does not mention {name:?}: {help}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kind_survives_a_round_trip_through_its_own_name() {
+        for kind in JobKind::all() {
+            assert_eq!(JobKind::parse(kind.label()), Some(kind), "{kind:?}");
+        }
     }
 }

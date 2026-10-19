@@ -714,3 +714,51 @@ fn job_profiles_names_the_store_and_the_format_that_moves_it() {
     assert_eq!(out["bundle"]["write"], json!("job.export"), "{out}");
     assert!(out["jobs"].as_u64().is_some(), "{out}");
 }
+
+#[test]
+fn the_designer_stores_what_it_was_given_and_reads_it_back() {
+    let mut f = Fixture::new("designer");
+    let name = "the-designer-stores-what-it-was-given-and-reads-it-back";
+    // The store outlives the test process, so a previous run's row would make the "blank draft" half
+    // pass or fail on history rather than on behaviour.
+    let _ = f.run("report.delete", json!({"name": name}));
+    // A name alone is a read: a report that does not exist opens as a blank draft.
+    let draft = f.run("report.designer", json!({"name": name}));
+    assert_eq!(draft["exists"], json!(false), "{draft}");
+    assert_eq!(draft["saved"], json!(false), "{draft}");
+    // Any write parameter stores it — the help says the designer is the save surface.
+    let saved = f.run(
+        "report.designer",
+        json!({"name": name, "sql": "select day, total from sales", "chart": "line", "label": "day", "layout": {"w": 6, "h": 4}}),
+    );
+    assert_eq!(saved["saved"], json!(true), "{saved}");
+    let back = f.run("report.list", json!({}));
+    let listed = back["reports"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r["name"] == json!(name))
+        .unwrap_or_else(|| panic!("the designer wrote nothing: {back}"));
+    assert_eq!(listed["chart"], json!("line"), "{listed}");
+    assert_eq!(
+        listed["sql"],
+        json!("select day, total from sales"),
+        "{listed}"
+    );
+    assert_eq!(listed["options"]["layout"]["w"], json!(6), "{listed}");
+}
+
+#[test]
+fn the_designer_refuses_a_chart_kind_it_cannot_paint() {
+    let mut f = Fixture::new("designer-chart");
+    let why = f.refuse(
+        "report.designer",
+        json!({"name": "the-designer-refuses-a-chart-kind-it-cannot-paint", "sql": "select 1", "chart": "sunburst"}),
+    );
+    assert!(why.contains("sunburst"), "{why}");
+    assert!(
+        why.contains("line"),
+        "the refusal names what it accepts: {why}"
+    );
+}

@@ -18,7 +18,7 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("Every provider Nook can talk to with its default endpoint and whether a key is set. Never echoes the key."),
         CommandSpec::new("ai.setKey", "Save an API key", "AI", set_key)
             .params(r#"{"provider":"openai","key":"sk-…"}"#)
-            .help("macOS: stored in the login keychain under ai.<provider>, never in the profile file. Omit \"provider\" for the active one. Elsewhere set NOOK_AI_KEY instead."),
+            .help("Stored in the OS keychain under ai.<provider>, never in the profile file. Omit \"provider\" for the active one. Where no keychain answers, set NOOK_AI_KEY instead."),
         CommandSpec::new("ai.clearKey", "Forget an API key", "AI", clear_key)
             .params(r#"{"provider":"openai"}"#),
         CommandSpec::new("ai.tables", "Tables for the prompt", "AI", tables)

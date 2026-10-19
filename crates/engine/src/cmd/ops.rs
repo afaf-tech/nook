@@ -61,7 +61,7 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("job.list", "Scheduled jobs", "Automation", job_list),
         CommandSpec::new("job.create", "Create a job", "Automation", job_create)
             .params(r#"{"id":"nightly","name":"Nightly backup","kind":"backup","conn":"local","params":{"path":"~/backups/shop.sql"},"schedule":"03:00"}"#)
-            .help("kind: query, backup, restore, transfer, sync_data, sync_structure, datagen, report. schedule: \"03:00\", \"every 15m\" or \"manual\"."),
+            .help("kind: query, backup, restore, transfer, sync_data, sync_structure, datagen, report, alerts. schedule: \"03:00\", \"every 15m\" or \"manual\"."),
         CommandSpec::new("job.delete", "Delete a job", "Automation", job_delete).params(r#"{"id":"nightly"}"#),
         CommandSpec::new("job.setEnabled", "Enable or disable a job", "Automation", job_set_enabled)
             .params(r#"{"id":"nightly","enabled":false}"#),

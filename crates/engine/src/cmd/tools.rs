@@ -1919,7 +1919,36 @@ fn report_designer(_session: &mut Session, p: &Params) -> Result<serde_json::Val
         options["layout"] = layout.clone();
         report["options"] = options;
     }
-    Ok(json!({ "report": report, "exists": exists }))
+    // A name on its own is a read: the designer opens a report it has not seen as a blank draft. Any
+    // write parameter means the caller is editing, and the help promises the edit is stored — so it
+    // is, or the command is a draft surface pretending to be a save surface.
+    let writing = p.get("sql").is_some()
+        || p.get("chart").is_some()
+        || p.get("label").is_some()
+        || p.get("layout").is_some();
+    if writing {
+        let chart = report["chart"].as_str().unwrap_or("table").to_string();
+        // Refused before the write, not after: a stored report with an unknown chart kind is a board
+        // that fails to paint on every reload.
+        if ChartKind::parse(&chart).is_none() {
+            return Err(Error::config(format!(
+                "unknown chart {chart:?}; use one of {}",
+                ChartKind::all()
+                    .iter()
+                    .map(|k| k.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        crate::store::save_report(
+            &name,
+            report["sql"].as_str().unwrap_or_default(),
+            &chart,
+            report["label"].as_str().unwrap_or_default(),
+            &report["options"],
+        )?;
+    }
+    Ok(json!({ "report": report, "exists": exists, "saved": writing }))
 }
 
 fn report_dashboard(_session: &mut Session, p: &Params) -> Result<serde_json::Value> {
