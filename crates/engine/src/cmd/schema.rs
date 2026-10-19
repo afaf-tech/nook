@@ -1,7 +1,7 @@
 //! Schema commands: the table designer, object DDL, indexes and foreign keys.
 
 use nook_core::{quote_ident, quote_qualified, Dialect, Error, Result};
-use nook_model::ddl;
+use nook_model::{ddl, Table};
 use serde_json::json;
 
 use crate::cmd::{dialect_name, run_sql};
@@ -375,56 +375,7 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
                 .ok_or_else(|| Error::not_found(format!("no column '{name}'")))?;
             column.primary_key = true;
         }
-        let driver = session.driver_for(index)?;
-        let script =
-            driver.rebuild_table(reference.schema.as_deref(), &table, &table.columns.clone())?;
-        // The plan's first and last statements are pragmas — SQLite ignores them inside a
-        // transaction — so they run outside; every step in between is atomic. A failure after
-        // DROP TABLE would otherwise leave the rows stranded in {table}_dc_new and the session
-        // without its pragma restore.
-        // A rebuild cannot run inside a transaction the user already opened: the plan's pragma
-        // OFF would be a silent no-op in it (DROP TABLE would cascade child rows), and BEGIN
-        // would fail with "cannot start a transaction within a transaction". Fail fast.
-        if session.driver_for(index)?.in_transaction() {
-            return Err(Error::config(
-                "commit or roll back the open transaction before rebuilding the table",
-            ));
-        }
-        let (pre, body, post): (Vec<_>, Vec<_>, Vec<_>) = {
-            let mut pre = Vec::new();
-            let mut body = Vec::new();
-            let mut post = Vec::new();
-            for sql in script.into_iter() {
-                if sql.trim_start().to_ascii_lowercase().starts_with("pragma") {
-                    if body.is_empty() {
-                        pre.push(sql);
-                    } else {
-                        post.push(sql);
-                    }
-                } else {
-                    body.push(sql);
-                }
-            }
-            (pre, body, post)
-        };
-        for sql in &pre {
-            run_sql(session, index, sql, Some(1))?;
-        }
-        let outcome = (|| -> Result<()> {
-            session.driver_for(index)?.begin()?;
-            for sql in &body {
-                if let Err(e) = run_sql(session, index, sql, Some(1)) {
-                    let _ = session.driver_for(index)?.rollback();
-                    return Err(e);
-                }
-            }
-            session.driver_for(index)?.commit()
-        })();
-        for sql in &post {
-            run_sql(session, index, sql, Some(1))?;
-        }
-        outcome?;
-        return execute_ddl(session, index, &[]);
+        return rebuild(session, index, reference.schema.as_deref(), &table);
     }
     let sql = ddl::add_primary_key(
         reference.schema.as_deref(),
@@ -433,6 +384,70 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
         dialect,
     )?;
     execute_ddl(session, index, &[sql])
+}
+
+/// Run a SQLite table rebuild for `table`'s current columns, atomically.
+///
+/// One implementation for every caller: `set_primary_key` and `schema.tableRebuild` both hand the
+/// driver a table they have already modified, so neither can invent a second rebuild with different
+/// transaction rules.
+///
+/// The plan's first and last statements are pragmas — SQLite ignores them inside a transaction — so
+/// they run outside; every step in between is atomic. A failure after DROP TABLE would otherwise
+/// leave the rows stranded in {table}_dc_new and the session without its pragma restore. A rebuild
+/// cannot run inside a transaction the user already opened: the plan's pragma OFF would be a silent
+/// no-op in it (DROP TABLE would cascade child rows), and BEGIN would fail with "cannot start a
+/// transaction within a transaction".
+fn rebuild(
+    session: &mut Session,
+    index: usize,
+    schema: Option<&str>,
+    table: &Table,
+) -> Result<serde_json::Value> {
+    if session.driver_for(index)?.in_transaction() {
+        return Err(Error::config(
+            "commit or roll back the open transaction before rebuilding the table",
+        ));
+    }
+    let script = {
+        let driver = session.driver_for(index)?;
+        driver.rebuild_table(schema, table, &table.columns.clone())?
+    };
+    let (pre, body, post): (Vec<_>, Vec<_>, Vec<_>) = {
+        let mut pre = Vec::new();
+        let mut body = Vec::new();
+        let mut post = Vec::new();
+        for sql in script.into_iter() {
+            if sql.trim_start().to_ascii_lowercase().starts_with("pragma") {
+                if body.is_empty() {
+                    pre.push(sql);
+                } else {
+                    post.push(sql);
+                }
+            } else {
+                body.push(sql);
+            }
+        }
+        (pre, body, post)
+    };
+    for sql in &pre {
+        run_sql(session, index, sql, Some(1))?;
+    }
+    let outcome = (|| -> Result<()> {
+        session.driver_for(index)?.begin()?;
+        for sql in &body {
+            if let Err(e) = run_sql(session, index, sql, Some(1)) {
+                let _ = session.driver_for(index)?.rollback();
+                return Err(e);
+            }
+        }
+        session.driver_for(index)?.commit()
+    })();
+    for sql in &post {
+        run_sql(session, index, sql, Some(1))?;
+    }
+    outcome?;
+    execute_ddl(session, index, &[])
 }
 
 fn drop_column(session: &mut Session, p: &Params) -> Result<serde_json::Value> {

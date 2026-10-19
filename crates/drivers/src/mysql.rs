@@ -24,6 +24,7 @@ impl MySql {
     pub fn open(cfg: &ConnectionConfig) -> Result<Self> {
         let mut opts = Opts::from_url(&cfg.uri())
             .map_err(|e| Error::config(format!("connection string: {e}")))?;
+        let plain = OptsBuilder::from_opts(opts.clone());
         if cfg.ssl != nook_core::SslMode::Disable {
             let verify = matches!(
                 cfg.ssl,
@@ -37,8 +38,25 @@ impl MySql {
                 ))
                 .into();
         }
-        let conn = Conn::new(opts)
-            .map_err(|e| Error::connect(format!("{}:{}: {e}", cfg.target().0, cfg.target().1)))?;
+        // `prefer` means "TLS if the server offers it". The mysql crate treats a requested TLS that
+        // the server cannot do as a hard error, so the preference has to be spent here: try the
+        // encrypted connection, and fall back to a plaintext one only when the failure is the
+        // server's lack of TLS — never when a certificate actually failed to verify.
+        let conn = match Conn::new(opts) {
+            Ok(conn) => conn,
+            Err(e) if cfg.ssl == nook_core::SslMode::Prefer && !is_tls_verification(&e) => {
+                Conn::new(plain).map_err(|e| {
+                    Error::connect(format!("{}:{}: {e}", cfg.target().0, cfg.target().1))
+                })?
+            }
+            Err(e) => {
+                return Err(Error::connect(format!(
+                    "{}:{}: {e}",
+                    cfg.target().0,
+                    cfg.target().1
+                )))
+            }
+        };
         let mut me = MySql {
             conn,
             database: cfg.database.clone(),
@@ -68,6 +86,28 @@ impl MySql {
             .and_then(|rows| rows.into_iter().next())
             .and_then(|r| r.into_iter().next())
     }
+}
+
+/// A bound value, in the driver's own type. Everything the parameter path can carry is a string, a
+/// number or NULL — `bind_placeholders` never produces anything else — so the mapping is total for
+/// the values it can actually see.
+fn to_my_value(v: &Value) -> MyValue {
+    match v {
+        Value::Null => MyValue::NULL,
+        Value::Bool(b) => MyValue::Int(i64::from(*b)),
+        Value::Int(i) => MyValue::Int(*i),
+        Value::UInt(u) => MyValue::UInt(*u),
+        Value::Float(f) => MyValue::Double(*f),
+        Value::Bytes(b) => MyValue::Bytes(b.clone()),
+        other => MyValue::Bytes(other.as_text().into_bytes()),
+    }
+}
+
+/// True when the connection failed because the certificate could not be trusted. Falling back to
+/// plaintext in that case would silently downgrade a connection the user asked to verify.
+fn is_tls_verification(e: &mysql::Error) -> bool {
+    let text = e.to_string().to_ascii_lowercase();
+    text.contains("certificate") || text.contains("cert")
 }
 
 fn to_value(v: &MyValue, ty: Option<&ColumnType>) -> Value {
@@ -230,6 +270,55 @@ impl Driver for MySql {
         } else {
             self.conn
                 .query_drop(sql)
+                .map_err(|e| Error::query(format!("{e}")))?;
+            rs.affected = self.conn.affected_rows();
+            let last = self.conn.last_insert_id();
+            if last > 0 {
+                rs.last_insert_id = Some(last);
+            }
+        }
+        rs.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(rs)
+    }
+
+    fn run_prepared(&mut self, sql: &str, values: &[Value], limit: usize) -> Result<ResultSet> {
+        if sql.trim().is_empty() {
+            return Err(Error::query("empty statement"));
+        }
+        guard_read_only(self.cfg.read_only, sql)?;
+        let started = Instant::now();
+        let limit = limit.max(1);
+        // The `mysql` crate binds `Vec<Value>` positionally, which is exactly the shape
+        // `bind_placeholders` produces (`?` per slot, in order).
+        let bound: Vec<MyValue> = values.iter().map(to_my_value).collect();
+        let mut rs = ResultSet::default();
+        if nook_core::returns_rows(sql) {
+            let mut qr = self
+                .conn
+                .exec_iter(sql, mysql::Params::Positional(bound))
+                .map_err(|e| Error::query(format!("{e}")))?;
+            let columns: Vec<MyColumn> = qr.columns().as_ref().to_vec();
+            rs.columns = columns.iter().map(|c| c.name_str().to_string()).collect();
+            rs.column_types = columns.iter().map(type_name).collect();
+            for row in qr.by_ref() {
+                let row: Row = row.map_err(|e| Error::query(format!("{e}")))?;
+                if rs.rows.len() >= limit {
+                    rs.truncated = true;
+                    break;
+                }
+                let mut vals = Vec::with_capacity(columns.len());
+                for i in 0..columns.len() {
+                    let v = row.as_ref(i).cloned().unwrap_or(MyValue::NULL);
+                    let column_type = columns.get(i).map(|c| c.column_type());
+                    vals.push(to_value(&v, column_type.as_ref()));
+                }
+                rs.rows.push(vals);
+            }
+            drop(qr);
+            rs.affected = self.conn.affected_rows();
+        } else {
+            self.conn
+                .exec_drop(sql, mysql::Params::Positional(bound))
                 .map_err(|e| Error::query(format!("{e}")))?;
             rs.affected = self.conn.affected_rows();
             let last = self.conn.last_insert_id();
