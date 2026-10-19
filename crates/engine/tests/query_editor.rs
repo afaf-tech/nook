@@ -28,7 +28,9 @@ impl Fixture {
             .expect("a sqlite URI parses");
         let mut session = Session::new();
         session.conns.push(Conn::new(cfg));
-        let index = session.conn_index(&session.conns[0].cfg.id.clone()).expect("registered");
+        let index = session
+            .conn_index(&session.conns[0].cfg.id.clone())
+            .expect("registered");
         open_now(&mut session, index).expect("sqlite opens");
         Fixture { session, path }
     }
@@ -102,7 +104,10 @@ fn a_bound_parameter_runs_as_a_prepared_statement() {
     let mut f = Fixture::new("prepared");
     users(&mut f);
     f.open_query_tab();
-    f.run("sql.setParameter", json!({ "name": "email", "value": "a@b.c" }));
+    f.run(
+        "sql.setParameter",
+        json!({ "name": "email", "value": "a@b.c" }),
+    );
     let out = f.run(
         "sql.run",
         json!({ "sql": "select name from users where email = :email" }),
@@ -136,7 +141,10 @@ fn a_value_with_a_quote_and_a_semicolon_runs_without_changing_the_statement() {
         !prepared.contains("o'brien"),
         "the value leaked into the prepared text: {prepared}"
     );
-    assert!(prepared.contains('?'), "the placeholder is in the text: {prepared}");
+    assert!(
+        prepared.contains('?'),
+        "the placeholder is in the text: {prepared}"
+    );
     // The table is still there, which is what a hostile value would have taken.
     let out = f.run("sql.run", json!({ "sql": "select count(*) from users" }));
     assert_eq!(out["data"][0][0], 3);
@@ -165,7 +173,10 @@ fn an_explicit_null_is_a_binding_and_an_unset_one_is_not() {
     users(&mut f);
     f.open_query_tab();
     // Bound to NULL: the query runs and matches nothing.
-    f.run("sql.setParameter", json!({ "name": "email", "value": null }));
+    f.run(
+        "sql.setParameter",
+        json!({ "name": "email", "value": null }),
+    );
     let out = f.run(
         "sql.run",
         json!({ "sql": "select name from users where email = :email" }),
@@ -173,7 +184,10 @@ fn an_explicit_null_is_a_binding_and_an_unset_one_is_not() {
     assert_eq!(out["rows"], 0, "email = NULL matches nothing, and it ran");
 
     // Cleared: the run refuses instead of sending the placeholder.
-    f.run("sql.setParameter", json!({ "name": "email", "clear": true }));
+    f.run(
+        "sql.setParameter",
+        json!({ "name": "email", "clear": true }),
+    );
     let message = f.refuse(
         "sql.run",
         json!({ "sql": "select name from users where email = :email" }),
@@ -209,11 +223,8 @@ fn find_and_replace_reports_the_ranges_it_touched() {
     assert_eq!(out["replaced"], 0, "an empty editor has nothing to replace");
 
     // Set the text through the editor, then replace.
-    f.session
-        .active_tab_mut()
-        .expect("a tab")
-        .sql
-        .text = "select * from users where users.id = 1".into();
+    f.session.active_tab_mut().expect("a tab").sql.text =
+        "select * from users where users.id = 1".into();
     let out = f.run(
         "sql.findReplace",
         json!({ "find": "users", "replace": "accounts", "all": true }),
@@ -226,11 +237,7 @@ fn find_and_replace_reports_the_ranges_it_touched() {
 fn a_whole_word_replace_leaves_the_longer_word_alone() {
     let mut f = Fixture::new("word");
     f.open_query_tab();
-    f.session
-        .active_tab_mut()
-        .expect("a tab")
-        .sql
-        .text = "select user, users from users".into();
+    f.session.active_tab_mut().expect("a tab").sql.text = "select user, users from users".into();
     let out = f.run(
         "sql.findReplace",
         json!({ "find": "user", "replace": "acct", "all": true, "word": true }),
@@ -369,7 +376,12 @@ fn a_split_pane_has_its_own_text_and_closing_discards_it() {
     let out = f.run("sql.splitPane", json!({ "on": false }));
     assert_eq!(out["split"], false);
     assert!(
-        f.session.active_tab_mut().expect("a tab").sql.split.is_none(),
+        f.session
+            .active_tab_mut()
+            .expect("a tab")
+            .sql
+            .split
+            .is_none(),
         "closing the split discards the right pane"
     );
 }
@@ -437,11 +449,11 @@ fn a_script_without_placeholders_still_runs_as_a_script() {
     let mut f = Fixture::new("plain");
     users(&mut f);
     f.open_query_tab();
-    let out = f.run(
-        "sql.run",
-        json!({ "sql": "select 1 as a; select 2 as b" }),
+    let out = f.run("sql.run", json!({ "sql": "select 1 as a; select 2 as b" }));
+    assert_eq!(
+        out["statements"], 2,
+        "the script path, not the prepared one"
     );
-    assert_eq!(out["statements"], 2, "the script path, not the prepared one");
     assert!(
         out["prepared"].is_null(),
         "an ordinary script is not reported as prepared"

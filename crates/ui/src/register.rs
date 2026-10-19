@@ -1257,7 +1257,11 @@ fn paint_plan_node(
             egui::pos2(rect.right() - width - 8.0, *y + row_h * 0.5 - 3.0),
             Vec2::new(width.max(2.0), 6.0),
         );
-        painter.rect_filled(bar, CornerRadius::same(2), if hot { tokens.warn } else { tokens.accent });
+        painter.rect_filled(
+            bar,
+            CornerRadius::same(2),
+            if hot { tokens.warn } else { tokens.accent },
+        );
         painter.text(
             egui::pos2(rect.right() - 8.0, *y + row_h * 0.5),
             egui::Align2::RIGHT_CENTER,
@@ -2617,7 +2621,10 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3, "{text}");
         assert!(lines[0].starts_with("NESTED LOOP"), "{text}");
-        assert!(lines[1].starts_with("  SEQ SCAN"), "a child is indented: {text}");
+        assert!(
+            lines[1].starts_with("  SEQ SCAN"),
+            "a child is indented: {text}"
+        );
         assert!(lines[1].contains("on users"), "{text}");
         assert!(lines[1].contains("most expensive"), "{text}");
         assert!(lines[2].starts_with("  INDEX SCAN"), "{text}");

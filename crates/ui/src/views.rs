@@ -7,6 +7,7 @@ use nook_core::Value as Cell;
 use nook_engine::{Level, Session, TabKind};
 
 use crate::app::UiState;
+use crate::strings::tr;
 use crate::table::{self, TableColumn, TableView};
 use crate::theme::{self as design, Tokens};
 
@@ -873,7 +874,7 @@ pub fn report(
                 rows: &rows,
                 height,
                 id: egui::Id::new(("pivot", tab_index)),
-                empty: "nothing to pivot",
+                empty: tr("nothing to pivot"),
                 row_menu: None,
             },
             state.table(tab_index),
@@ -887,12 +888,191 @@ pub fn report(
     }
 
     if kind == "table" {
+        table_panel(ui, &payload, tokens, state, tab_index, "report-table");
+        return;
+    }
+
+    chart_panel(ui, &payload, &kind, tokens);
+}
+
+/// A board: every saved tile, laid out where it was stored, with an input row that moves all of them.
+///
+/// The board is the engine's own JSON (`report.board` / `monitor.charts`), painted — the layout comes
+/// from the stored tile, never from a calculation, so a reload puts every tile back where it was.
+pub fn board(
+    ui: &mut egui::Ui,
+    session: &mut Session,
+    tab_index: usize,
+    state: &mut UiState,
+    tokens: &Tokens,
+) {
+    let payload = session.tabs[tab_index]
+        .payload
+        .get("board")
+        .cloned()
+        .unwrap_or_default();
+    let name = payload["board"].as_str().unwrap_or_default().to_string();
+    let every_s = payload["every_s"].as_u64().unwrap_or(0);
+
+    let mut refresh = false;
+    let mut input_changed: Option<(String, String)> = None;
+    design::band(ui, tokens, |ui| {
+        ui.set_min_height(design::TOOLBAR_H);
+        ui.horizontal_centered(|ui| {
+            ui.label(RichText::new(&name).size(13.5).color(tokens.text));
+            ui.label(
+                RichText::new(format!(
+                    "{} tile(s){}",
+                    payload["tile_count"].as_u64().unwrap_or(0),
+                    if every_s > 0 {
+                        format!(" · every {every_s}s")
+                    } else {
+                        String::new()
+                    }
+                ))
+                .size(11.0)
+                .color(tokens.text_faint),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new(RichText::new("Refresh").size(11.5)))
+                    .clicked()
+                {
+                    refresh = true;
+                }
+                // The board's inputs: one field per `metrics.input` name, so one value moves every
+                // tile that names it.
+                for field in payload["inputs"].as_array().cloned().unwrap_or_default() {
+                    let key = field["name"].as_str().unwrap_or_default().to_string();
+                    let mut text = field["value"].as_str().unwrap_or_default().to_string();
+                    let id = egui::Id::new(("board-input", tab_index, &key));
+                    let width = 120.0;
+                    ui.label(
+                        RichText::new(format!("{key}:"))
+                            .size(11.0)
+                            .color(tokens.text_dim),
+                    );
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut text)
+                                .desired_width(width)
+                                .id(id),
+                        )
+                        .lost_focus()
+                    {
+                        input_changed = Some((key, text));
+                    }
+                }
+            });
+        });
+    });
+
+    if refresh || input_changed.is_some() {
+        let command = if every_s > 0 {
+            "monitor.charts"
+        } else {
+            "report.board"
+        };
+        let mut params = serde_json::json!({ "name": name });
+        if every_s > 0 {
+            params["board"] = serde_json::json!(name);
+            params["every_s"] = serde_json::json!(every_s);
+        }
+        if let Some((key, value)) = &input_changed {
+            params[format!("input.{key}")] = serde_json::json!(value);
+        }
+        if let Some(conn) = session.tabs[tab_index].conn {
+            params["conn"] = serde_json::json!(session.conns[conn].cfg.id);
+        }
+        match session.run(command, params) {
+            Ok(value) => {
+                session.tabs[tab_index]
+                    .payload
+                    .insert("board".into(), value);
+            }
+            Err(e) => session.log(Level::Error, e.to_string()),
+        }
+        return;
+    }
+
+    // Tiles in stored order, each in its own card. A tile whose report was deleted says so where the
+    // chart would be, rather than blanking the board.
+    egui::ScrollArea::vertical()
+        .id_salt(("board", tab_index))
+        .show(ui, |ui| {
+            for (index, tile) in payload["tiles"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                let title = tile["report"].as_str().unwrap_or("tile").to_string();
+                let height = tile["layout"]["h"].as_f64().unwrap_or(4.0) as f32 * 60.0;
+                design::card_frame(tokens).show(ui, |ui| {
+                    ui.set_min_height(height.max(90.0));
+                    ui.label(RichText::new(&title).size(12.0).color(tokens.text));
+                    let kind = tile["chart"].as_str().unwrap_or("table");
+                    if kind == "table" {
+                        table_panel(
+                            ui,
+                            tile,
+                            tokens,
+                            state,
+                            tab_index * 100 + index,
+                            "board-tile",
+                        );
+                    } else {
+                        chart_panel(ui, tile, kind, tokens);
+                    }
+                });
+                ui.add_space(8.0);
+            }
+            for error in payload["errors"].as_array().cloned().unwrap_or_default() {
+                design::card_frame(tokens).show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}: {}",
+                            error["report"].as_str().unwrap_or("a tile"),
+                            error["error"].as_str().unwrap_or("failed")
+                        ))
+                        .size(11.5)
+                        .color(tokens.error),
+                    );
+                });
+            }
+            if payload["tile_count"].as_u64().unwrap_or(0) == 0
+                && payload["errors"].as_array().map(Vec::len).unwrap_or(0) == 0
+            {
+                ui.add_space(24.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("this board has no tiles yet")
+                            .size(12.5)
+                            .color(tokens.text_faint),
+                    );
+                });
+            }
+        });
+}
+
+/// One table-shaped payload as a grid. Shared by the report tab and a board's table tile, so a
+/// dashboard cannot drift from the report it shows.
+fn table_panel(
+    ui: &mut egui::Ui,
+    payload: &serde_json::Value,
+    tokens: &Tokens,
+    state: &mut UiState,
+    tab_index: usize,
+    id: &str,
+) {
+    {
         let result = payload.get("result").or_else(|| payload.get("data"));
         let Some(result) = result else {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    RichText::new("no rows in this report")
+                    RichText::new(tr("no rows in this report"))
                         .size(12.5)
                         .color(tokens.text_faint),
                 );
@@ -929,7 +1109,7 @@ pub fn report(
                 columns: &column_specs,
                 rows: &rows,
                 height,
-                id: egui::Id::new(("report-table", tab_index)),
+                id: egui::Id::new((id, tab_index)),
                 empty: "no rows",
                 row_menu: None,
             },
@@ -940,9 +1120,11 @@ pub fn report(
                 .size(11.5)
                 .color(tokens.text_dim),
         );
-        return;
     }
+}
 
+/// Paint one charted payload. Shared by the report tab and every chart tile on a board.
+fn chart_panel(ui: &mut egui::Ui, payload: &serde_json::Value, kind: &str, tokens: &Tokens) {
     let labels: Vec<String> = payload["labels"]
         .as_array()
         .map(|l| {
@@ -1018,7 +1200,7 @@ pub fn report(
         }
     }
 
-    match kind.as_str() {
+    match kind {
         "pie" => {
             let values = series.first().map(|(_, v)| v.clone()).unwrap_or_default();
             let total: f64 = values.iter().sum::<f64>().max(0.001);
@@ -1259,7 +1441,7 @@ pub fn monitor(
                 });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
+                if design::ghost_button(ui, tokens, tr("Refresh"), true).clicked() {
                     if let Some(index) = conn {
                         state.request_monitor(session, index, &kind);
                     }
@@ -1331,7 +1513,10 @@ pub fn monitor(
                 &["blocked", "blocking", "wait_s", "query"],
                 &["text", "text", "text", "text"],
             );
-            let rows = rows_from(&locks, &["blocked_pid", "blocking_pid", "wait_s", "blocked_query"]);
+            let rows = rows_from(
+                &locks,
+                &["blocked_pid", "blocking_pid", "wait_s", "blocked_query"],
+            );
             let height = (ui.available_height() - 40.0).max(160.0);
             list(
                 ui,
@@ -1354,7 +1539,10 @@ pub fn monitor(
                 &["client", "state", "sync", "lag_s", "bytes_behind"],
                 &["text", "text", "text", "int8", "int8"],
             );
-            let rows = rows_from(&replicas, &["client", "state", "sync", "lag_s", "bytes_behind"]);
+            let rows = rows_from(
+                &replicas,
+                &["client", "state", "sync", "lag_s", "bytes_behind"],
+            );
             let height = (ui.available_height() - 40.0).max(160.0);
             list(
                 ui,
@@ -1633,7 +1821,7 @@ pub fn jobs(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
                         design::chip(ui, tokens, job.kind.label(), tokens.info);
                         design::chip(ui, tokens, &job.schedule.describe(), tokens.text_dim);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if design::ghost_button(ui, tokens, "Delete", true).clicked() {
+                            if design::ghost_button(ui, tokens, tr("Delete"), true).clicked() {
                                 delete = Some(job.id.clone());
                             }
                             if design::ghost_button(
@@ -2218,7 +2406,7 @@ pub fn users(
                 if design::primary_button(ui, tokens, "Create user", true).clicked() {
                     create = true;
                 }
-                if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
+                if design::ghost_button(ui, tokens, tr("Refresh"), true).clicked() {
                     refresh = true;
                 }
             });
@@ -2617,4 +2805,3 @@ mod tests {
         );
     }
 }
-

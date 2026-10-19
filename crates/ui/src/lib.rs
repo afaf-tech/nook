@@ -18,6 +18,7 @@ pub mod grid;
 pub mod icons;
 pub mod inspector;
 pub mod register;
+pub mod strings;
 pub mod table;
 pub mod theme;
 pub mod tree;

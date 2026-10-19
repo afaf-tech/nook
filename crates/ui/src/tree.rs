@@ -5,6 +5,7 @@ use nook_engine::{ConnState, Session, TabKind, TableRef};
 
 use crate::app::UiState;
 use crate::icons::{self, Glyph};
+use crate::strings::tr;
 use crate::theme::{self as design, Tokens};
 
 /// The design's `.seg` in the tree: which objects the list shows.
@@ -738,7 +739,7 @@ pub fn show(
                         ui.horizontal(|ui| {
                             ui.add_space(design::INDENT_STEP + 20.0);
                             ui.label(RichText::new("not connected").size(11.0).color(tokens.warn));
-                            if design::ghost_button(ui, tokens, "Connect", true).clicked() {
+                            if design::ghost_button(ui, tokens, tr("Connect"), true).clicked() {
                                 action = TreeAction::OpenConnection(index);
                             }
                         });

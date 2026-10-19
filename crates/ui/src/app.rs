@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::control::Control;
 use crate::icons::{self, Glyph};
+use crate::strings;
 use crate::table::TableState;
 use crate::theme::{self as t, Tokens, APP_BAR_H, STATUS_H, TAB_BAR_H, TAB_H};
 use crate::{dialogs, grid, tree, views, Options};
@@ -884,6 +885,34 @@ impl UiState {
         }
     }
 
+    /// Paint the newest saved board into the report tab. A board is stored by name, so the view
+    /// opens the most recently saved one; the command palette picks a specific one.
+    pub fn request_board(&mut self, session: &mut Session) {
+        let board = nook_engine::store::load_dashboards()
+            .ok()
+            .and_then(|list| list.first().cloned());
+        let Some(board) = board else {
+            if let Ok(tab) = session.active_tab_mut() {
+                tab.payload
+                    .insert("board".into(), serde_json::json!({"tiles": []}));
+            }
+            return;
+        };
+        let name = board["name"].as_str().unwrap_or_default().to_string();
+        let mut params = serde_json::json!({"name": name});
+        if let Some(conn) = session.active_conn {
+            params["conn"] = serde_json::json!(session.conns[conn].cfg.id);
+        }
+        match session.run("report.board", params) {
+            Ok(value) => {
+                if let Ok(tab) = session.active_tab_mut() {
+                    tab.payload.insert("board".into(), value);
+                }
+            }
+            Err(e) => session.log(Level::Error, e.to_string()),
+        }
+    }
+
     pub fn request_monitor(&mut self, session: &mut Session, conn: usize, kind: &str) {
         let command = match kind {
             "processes" => "monitor.processes",
@@ -1079,6 +1108,13 @@ impl NookApp {
                         "rows": t.grid.result.row_count(), "pending": t.grid.pending.len(),
                     })).collect::<Vec<_>>(),
                     "messages": self.session.messages.len(),
+                    // The locale the chrome is actually painting in, and one string it resolved, so
+                    // a script can prove the switch reached the widgets without a screenshot.
+                    "locale": self.session.settings.locale,
+                    "sample": {
+                        "Close": strings::tr("Close"),
+                        "File": strings::tr("File"),
+                    },
                     // Reported so a script can prove zen and a split are on without a screenshot.
                     "zen": self.session.zen,
                     "split": self.session.active_tab.as_ref()
@@ -1279,7 +1315,12 @@ impl NookApp {
                 "ui.find" => {
                     // `null` or `{"close": true}` closes it; otherwise the given fields are set, so
                     // a script can type a query into the bar it just opened.
-                    if request.params.get("close").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if request
+                        .params
+                        .get("close")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
                         self.state.find = None;
                     } else {
                         let bar = self.state.find.get_or_insert_with(FindBar::default);
@@ -1462,8 +1503,10 @@ impl NookApp {
                 ui.scope(|ui| {
                     // The design's `.menus` is one flex block, so the six labels sit flush.
                     ui.spacing_mut().item_spacing.x = 0.0;
+                    let locale = self.session.settings.locale.clone();
                     for (menu, groups) in MENUS {
-                        if let Some(id) = menu_button(ui, tokens, menu, groups) {
+                        if let Some(id) = menu_button(ui, tokens, strings::t(&locale, menu), groups)
+                        {
                             pick = Some(id);
                         }
                     }
@@ -1884,8 +1927,16 @@ impl NookApp {
                 self.state.active_tab_override = Some(tab);
             }
             3 => {
-                if let Some(tab) = report_tab {
-                    self.state.active_tab_override = Some(tab);
+                // Reports is the board workspace: it opens the saved board and paints it, creating
+                // the tab the first time. A board that is not saved yet opens empty and says so,
+                // rather than the button doing nothing.
+                match report_tab {
+                    Some(tab) => self.state.active_tab_override = Some(tab),
+                    None => {
+                        let tab = self.session.add_tab(TabKind::Report, "Reports", None);
+                        self.state.active_tab_override = Some(tab);
+                        self.state.request_board(&mut self.session);
+                    }
                 }
             }
             4 => {
@@ -2125,19 +2176,31 @@ impl NookApp {
                 if self.session.tabs[index].sql.split.is_some() {
                     let width = ui.available_width();
                     ui.horizontal(|ui| {
-                        ui.allocate_ui(egui::vec2(width / 2.0 - 1.0, ui.available_height()), |ui| {
-                            crate::editor::show(ui, &mut self.session, index, &mut self.state, tokens);
-                        });
+                        ui.allocate_ui(
+                            egui::vec2(width / 2.0 - 1.0, ui.available_height()),
+                            |ui| {
+                                crate::editor::show(
+                                    ui,
+                                    &mut self.session,
+                                    index,
+                                    &mut self.state,
+                                    tokens,
+                                );
+                            },
+                        );
                         ui.separator();
-                        ui.allocate_ui(egui::vec2(ui.available_width(), ui.available_height()), |ui| {
-                            crate::editor::show_pane(
-                                ui,
-                                &mut self.session,
-                                index,
-                                &mut self.state,
-                                tokens,
-                            );
-                        });
+                        ui.allocate_ui(
+                            egui::vec2(ui.available_width(), ui.available_height()),
+                            |ui| {
+                                crate::editor::show_pane(
+                                    ui,
+                                    &mut self.session,
+                                    index,
+                                    &mut self.state,
+                                    tokens,
+                                );
+                            },
+                        );
                     });
                 } else {
                     crate::editor::show(ui, &mut self.session, index, &mut self.state, tokens);
@@ -2153,7 +2216,13 @@ impl NookApp {
                 }
                 views::diagram(ui, &mut self.session, index, &mut self.state, tokens)
             }
-            TabKind::Report => views::report(ui, &mut self.session, index, &mut self.state, tokens),
+            TabKind::Report => {
+                if self.session.tabs[index].payload.contains_key("board") {
+                    views::board(ui, &mut self.session, index, &mut self.state, tokens)
+                } else {
+                    views::report(ui, &mut self.session, index, &mut self.state, tokens)
+                }
+            }
             TabKind::Monitor => {
                 if !self.session.tabs[index].payload.contains_key("monitor") {
                     if let Some(conn) = self.session.tabs[index].conn {
@@ -2227,7 +2296,7 @@ impl NookApp {
                     None => {
                         t::dot(ui, tokens.text_faint);
                         ui.label(
-                            RichText::new("no connection")
+                            RichText::new(strings::tr("no connection"))
                                 .size(12.0)
                                 .color(tokens.text_dim),
                         );
@@ -2250,7 +2319,7 @@ impl NookApp {
                         };
                         let mut line = tab.title.clone();
                         if let Some(rows) = rows {
-                            line.push_str(&format!(" · {rows} rows"));
+                            line.push_str(&format!(" · {rows}{}", strings::tr(" rows")));
                         }
                         if let Some(ms) = ms {
                             line.push_str(&format!(" · {ms:.0} ms"));
@@ -3217,6 +3286,8 @@ impl eframe::App for NookApp {
         let ctx = ui.ctx().clone();
         let tokens = self.tokens();
         tokens.apply(&ctx);
+        // Before anything paints: a dialog's buttons read this, and they have no settings handle.
+        strings::set_locale(&self.session.settings.locale);
 
         self.handle_control(&ctx);
         self.handle_shot(&ctx);

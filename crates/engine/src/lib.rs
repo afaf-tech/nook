@@ -629,6 +629,9 @@ impl Density {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub theme: String,
+    /// The chrome's language. Only the UI's own strings go through `ui::strings::t`; an error the
+    /// engine raises stays English, because translating it would need an error-code layer.
+    pub locale: String,
     pub density: Density,
     pub page_size: usize,
     pub max_rows: usize,
@@ -655,6 +658,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             theme: "dark".into(),
+            locale: "en".into(),
             density: Density::Compact,
             page_size: 200,
             max_rows: nook_drivers::MAX_ROWS,
@@ -709,6 +713,13 @@ impl Session {
         // The store is the settings file too: preferences written by `app.setSetting` are read back
         // here on the next run.
         let mut settings = Settings::default();
+        if let Some(locale) = profiles
+            .settings()
+            .get("locale")
+            .and_then(|value| value.as_str())
+        {
+            settings.locale = locale.to_string();
+        }
         if let Some(density) = profiles
             .settings()
             .get("density")
@@ -1174,19 +1185,17 @@ impl Session {
                 crate::runner::Message::Page(page) => {
                     append_page(&mut self.tabs[index], page);
                 }
-                crate::runner::Message::Done { elapsed_ms, affected } => {
+                crate::runner::Message::Done {
+                    elapsed_ms,
+                    affected,
+                } => {
                     finish_run(&mut self.tabs[index], elapsed_ms, affected, None);
                 }
                 crate::runner::Message::Failed(error) => {
                     finish_run(&mut self.tabs[index], 0.0, 0, Some(error));
                 }
                 crate::runner::Message::Cancelled => {
-                    finish_run(
-                        &mut self.tabs[index],
-                        0.0,
-                        0,
-                        Some("cancelled".to_string()),
-                    );
+                    finish_run(&mut self.tabs[index], 0.0, 0, Some("cancelled".to_string()));
                 }
             }
         }

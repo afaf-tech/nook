@@ -165,8 +165,6 @@ fn human_bytes(bytes: i64) -> String {
     }
 }
 
-
-
 /// Who is waiting on whom.
 ///
 /// The three engines answer this completely differently, and an empty table would read as "nothing
@@ -327,9 +325,10 @@ fn alerts(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             entry.get("name").and_then(|v| v.as_str()),
             entry.get("value"),
         ) {
-            if let Some(n) = value.as_f64().or_else(|| {
-                value.as_str().and_then(|s| s.parse::<f64>().ok())
-            }) {
+            if let Some(n) = value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))
+            {
                 metrics.insert(name.to_string(), json!(n));
             }
         }
@@ -337,7 +336,10 @@ fn alerts(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut tripped: Vec<serde_json::Value> = Vec::new();
     for rule in &rules {
-        let metric = rule.get("metric").and_then(|v| v.as_str()).unwrap_or_default();
+        let metric = rule
+            .get("metric")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let op = rule.get("op").and_then(|v| v.as_str()).unwrap_or(">");
         let threshold = rule.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let Some(current) = metrics.get(metric).and_then(|v| v.as_f64()) else {

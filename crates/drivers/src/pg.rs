@@ -183,7 +183,8 @@ impl postgres::types::ToSql for Raw {
         &self,
         _ty: &Type,
         out: &mut postgres::types::private::BytesMut,
-    ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+    ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
+    {
         // An empty payload is how a NULL is spelled here; every non-NULL value is non-empty text.
         if self.0.is_empty() {
             return Ok(postgres::types::IsNull::Yes);
@@ -206,7 +207,8 @@ impl postgres::types::ToSql for Raw {
         &self,
         ty: &Type,
         out: &mut postgres::types::private::BytesMut,
-    ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+    ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
+    {
         self.to_sql(ty, out)
     }
 }
@@ -287,10 +289,7 @@ fn decode_raw(bytes: &[u8], ty: &Type, column: &str) -> Result<Value> {
 }
 
 fn short(column: &str, ty: &Type) -> Error {
-    Error::query(format!(
-        "column {column}: expected a {} payload",
-        ty.name()
-    ))
+    Error::query(format!("column {column}: expected a {} payload", ty.name()))
 }
 
 fn is_text_type(ty: &Type) -> bool {

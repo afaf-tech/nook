@@ -15,6 +15,7 @@ use nook_ai::Provider;
 use nook_engine::Session;
 
 use crate::app::AiForm;
+use crate::strings::tr;
 use crate::theme::{self as design, Emphasis, Mark, Tokens};
 
 /// Everything the UI thread gathers before handing `ai.generate` to a background worker.
@@ -414,7 +415,7 @@ fn head(ui: &mut egui::Ui, tokens: &Tokens, form: &AiForm, close: &mut bool) {
     let title = "Generate SQL";
     let subtitle = format!("{} · {}", form.provider.label(), form.effective_model());
     let avail = ui.available_width();
-    let close_w = design::toolbar_button_width(ui, tokens, "Close", None);
+    let close_w = design::toolbar_button_width(ui, tokens, tr("Close"), None);
     let title_w = design::text_width(ui, tokens.font(design::T_XL), title);
     let subtitle_w = design::measured_width(ui, tokens, &subtitle);
     let subtitle_fits =
@@ -922,7 +923,7 @@ fn foot(
             let sentence =
                 "nothing is sent until Generate · @ expands to the table's columns, keys and indexes";
             let buttons = design::toolbar_button_width(ui, tokens, "Generate", Some(Mark::Play))
-                + design::toolbar_button_width(ui, tokens, "Cancel", None)
+                + design::toolbar_button_width(ui, tokens, tr("Cancel"), None)
                 + 2.0 * f32::from(design::S4);
             if ui.available_width() - buttons >= design::measured_width(ui, tokens, sentence) {
                 ui.label(

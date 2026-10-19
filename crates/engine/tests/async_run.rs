@@ -67,7 +67,10 @@ impl Fixture {
 #[test]
 fn an_async_run_lands_its_rows_in_the_tab() {
     let mut f = Fixture::new("lands");
-    let started = f.run("sql.runAsync", json!({ "sql": "SELECT * FROM t ORDER BY id", "page": 2 }));
+    let started = f.run(
+        "sql.runAsync",
+        json!({ "sql": "SELECT * FROM t ORDER BY id", "page": 2 }),
+    );
     let job = started["job"].as_u64().expect("a job id");
     assert_eq!(started["state"], json!("running"));
 
@@ -90,7 +93,10 @@ fn the_run_is_visible_as_running_before_it_is_done() {
     // small can finish before the first poll, so the assertion is that the pump never has to block
     // and that `running` is a state the status command can actually report.
     let mut f = Fixture::new("midflight");
-    let job = f.run("sql.runAsync", json!({ "sql": "SELECT * FROM t", "page": 1 }))["job"]
+    let job = f.run(
+        "sql.runAsync",
+        json!({ "sql": "SELECT * FROM t", "page": 1 }),
+    )["job"]
         .as_u64()
         .expect("a job id");
     let first = f.run("sql.jobStatus", json!({ "job": job }));
@@ -238,7 +244,9 @@ fn a_slow_postgres_query_is_cancelled_by_sql_cancel() {
     session.conns.push(Conn::new(cfg));
     let index = session.conn_index(&conn).expect("registered");
     open_now(&mut session, index).expect("postgres opens");
-    session.run("sql.newQuery", json!({ "sql": "SELECT pg_sleep(30)" })).expect("a tab");
+    session
+        .run("sql.newQuery", json!({ "sql": "SELECT pg_sleep(30)" }))
+        .expect("a tab");
 
     let job = session
         .run(

@@ -35,7 +35,10 @@ impl Fixture {
                            CREATE INDEX users_email ON users (email); \
                            INSERT INTO users (email) VALUES ('a@b.c'), ('d@e.f');"}),
         );
-        f.run("sql.newQuery", json!({ "sql": "SELECT * FROM users WHERE email = 'a@b.c'" }));
+        f.run(
+            "sql.newQuery",
+            json!({ "sql": "SELECT * FROM users WHERE email = 'a@b.c'" }),
+        );
         f
     }
 
@@ -58,14 +61,24 @@ impl Fixture {
 #[test]
 fn a_visual_explain_returns_a_tree_with_a_root() {
     let mut f = Fixture::new("visual");
-    let out = f.run("sql.explainVisual", json!({ "sql": "SELECT * FROM users WHERE email = 'a@b.c'" }));
+    let out = f.run(
+        "sql.explainVisual",
+        json!({ "sql": "SELECT * FROM users WHERE email = 'a@b.c'" }),
+    );
     assert_eq!(out["root"], json!(0), "{out}");
     assert!(!out["nodes"].as_array().expect("nodes").is_empty(), "{out}");
     assert_eq!(out["nodes_total"], json!(1));
     let node = &out["nodes"][0];
-    assert_eq!(node["label"], json!("SEARCH"), "SQLite says SEARCH when it uses the index: {out}");
+    assert_eq!(
+        node["label"],
+        json!("SEARCH"),
+        "SQLite says SEARCH when it uses the index: {out}"
+    );
     assert!(
-        node["detail"].as_str().unwrap_or_default().contains("users_email"),
+        node["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("users_email"),
         "{out}"
     );
 }
@@ -124,10 +137,7 @@ fn a_profiler_refuses_a_write() {
 #[test]
 fn a_profiler_caps_the_run_count() {
     let mut f = Fixture::new("profile-cap");
-    let out = f.run(
-        "sql.profiler",
-        json!({ "sql": "SELECT 1", "runs": 500 }),
-    );
+    let out = f.run("sql.profiler", json!({ "sql": "SELECT 1", "runs": 500 }));
     assert_eq!(out["count"], json!(50), "the cap is 50: {out}");
 }
 
@@ -211,11 +221,8 @@ fn a_tripped_alert_posts_the_same_shape_a_failed_job_does() {
     let _ = std::fs::remove_file(&capture);
     // The fake curl: read the body from stdin and write it where the test can see it.
     let fake = dir.join(format!("fake-curl-{}.sh", std::process::id()));
-    std::fs::write(
-        &fake,
-        format!("#!/bin/sh\ncat > '{}'\n", capture.display()),
-    )
-    .expect("the fake curl is written");
+    std::fs::write(&fake, format!("#!/bin/sh\ncat > '{}'\n", capture.display()))
+        .expect("the fake curl is written");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -240,12 +247,11 @@ fn a_tripped_alert_posts_the_same_shape_a_failed_job_does() {
     );
     assert_eq!(out["tripped"], json!(1), "{out}");
 
-    let body: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&capture).unwrap_or_else(|e| {
+    let body: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&capture).unwrap_or_else(|e| {
             panic!("the webhook was not called: {e}");
-        }),
-    )
-    .expect("the posted body is JSON");
+        }))
+        .expect("the posted body is JSON");
     // The same keys a failed job's notification carries.
     for key in ["job", "name", "ok", "error", "elapsed_ms", "at"] {
         assert!(body.get(key).is_some(), "missing {key}: {body}");
@@ -264,11 +270,8 @@ fn an_alert_that_does_not_trip_posts_nothing() {
     let capture = dir.join(format!("quiet-body-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&capture);
     let fake = dir.join(format!("fake-curl-quiet-{}.sh", std::process::id()));
-    std::fs::write(
-        &fake,
-        format!("#!/bin/sh\ncat > '{}'\n", capture.display()),
-    )
-    .expect("the fake curl is written");
+    std::fs::write(&fake, format!("#!/bin/sh\ncat > '{}'\n", capture.display()))
+        .expect("the fake curl is written");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -294,4 +297,70 @@ fn an_alert_that_does_not_trip_posts_nothing() {
     assert_eq!(out["tripped"], json!(0), "{out}");
     assert!(!capture.exists(), "a quiet alert posted anyway");
     std::env::remove_var("NOOK_CURL_BIN");
+}
+
+#[test]
+fn roles_on_sqlite_refuse_instead_of_listing_nothing() {
+    // An empty membership list reads as "nobody holds any role", which a file database cannot know.
+    let mut f = Fixture::new("roles");
+    let message = f.refuse("priv.roles", json!({}));
+    assert!(message.contains("no user accounts"), "{message}");
+}
+
+#[test]
+fn an_audit_on_sqlite_refuses_and_says_why() {
+    let mut f = Fixture::new("audit");
+    let message = f.refuse("priv.audit", json!({}));
+    assert!(message.contains("no user accounts"), "{message}");
+}
+
+#[test]
+fn an_unknown_role_action_is_refused_and_names_the_two() {
+    let mut f = Fixture::new("roles-action");
+    // SQLite refuses before the action is read, so this asserts the refusal is the principal one
+    // rather than a confusing complaint about a parameter on an engine that has no roles at all.
+    let message = f.refuse(
+        "priv.roles",
+        json!({ "role": "readers", "member": "analyst", "action": "toggle" }),
+    );
+    assert!(message.contains("no user accounts"), "{message}");
+}
+
+#[test]
+fn a_privilege_audit_names_where_each_grant_came_from() {
+    // Needs a live server: the audit reads the engine's own catalog. `NOOK_PG_URI` and
+    // `NOOK_MYSQL_URI` are how the other live tests are gated, so this follows the same rule.
+    let uri = std::env::var("NOOK_PG_URI")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| {
+            std::env::var("NOOK_MYSQL_URI")
+                .ok()
+                .filter(|u| !u.is_empty())
+        });
+    let Some(uri) = uri else {
+        return;
+    };
+    std::env::set_var("NOOK_CONFIG_DIR", "/tmp/nook-privcfg");
+    let cfg = nook_core::ConnectionConfig::parse(&uri).expect("uri parses");
+    let mut session = Session::new();
+    session.conns.push(Conn::new(cfg));
+    let index = session
+        .conn_index(&session.conns[0].cfg.id.clone())
+        .expect("the connection is there");
+    let _ = nook_engine::cmd::open_now(&mut session, index);
+    let out = session
+        .run("priv.audit", json!({}))
+        .expect("the audit runs");
+    // The shape is the contract: every row says which object, which principal, which privilege and
+    // where it came from. A server with no grants still answers with the four keys.
+    for row in out["grants"].as_array().cloned().unwrap_or_default() {
+        for key in ["object", "principal", "privilege", "via"] {
+            assert!(
+                row.get(key).is_some(),
+                "the audit row is missing {key}: {row}"
+            );
+        }
+    }
+    assert!(out["count"].as_u64().is_some(), "{out}");
 }

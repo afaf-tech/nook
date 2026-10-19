@@ -71,6 +71,36 @@ pub fn commands() -> Vec<CommandSpec> {
             .params(r#"{"sql":"select status, count(*) from orders group by status","chart":"pie","label":"status"}"#),
         CommandSpec::new("report.pivot", "Pivot a result", "Report", pivot)
             .params(r#"{"sql":"select region, quarter, sum(total) from sales group by 1,2"}"#),
+        CommandSpec::new("report.save", "Save a report", "Report", report_save)
+            .params(r#"{"name":"revenue","sql":"select day, sum(total) from orders group by 1","chart":"line","label":"day"}"#)
+            .help("A report is the statement, the chart kind and its label column, stored by name. Saving over a name replaces it."),
+        CommandSpec::new("report.list", "Saved reports", "Report", report_list)
+            .params("{}")
+            .help("Every saved report, newest name first, with the chart kind and when it last changed."),
+        CommandSpec::new("report.delete", "Delete a report", "Report", report_delete)
+            .params(r#"{"name":"revenue"}"#)
+            .help("Removes one saved report. A name that is not saved is a no-op, so a script can run it twice."),
+        CommandSpec::new("report.designer", "Report designer", "Report", report_designer)
+            .params(r#"{"name":"revenue","layout":{"w":6,"h":4}}"#)
+            .help("The save/edit surface: stores the report and its tile layout, and returns the report as it was written so a designer can paint what the server holds."),
+        CommandSpec::new("report.biDashboard", "BI dashboard", "Report", report_dashboard)
+            .params(r#"{"name":"ops","tiles":[{"report":"revenue","w":6,"h":4,"x":0,"y":0}]}"#)
+            .help("A board is a name and its tiles. Each tile names a saved report and carries its own place on a 12-column grid; the layout is stored, never recomputed."),
+        CommandSpec::new("report.board", "Paint a board", "Report", report_board)
+            .params(r#"{"name":"ops"}"#)
+            .help("Runs every tile's statement and returns each one charted, plus any tile that failed — a board with one broken tile still shows the rest."),
+        CommandSpec::new("report.export", "Export a report", "Report", report_export)
+            .params(r#"{"name":"ops","format":"html","path":"~/ops.html"}"#)
+            .help("A report or a whole board as one self-contained HTML file, or the board's rows as CSV."),
+        CommandSpec::new("monitor.charts", "Metrics board", "Monitor", metrics_charts)
+            .params(r#"{"board":"ops","every_s":30}"#)
+            .help("A board refreshed on a cadence: returns the tiles' charts and the interval to wait before asking again. The UI's own tick asks, so there is no second timer thread."),
+        CommandSpec::new("tools.dataProfiling", "Profile columns", "Tools", data_profiling)
+            .params(r#"{"table":"users","columns":["email","status"]}"#)
+            .help("Per column: null share, distinct count, min/max, the five commonest values, and a shape guess (email, uuid, date, phone). One aggregate query per table, bounded by max_rows."),
+        CommandSpec::new("metrics.input", "Board input", "Report", metrics_input)
+            .params(r#"{"name":"since","value":"2026-10-01"}"#)
+            .help("Binds a value that every tile's SQL reads as a named parameter, so one field moves the whole board."),
     ]
 }
 
@@ -1827,6 +1857,611 @@ fn pivot(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     }))
 }
 
+// --- Saved reports and boards --------------------------------------------------
+
+fn report_save(_session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    let sql = p.str_arg("sql")?;
+    let chart = p.str_opt("chart").unwrap_or_else(|| "table".into());
+    // A chart kind that does not exist is refused here rather than stored and discovered when the
+    // board paints: a saved report that cannot render is a saved mistake.
+    if ChartKind::parse(&chart).is_none() {
+        return Err(Error::config(format!(
+            "unknown chart {chart:?}; use {}",
+            ChartKind::all()
+                .iter()
+                .map(|k| k.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let label = p.str_opt("label").unwrap_or_default();
+    let options = p.get("options").cloned().unwrap_or_else(|| json!({}));
+    crate::store::save_report(&name, &sql, &chart, &label, &options)?;
+    Ok(json!({
+        "name": name,
+        "saved": true,
+        "report": crate::store::load_report(&name)?,
+    }))
+}
+
+fn report_list(_session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
+    let reports = crate::store::load_reports()?;
+    Ok(json!({ "reports": reports, "count": reports.len() }))
+}
+
+fn report_delete(_session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    crate::store::delete_report(&name)?;
+    Ok(json!({ "name": name, "deleted": true }))
+}
+
+fn report_designer(_session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    let existing = crate::store::load_report(&name)?;
+    // The designer edits what is stored: a name it has never seen starts blank rather than failing,
+    // because "new report" and "edit report" are the same surface.
+    let exists = existing.is_some();
+    let mut report = existing.unwrap_or_else(
+        || json!({ "name": name, "sql": "", "chart": "table", "label": "", "options": {} }),
+    );
+    if let Some(sql) = p.str_opt("sql") {
+        report["sql"] = json!(sql);
+    }
+    if let Some(chart) = p.str_opt("chart") {
+        report["chart"] = json!(chart);
+    }
+    if let Some(label) = p.str_opt("label") {
+        report["label"] = json!(label);
+    }
+    if let Some(layout) = p.get("layout") {
+        let mut options = report["options"].clone();
+        options["layout"] = layout.clone();
+        report["options"] = options;
+    }
+    Ok(json!({ "report": report, "exists": exists }))
+}
+
+fn report_dashboard(_session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    let tiles = p.get("tiles").cloned().unwrap_or_else(|| json!([]));
+    let Some(list) = tiles.as_array() else {
+        return Err(Error::config("\"tiles\" must be an array"));
+    };
+    // Every tile has to name a saved report: a board that points at nothing is a blank rectangle
+    // discovered on a Monday.
+    let saved: Vec<String> = crate::store::load_reports()?
+        .iter()
+        .filter_map(|r| r["name"].as_str().map(str::to_string))
+        .collect();
+    for tile in list {
+        let Some(report) = tile.get("report").and_then(|v| v.as_str()) else {
+            return Err(Error::config(
+                "every tile needs \"report\": the name of a saved report",
+            ));
+        };
+        if !saved.iter().any(|s| s == report) {
+            return Err(Error::config(format!(
+                "no saved report named {report:?}; save one with report.save first"
+            )));
+        }
+    }
+    crate::store::save_dashboard(&name, &tiles)?;
+    Ok(json!({
+        "name": name,
+        "saved": true,
+        "tiles": list.len(),
+        "board": crate::store::load_dashboard(&name)?,
+    }))
+}
+
+/// Run every tile of a board and return each one charted.
+///
+/// A tile whose statement fails is reported in `errors` and the rest of the board still paints: one
+/// broken panel is not a reason to hide the other five.
+fn report_board(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    let board = crate::store::load_dashboard(&name)?
+        .ok_or_else(|| Error::not_found(format!("no board named {name:?}")))?;
+    let index = session.resolve_conn(p)?;
+    // The board's input fields bind parameters in every tile's statement.
+    let mut bindings: Vec<(String, String)> = Vec::new();
+    for (key, value) in p.raw() {
+        if let Some(field) = key.strip_prefix("input.") {
+            bindings.push((
+                field.to_string(),
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string()),
+            ));
+        }
+    }
+    let mut tiles: Vec<serde_json::Value> = Vec::new();
+    let mut errors: Vec<serde_json::Value> = Vec::new();
+    for tile in board["tiles"].as_array().cloned().unwrap_or_default() {
+        let report_name = tile["report"].as_str().unwrap_or_default();
+        let Some(report) = crate::store::load_report(report_name)? else {
+            errors.push(json!({ "report": report_name, "error": "the report is no longer saved" }));
+            continue;
+        };
+        let sql = report["sql"].as_str().unwrap_or_default().to_string();
+        let kind = report["chart"]
+            .as_str()
+            .and_then(ChartKind::parse)
+            .unwrap_or(ChartKind::Table);
+        let label = report["label"].as_str().filter(|s| !s.is_empty());
+        match run_tile_sql(session, index, &sql, &bindings) {
+            Ok(result) if kind == ChartKind::Table => tiles.push(json!({
+                "report": report_name,
+                "chart": "table",
+                "layout": tile,
+                "result": result.to_json(),
+            })),
+            Ok(result) => match report::chart_from_result(&result, kind, report_name, label) {
+                Ok(charted) => tiles.push(json!({
+                    "report": report_name,
+                    "chart": charted.kind.label(),
+                    "layout": tile,
+                    "labels": charted.labels,
+                    "series": charted.series.iter()
+                        .map(|s| json!({ "name": s.name, "values": s.values }))
+                        .collect::<Vec<_>>(),
+                    "summary": charted.summary(),
+                    "rows": result.row_count(),
+                })),
+                Err(e) => errors.push(json!({ "report": report_name, "error": e.to_string() })),
+            },
+            Err(e) => errors.push(json!({ "report": report_name, "error": e.to_string() })),
+        }
+    }
+    Ok(json!({
+        "board": name,
+        "tiles": tiles,
+        "errors": errors,
+        "tile_count": tiles.len(),
+        "error_count": errors.len(),
+        // The fields the view paints: every `:name` the board's tiles read, with the value this call
+        // was given. Derived from the tiles rather than stored, so a tile that stops using an input
+        // stops asking for it.
+        "inputs": inputs_of(&board, &bindings)?,
+    }))
+}
+
+/// The named inputs a board's tiles read, with the values this call supplied.
+fn inputs_of(
+    board: &serde_json::Value,
+    bindings: &[(String, String)],
+) -> Result<Vec<serde_json::Value>> {
+    let mut names: Vec<String> = Vec::new();
+    for tile in board["tiles"].as_array().cloned().unwrap_or_default() {
+        let report_name = tile["report"].as_str().unwrap_or_default();
+        let Some(report) = crate::store::load_report(report_name)? else {
+            continue;
+        };
+        let sql = report["sql"].as_str().unwrap_or_default();
+        for (_, slots) in [crate::sqltext::bind_placeholders(
+            sql,
+            crate::sqltext::BindStyle::Question,
+        )] {
+            for slot in slots.into_iter().flatten() {
+                if !names.contains(&slot) {
+                    names.push(slot);
+                }
+            }
+        }
+    }
+    names.sort();
+    Ok(names
+        .into_iter()
+        .map(|name| {
+            let value = bindings
+                .iter()
+                .find(|(field, _)| *field == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default();
+            json!({ "name": name, "value": value })
+        })
+        .collect())
+}
+
+/// Run one tile's statement with the board's input fields bound by the server.
+///
+/// A `:field` the board supplied is a bound parameter, not a substituted literal: a literal breaks
+/// `limit :n`, and on MySQL a backslash in the value can end the quoted string. A `:name` the board
+/// did not supply is left to the driver, which refuses it and names the parameter — the same
+/// contract `sql.run` has.
+fn run_tile_sql(
+    session: &mut Session,
+    index: usize,
+    sql: &str,
+    bindings: &[(String, String)],
+) -> Result<nook_model::ResultSet> {
+    if bindings.is_empty() {
+        return run_sql(session, index, sql, None);
+    }
+    let style = match session.driver_for(index)?.dialect() {
+        Dialect::Postgres => crate::sqltext::BindStyle::Dollar,
+        _ => crate::sqltext::BindStyle::Question,
+    };
+    let (prepared, slots) = crate::sqltext::bind_placeholders(sql, style);
+    let mut values: Vec<Value> = Vec::with_capacity(slots.len());
+    for (i, slot) in slots.iter().enumerate() {
+        let value = match slot {
+            Some(name) => bindings
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.clone()),
+            // A `?` slot is filled positionally when the board supplied exactly that many inputs.
+            None => bindings.get(i).map(|(_, value)| value.clone()),
+        };
+        match value {
+            Some(value) => values.push(Value::Text(value)),
+            None => {
+                return Err(Error::config(match slot {
+                    Some(name) => format!("the board has no input named {name:?}"),
+                    None => "the tile has more positional slots than the board has inputs".into(),
+                }))
+            }
+        }
+    }
+    crate::cmd::run_prepared_sql(session, index, &prepared, &values, None)
+}
+
+fn report_export(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    let format = p.str_opt("format").unwrap_or_else(|| "html".into());
+    let path = p.str_arg("path")?;
+    let board = crate::store::load_dashboard(&name)?;
+    let index = session.resolve_conn(p)?;
+    // A section is the result *and* the chart its report asked for, so an HTML export can draw the
+    // chart rather than only its numbers.
+    let mut sections: Vec<(String, nook_model::ResultSet, Option<report::Chart>)> = Vec::new();
+    // A tile left out of the file is named in the result: an export that quietly drops a tile
+    // because its query needs an input is a lie about what the board holds.
+    // The board's input fields, so an export can paint the tiles that need one — the same
+    // `input.<name>` keys `report.board` takes.
+    let mut bindings: Vec<(String, String)> = Vec::new();
+    for (key, value) in p.raw() {
+        if let Some(field) = key.strip_prefix("input.") {
+            bindings.push((
+                field.to_string(),
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string()),
+            ));
+        }
+    }
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
+    let mut collect = |report_name: &str, report: &serde_json::Value| -> Result<()> {
+        let sql = report["sql"].as_str().unwrap_or_default();
+        let result = match run_tile_sql(session, index, sql, &bindings) {
+            Ok(result) => result,
+            Err(e) => {
+                skipped.push(json!({ "title": report_name, "reason": e.to_string() }));
+                return Ok(());
+            }
+        };
+        let kind = report["chart"]
+            .as_str()
+            .and_then(ChartKind::parse)
+            .unwrap_or(ChartKind::Table);
+        let label = report["label"].as_str().filter(|s| !s.is_empty());
+        let chart = match kind {
+            ChartKind::Table => None,
+            _ => report::chart_from_result(&result, kind, report_name, label).ok(),
+        };
+        sections.push((report_name.to_string(), result, chart));
+        Ok(())
+    };
+    if let Some(board) = &board {
+        for tile in board["tiles"].as_array().cloned().unwrap_or_default() {
+            let report_name = tile["report"].as_str().unwrap_or_default();
+            let Some(report) = crate::store::load_report(report_name)? else {
+                continue;
+            };
+            // A tile that fails is left out of the export rather than failing the whole file: the
+            // board itself paints the rest, and an export should match the board.
+            let _ = collect(report_name, &report);
+        }
+    } else {
+        let report = crate::store::load_report(&name)?
+            .ok_or_else(|| Error::not_found(format!("no report or board named {name:?}")))?;
+        collect(&name, &report)?;
+    }
+    let written = match format.as_str() {
+        "csv" => {
+            let text = sections
+                .iter()
+                .map(|(title, result, _)| format!("# {title}\n{}", result.to_tsv(None, true)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(&path, text).map_err(|e| Error::io(format!("write {path}: {e}")))?;
+            path.clone()
+        }
+        "html" => {
+            let mut body = String::new();
+            for (title, result, chart) in &sections {
+                body.push_str(&format!("<h2>{}</h2>\n", html_escape(title)));
+                // The chart first, then its numbers: a reader who wants the shape gets it, and one
+                // who wants the figures scrolls one block further.
+                if let Some(chart) = chart {
+                    body.push_str(&report::chart_svg(chart));
+                    body.push('\n');
+                }
+                body.push_str("<table>\n");
+                body.push_str("<tr>");
+                for column in &result.columns {
+                    body.push_str(&format!("<th>{}</th>", html_escape(column)));
+                }
+                body.push_str("</tr>\n");
+                for row in &result.rows {
+                    body.push_str("<tr>");
+                    for cell in row {
+                        body.push_str(&format!("<td>{}</td>", html_escape(&cell.display())));
+                    }
+                    body.push_str("</tr>\n");
+                }
+                body.push_str("</table>\n");
+            }
+            let html = format!(
+                "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>{}</title>\n\
+                 <style>body{{font:14px system-ui;margin:2rem;color:#111}}\n\
+                 table{{border-collapse:collapse;margin-bottom:2rem}}\n\
+                 th,td{{border:1px solid #ccc;padding:4px 8px;text-align:left}}\n\
+                 th{{background:#f4f4f4}}</style></head>\n<body>\n<h1>{}</h1>\n{}</body></html>\n",
+                html_escape(&name),
+                html_escape(&name),
+                body
+            );
+            std::fs::write(&path, html).map_err(|e| Error::io(format!("write {path}: {e}")))?;
+            path.clone()
+        }
+        other => {
+            return Err(Error::config(format!(
+                "unknown format {other:?}; use html or csv"
+            )))
+        }
+    };
+    Ok(json!({
+        "path": written,
+        "format": format,
+        "sections": sections
+            .iter()
+            .map(|(t, r, chart)| json!({
+                "title": t,
+                "rows": r.row_count(),
+                "chart": chart.as_ref().map(|c| c.kind.label()),
+            }))
+            .collect::<Vec<_>>(),
+        "skipped": skipped,
+        "summary": if skipped.is_empty() {
+            format!("wrote {written}")
+        } else {
+            format!(
+                "wrote {written}; {} of {} sections left out (see \"skipped\")",
+                skipped.len(),
+                skipped.len() + sections.len()
+            )
+        },
+    }))
+}
+
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn metrics_charts(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let board = p
+        .str_opt("board")
+        .or_else(|| p.str_opt("name"))
+        .ok_or_else(|| Error::config("pass \"board\": the name of a saved board"))?;
+    let every_s = p.int_opt("every_s", 30).clamp(1, 86_400) as u64;
+    let mut params = p.raw().clone();
+    params.insert("name".into(), json!(board));
+    let painted = report_board(session, &Params::from_json(json!(params))?)?;
+    Ok(json!({
+        "board": board,
+        "every_s": every_s,
+        "refresh_at": crate::jobs::now() + every_s,
+        "tiles": painted["tiles"],
+        "errors": painted["errors"],
+        "tile_count": painted["tile_count"],
+    }))
+}
+
+/// Per-column profile: null share, distinct count, min/max, the five commonest values, and a guess at
+/// what the column holds.
+///
+/// One aggregate query per table rather than one per column, because a table with forty columns
+/// should cost one round trip, not forty.
+fn data_profiling(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    let reference = p.str_arg("table")?;
+    let table_ref = TableRef::parse(&reference);
+    let table = session.table_of(index, table_ref.schema.as_deref(), &table_ref.table)?;
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .unwrap_or(nook_core::Dialect::Sqlite);
+    let wanted: Vec<String> = match p.get("columns").and_then(|v| v.as_array()) {
+        Some(list) => list
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        None => table.columns.iter().map(|c| c.name.clone()).collect(),
+    };
+    if wanted.is_empty() {
+        return Err(Error::config(
+            "pass \"columns\": the names to profile, or leave it out to profile every column",
+        ));
+    }
+    // A column that is not in the table is a refusal, not a silently empty result: a typo that
+    // profiles nothing looks exactly like a column that is entirely NULL.
+    let known: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+    for column in &wanted {
+        if !known.contains(&column.as_str()) {
+            return Err(Error::config(format!(
+                "no column {column:?} in {}; it has {}",
+                table.name,
+                known.join(", ")
+            )));
+        }
+    }
+    let qualified = nook_core::quote_qualified(
+        table_ref.schema.as_deref().or(table.schema.as_deref()),
+        &table.name,
+        dialect,
+    );
+    let total = {
+        let count = run_sql(
+            session,
+            index,
+            &format!("SELECT COUNT(*) AS n FROM {qualified}"),
+            Some(1),
+        )?;
+        count
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .map(|v| v.display().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(0.0)
+    };
+    let mut profiles: Vec<serde_json::Value> = Vec::new();
+    for column in &wanted {
+        let ident = nook_core::quote_ident(column, dialect);
+        let aggregate = format!(
+            "SELECT COUNT(*) AS total, COUNT({ident}) AS present, \
+                    COUNT(DISTINCT {ident}) AS distinct_count, \
+                    MIN({ident}) AS min_value, MAX({ident}) AS max_value \
+             FROM {qualified}"
+        );
+        let stats = run_sql(session, index, &aggregate, Some(1))?;
+        let row = stats.rows.first().cloned().unwrap_or_default();
+        let present = row
+            .get(1)
+            .map(|v| v.display().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(0.0);
+        let distinct = row
+            .get(2)
+            .map(|v| v.display().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(0.0);
+        let min = row
+            .get(3)
+            .map(|v| v.display())
+            .unwrap_or_else(|| "NULL".into());
+        let max = row
+            .get(4)
+            .map(|v| v.display())
+            .unwrap_or_else(|| "NULL".into());
+        // The commonest five: ordered by count, so the answer is what the column mostly holds.
+        let common = format!(
+            "SELECT {ident} AS value, COUNT(*) AS n FROM {qualified} \
+             GROUP BY {ident} ORDER BY n DESC"
+        );
+        let commonest = run_sql(session, index, &common, Some(5))?;
+        let values: Vec<serde_json::Value> = commonest
+            .rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "value": r.first().map(|v| v.display()).unwrap_or_default(),
+                    "count": r.get(1)
+                        .map(|v| v.display().parse::<u64>().unwrap_or(0))
+                        .unwrap_or(0),
+                })
+            })
+            .collect();
+        let sample: Vec<String> = values
+            .iter()
+            .filter_map(|v| v["value"].as_str().map(str::to_string))
+            .filter(|v| v != "NULL")
+            .collect();
+        profiles.push(json!({
+            "column": column,
+            "null_share": if total > 0.0 { (total - present) / total } else { 0.0 },
+            "distinct": distinct as u64,
+            "min": min,
+            "max": max,
+            "commonest": values,
+            "shape": guess_shape(&sample),
+        }));
+    }
+    Ok(json!({
+        "table": table.name,
+        "schema": table.schema,
+        "rows": total as u64,
+        "columns": profiles,
+        "count": profiles.len(),
+    }))
+}
+
+/// A guess at what a column holds, from a handful of real values. It is a guess and the key says so:
+/// `shape` is a hint for a reader, never something to build a constraint on.
+fn guess_shape(values: &[String]) -> &'static str {
+    if values.is_empty() {
+        return "empty";
+    }
+    let looks = |f: fn(&str) -> bool| values.iter().all(|v| f(v));
+    if looks(|v| {
+        let (name, domain) = match v.split_once('@') {
+            Some(parts) => parts,
+            None => return false,
+        };
+        !name.is_empty() && domain.contains('.') && !v.contains(' ')
+    }) {
+        return "email";
+    }
+    if looks(|v| {
+        v.len() == 36
+            && v.chars().enumerate().all(|(i, c)| match i {
+                8 | 13 | 18 | 23 => c == '-',
+                _ => c.is_ascii_hexdigit(),
+            })
+    }) {
+        return "uuid";
+    }
+    if looks(|v| {
+        let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+        let others: String = v.chars().filter(|c| !c.is_ascii_digit()).collect();
+        digits.len() >= 7
+            && digits.len() <= 15
+            && others
+                .chars()
+                .all(|c| matches!(c, '+' | '-' | ' ' | '(' | ')' | '.'))
+    }) {
+        return "phone";
+    }
+    if looks(|v| {
+        v.len() >= 8
+            && v.chars().filter(|c| c.is_ascii_digit()).count() >= 6
+            && matches!(v.as_bytes().get(4), Some(b'-') | Some(b'/'))
+    }) {
+        return "date";
+    }
+    "text"
+}
+
+fn metrics_input(_session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    let value = p
+        .get("value")
+        .cloned()
+        .ok_or_else(|| Error::config("pass \"value\": what the field holds"))?;
+    Ok(json!({
+        "name": name,
+        "value": value,
+        "binding": format!("input.{name}"),
+        "note": "pass it back as \"input.{name}\" to report.board or monitor.charts and every tile's SQL reads it as :{name}",
+    }))
+}
+
 /// Helper for the UI: what a generator spec is, for the override editor's placeholder text.
 pub fn generator_hint(_generator: &Generator) -> &'static str {
     "auto|int:1-100|pick:a|b|pattern:INV-####|email|sentence|uuid|date:365|null"
@@ -2474,4 +3109,3 @@ mod tests {
         assert!(out["generators"].as_array().map(Vec::len).unwrap_or(0) > 10);
     }
 }
-

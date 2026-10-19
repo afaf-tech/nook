@@ -108,11 +108,9 @@ fn to_sql_value(v: &Value) -> rusqlite::types::Value {
         Value::Float(f) => S::Real(*f),
         Value::Bool(b) => S::Integer(i64::from(*b)),
         Value::Bytes(b) => S::Blob(b.clone()),
-        Value::Text(s)
-        | Value::Json(s)
-        | Value::Date(s)
-        | Value::Time(s)
-        | Value::Timestamp(s) => S::Text(s.clone()),
+        Value::Text(s) | Value::Json(s) | Value::Date(s) | Value::Time(s) | Value::Timestamp(s) => {
+            S::Text(s.clone())
+        }
     }
 }
 
@@ -322,10 +320,7 @@ impl Driver for Sqlite {
         let started = Instant::now();
         let limit = limit.max(1);
         let bound: Vec<rusqlite::types::Value> = values.iter().map(to_sql_value).collect();
-        let mut stmt = self
-            .conn
-            .prepare(sql)
-            .map_err(|e| map_err(e, sql))?;
+        let mut stmt = self.conn.prepare(sql).map_err(|e| map_err(e, sql))?;
         if stmt.column_count() == 0 {
             let affected = stmt
                 .execute(rusqlite::params_from_iter(bound.iter()))

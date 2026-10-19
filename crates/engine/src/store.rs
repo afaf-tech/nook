@@ -59,11 +59,24 @@ CREATE TABLE IF NOT EXISTS ui_state (
 CREATE TABLE IF NOT EXISTS pinned (
   conn_id   TEXT PRIMARY KEY,
   pin_order INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS report (
+  name       TEXT PRIMARY KEY,
+  sql        TEXT NOT NULL,
+  chart      TEXT NOT NULL DEFAULT 'table',
+  label      TEXT NOT NULL DEFAULT '',
+  options    TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS dashboard (
+  name       TEXT PRIMARY KEY,
+  tiles      TEXT NOT NULL DEFAULT '[]',
+  updated_at INTEGER NOT NULL DEFAULT 0
 );";
 
 /// Bumped when the schema grows. A file at a lower version — or at 0, meaning it predates the
 /// version column — gets the full `SCHEMA` applied on open, which is idempotent (`IF NOT EXISTS`).
-const USER_VERSION: i64 = 1;
+const USER_VERSION: i64 = 2;
 
 /// The columns of the single row, in the order `load_ai` reads them and `save_ai` writes them.
 const COLUMNS: &str = "provider, model, base_url, max_tokens, temperature, timeout_secs";
@@ -220,6 +233,117 @@ pub fn save_snippet(name: &str, sql: &str, tags: &[String]) -> Result<()> {
         ],
     )
     .map_err(db)?;
+    Ok(())
+}
+
+/// One saved report: the statement, the chart kind, the label column and whatever options the
+/// chart kind takes. Stored rather than computed so a board reloads the way it was laid out.
+pub fn save_report(
+    name: &str,
+    sql: &str,
+    chart: &str,
+    label: &str,
+    options: &serde_json::Value,
+) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO report (name, sql, chart, label, options, updated_at)          VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())          ON CONFLICT(name) DO UPDATE SET sql = ?2, chart = ?3, label = ?4, options = ?5, \
+         updated_at = unixepoch()",
+        params![
+            name,
+            sql,
+            chart,
+            label,
+            serde_json::to_string(options).unwrap_or_else(|_| "{}".into())
+        ],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+/// Every saved report, newest first.
+pub fn load_reports() -> Result<Vec<serde_json::Value>> {
+    let conn = open()?;
+    let mut stmt = conn
+        .prepare("SELECT name, sql, chart, label, options, updated_at FROM report ORDER BY name")
+        .map_err(db)?;
+    let rows = stmt
+        .query_map([], |row| {
+            let options: String = row.get(4)?;
+            Ok(serde_json::json!({
+                "name": row.get::<_, String>(0)?,
+                "sql": row.get::<_, String>(1)?,
+                "chart": row.get::<_, String>(2)?,
+                "label": row.get::<_, String>(3)?,
+                "options": serde_json::from_str(&options).unwrap_or(serde_json::json!({})),
+                "updated_at": row.get::<_, i64>(5)?,
+            }))
+        })
+        .map_err(db)?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+/// One saved report by name.
+pub fn load_report(name: &str) -> Result<Option<serde_json::Value>> {
+    Ok(load_reports()?
+        .into_iter()
+        .find(|r| r["name"].as_str() == Some(name)))
+}
+
+/// Remove one report. A name that is not there is a no-op, like `delete_snippet`.
+pub fn delete_report(name: &str) -> Result<()> {
+    let conn = open()?;
+    conn.execute("DELETE FROM report WHERE name = ?1", params![name])
+        .map_err(db)?;
+    Ok(())
+}
+
+/// A board: a name and its tiles, each naming a saved report and carrying its own place on the grid.
+pub fn save_dashboard(name: &str, tiles: &serde_json::Value) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO dashboard (name, tiles, updated_at) VALUES (?1, ?2, unixepoch()) \
+         ON CONFLICT(name) DO UPDATE SET tiles = ?2, updated_at = unixepoch()",
+        params![
+            name,
+            serde_json::to_string(tiles).unwrap_or_else(|_| "[]".into())
+        ],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+/// Every board, with its tiles parsed.
+pub fn load_dashboards() -> Result<Vec<serde_json::Value>> {
+    let conn = open()?;
+    let mut stmt = conn
+        .prepare("SELECT name, tiles, updated_at FROM dashboard ORDER BY name")
+        .map_err(db)?;
+    let rows = stmt
+        .query_map([], |row| {
+            let tiles: String = row.get(1)?;
+            Ok(serde_json::json!({
+                "name": row.get::<_, String>(0)?,
+                "tiles": serde_json::from_str(&tiles).unwrap_or(serde_json::json!([])),
+                "updated_at": row.get::<_, i64>(2)?,
+            }))
+        })
+        .map_err(db)?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+/// One board by name.
+pub fn load_dashboard(name: &str) -> Result<Option<serde_json::Value>> {
+    Ok(load_dashboards()?
+        .into_iter()
+        .find(|d| d["name"].as_str() == Some(name)))
+}
+
+/// Remove one board. Idempotent, like `delete_report`.
+pub fn delete_dashboard(name: &str) -> Result<()> {
+    let conn = open()?;
+    conn.execute("DELETE FROM dashboard WHERE name = ?1", params![name])
+        .map_err(db)?;
     Ok(())
 }
 

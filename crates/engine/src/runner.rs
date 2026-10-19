@@ -278,7 +278,12 @@ fn work(
     page_rows: usize,
     report: &Report<'_>,
 ) -> Result<ResultSet> {
-    let Report { tx, id, cancel, pid } = report;
+    let Report {
+        tx,
+        id,
+        cancel,
+        pid,
+    } = report;
     let id = *id;
     let mut driver = nook_drivers::open(cfg)?;
     if let Some(p) = driver.backend_pid() {
@@ -317,7 +322,10 @@ mod tests {
         // The distinction is the whole point: `Cancelled` is what the user asked for, `Failed` is
         // what the server did to them.
         assert_eq!(JobState::Cancelled.label(), "cancelled");
-        assert_ne!(JobState::Cancelled.label(), JobState::Failed(String::new()).label());
+        assert_ne!(
+            JobState::Cancelled.label(),
+            JobState::Failed(String::new()).label()
+        );
     }
 
     #[test]

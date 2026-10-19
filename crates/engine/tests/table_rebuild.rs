@@ -85,7 +85,9 @@ fn a_rename_keeps_the_rows_the_index_and_the_columns_nobody_named() {
     assert_eq!(f.scalar("SELECT mail FROM users WHERE id = 1"), "a@b.c");
     // The index came with it, under the same name.
     assert_eq!(
-        f.scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'users_email'"),
+        f.scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'users_email'"
+        ),
         "1"
     );
 }
@@ -166,7 +168,10 @@ fn a_column_added_by_the_diff_arrives_with_its_default_null() {
         json!({"table": "users", "changes": {"add": [{"name": "tag", "type": "TEXT"}]}}),
     );
     assert_eq!(out["after"], json!(["id", "email", "note", "total", "tag"]));
-    assert_eq!(f.scalar("SELECT COUNT(*) FROM users WHERE tag IS NULL"), "2");
+    assert_eq!(
+        f.scalar("SELECT COUNT(*) FROM users WHERE tag IS NULL"),
+        "2"
+    );
 }
 
 #[test]

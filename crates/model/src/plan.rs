@@ -115,14 +115,15 @@ fn push_pg(node: &serde_json::Value, out: &mut Plan) -> usize {
         id,
         label,
         detail,
-        cost: node.get("Total Cost").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        cost: node
+            .get("Total Cost")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
         rows: node
             .get("Plan Rows")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
-        actual_ms: node
-            .get("Actual Total Time")
-            .and_then(|v| v.as_f64()),
+        actual_ms: node.get("Actual Total Time").and_then(|v| v.as_f64()),
         children: Vec::new(),
     });
     if let Some(children) = node.get("Plans").and_then(|v| v.as_array()) {
@@ -165,7 +166,12 @@ fn push_mysql(label: &str, node: &serde_json::Value, out: &mut Plan) -> usize {
         .and_then(|c| c.get("query_cost"))
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| node.get("cost_info").and_then(|c| c.get("read_cost")).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+        .or_else(|| {
+            node.get("cost_info")
+                .and_then(|c| c.get("read_cost"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+        })
         .unwrap_or(0.0);
     let rows = node
         .get("rows_examined_per_scan")
@@ -340,7 +346,11 @@ mod tests {
     fn a_sqlite_plan_builds_the_tree_from_parent_ids() {
         let rows = vec![
             (2, 0, "SCAN users".to_string()),
-            (7, 2, "SEARCH posts USING INDEX posts_user (user_id=?)".to_string()),
+            (
+                7,
+                2,
+                "SEARCH posts USING INDEX posts_user (user_id=?)".to_string(),
+            ),
             (9, 2, "USE TEMP B-TREE FOR ORDER BY".to_string()),
         ];
         let plan = from_sqlite(&rows);

@@ -629,9 +629,11 @@ fn set_parameter(session: &mut Session, p: &Params) -> Result<serde_json::Value>
     }
     // A missing "value" is not the same as `"value": null`: the first is a caller mistake, the second
     // is an explicit NULL, which is a different query.
-    let raw = p
-        .get("value")
-        .ok_or_else(|| Error::config("pass \"value\" (use null for an explicit NULL, or \"clear\": true to unbind)"))?;
+    let raw = p.get("value").ok_or_else(|| {
+        Error::config(
+            "pass \"value\" (use null for an explicit NULL, or \"clear\": true to unbind)",
+        )
+    })?;
     let value = if raw.is_null() {
         None
     } else {
@@ -652,9 +654,8 @@ fn set_parameter(session: &mut Session, p: &Params) -> Result<serde_json::Value>
 fn parameterised(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     // Reporting is the default: the caller says it wants a run by passing values (or `run: true`).
     // A capability command that writes the database whenever it is asked a question is a footgun.
-    let wants_run = p.bool_opt("run", false)
-        || p.get("params").is_some()
-        || p.get("positional").is_some();
+    let wants_run =
+        p.bool_opt("run", false) || p.get("params").is_some() || p.get("positional").is_some();
     let sql = match p.str_opt("sql") {
         Some(sql) => sql,
         None => {
@@ -704,7 +705,11 @@ fn run_prepared(
         let raw: Option<Option<String>> = match slot {
             Some(name) => match given.as_ref().and_then(|g| g.get(name)) {
                 Some(serde_json::Value::Null) => Some(None),
-                Some(v) => Some(Some(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))),
+                Some(v) => Some(Some(
+                    v.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| v.to_string()),
+                )),
                 None => bound.get(name).cloned(),
             },
             // A positional slot is filled by `positional` (an array), one entry per slot.
@@ -716,7 +721,11 @@ fn run_prepared(
                     if v.is_null() {
                         None
                     } else {
-                        Some(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
+                        Some(
+                            v.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| v.to_string()),
+                        )
                     }
                 }),
         };
@@ -1034,7 +1043,9 @@ fn explain_visual(session: &mut Session, p: &Params) -> Result<serde_json::Value
         ));
     }
     let conn = session.resolve_conn(p)?;
-    let plan = session.driver_for(conn)?.explain_plan(&statement, analyze)?;
+    let plan = session
+        .driver_for(conn)?
+        .explain_plan(&statement, analyze)?;
     let mut out = plan.to_json();
     out["statement"] = serde_json::json!(statement);
     out["analyze"] = serde_json::json!(analyze);

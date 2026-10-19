@@ -642,7 +642,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Automation",
         "job.profiles",
         "Job export and import",
-        "the whole store is JSON under the app's config directory",
+        "job.export writes a bundle, job.import reads one, job.agent pushes it over ssh",
     ),
     // ---------------------------------------------------------------- Monitor
     (
@@ -914,13 +914,15 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Platform",
         "platform.windows",
         "Windows build",
-        "not built here; cargo builds it",
+        "the CI matrix in .github/workflows/ci.yml builds and tests it; not yet run green, so the \
+         claim stays a gap until it has",
     ),
     (
         "Platform",
         "platform.linux",
         "Linux build",
-        "not built here; cargo builds it",
+        "the CI matrix in .github/workflows/ci.yml builds and tests it, and profiles.rs has a \
+         secret-tool backend; not yet run green, so the claim stays a gap until it has",
     ),
     (
         "Platform",

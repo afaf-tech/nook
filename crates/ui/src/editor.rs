@@ -384,7 +384,13 @@ pub fn show_pane(
         .sql
         .split
         .as_ref()
-        .and_then(|split| split.results.iter().rev().find_map(|run| run.result.clone()));
+        .and_then(|split| {
+            split
+                .results
+                .iter()
+                .rev()
+                .find_map(|run| run.result.clone())
+        });
     if let Some(rs) = pane_rows.as_ref() {
         let _ = state;
         ui.spacing_mut().item_spacing = egui::vec2(f32::from(design::S4), 2.0);
@@ -503,18 +509,18 @@ fn find_bar(
                 ("Aa", "Match case", &mut bar.case),
                 ("|ab|", "Whole word", &mut bar.word),
             ] {
-                if ui
-                    .toggle_value(on, label)
-                    .on_hover_text(hint)
-                    .clicked()
-                {
+                if ui.toggle_value(on, label).on_hover_text(hint).clicked() {
                     *on = !*on;
                 }
             }
             if design::toolbar_button(
                 ui,
                 tokens,
-                if bar.replace_open { "Replace all" } else { "Find next" },
+                if bar.replace_open {
+                    "Replace all"
+                } else {
+                    "Find next"
+                },
                 None,
                 tokens.panel_high,
                 Emphasis::Plain,
@@ -547,7 +553,8 @@ fn find_bar(
                 if bar.replace_open && ui.input(|i| i.modifiers.command) {
                     if let Some(index) = bar.current {
                         let text = &session.tabs[tab_index].sql.text;
-                        let hits = nook_engine::sqltext::find_hits(text, &bar.find, bar.case, bar.word);
+                        let hits =
+                            nook_engine::sqltext::find_hits(text, &bar.find, bar.case, bar.word);
                         if let Some((start, end)) = hits.get(index).copied() {
                             actions.command = Some((
                                 "sql.findReplace",
@@ -621,9 +628,12 @@ fn parameter_chips(ui: &mut Ui, session: &mut Session, tab_index: usize, tokens:
         |ui| {
             ui.spacing_mut().item_spacing.x = f32::from(design::S2);
             ui.label(
-                RichText::new(format!("{} parameter(s)", found.named.len().max(found.positional)))
-                    .font(tokens.mono(design::T_XS))
-                    .color(tokens.text_dim),
+                RichText::new(format!(
+                    "{} parameter(s)",
+                    found.named.len().max(found.positional)
+                ))
+                .font(tokens.mono(design::T_XS))
+                .color(tokens.text_dim),
             );
             for name in found.names() {
                 let value = bound.get(&name).cloned().flatten();
@@ -709,7 +719,10 @@ fn toolbar(
                 |_| {},
             )
             .on_hover_text(match running_job {
-                Some(job) => format!("Cancel background run {} ({} rows so far)", job.id, job.rows),
+                Some(job) => format!(
+                    "Cancel background run {} ({} rows so far)",
+                    job.id, job.rows
+                ),
                 None => stop_reason().to_string(),
             })
             .clicked()

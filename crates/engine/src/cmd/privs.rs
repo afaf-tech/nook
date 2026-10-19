@@ -23,7 +23,13 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("Without \"table\" the grant applies to the whole database."),
         CommandSpec::new("priv.revoke", "Revoke", "Privileges", revoke)
             .params(r#"{"user":"app","privileges":"INSERT","table":"users"}"#),
-    ]
+            CommandSpec::new("priv.roles", "Roles", "Privileges", roles)
+            .params(r#"{"role":"readers","member":"analyst","action":"grant"}"#)
+            .help("Role membership: who is in which role. Without \"action\" it lists the roles and their members; with \"grant\" or \"revoke\" it changes the membership."),
+        CommandSpec::new("priv.audit", "Privilege audit", "Privileges", audit)
+            .params(r#"{"schema":"public"}"#)
+            .help("Every privilege on every object with where it came from: granted directly, through a role, by PUBLIC, or by ownership. SQLite files have no principals, so it refuses there."),
+]
 }
 
 fn require_user_server(session: &Session, index: usize) -> Result<DriverKind> {
@@ -78,6 +84,145 @@ fn grants(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         driver.grants(&user)?
     };
     Ok(json!({ "user": user.display(), "grants": list }))
+}
+
+/// Role membership: who is in which role, and the write side of it.
+///
+/// Postgres keeps this in `pg_auth_members` joined to the role catalog; MySQL 8 in `mysql.role_edges`.
+/// SQLite has no principals at all, so it refuses rather than returning an empty membership list that
+/// reads as "nobody has any role".
+fn roles(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    // `kind_and_dialect` already refuses a file database with its own sentence, so a second check
+    // here would be unreachable.
+    let (kind, _) = kind_and_dialect(session, index)?;
+    let action = p.str_opt("action").unwrap_or_default();
+    if action.is_empty() {
+        let sql = match kind {
+            DriverKind::Postgres => {
+                "SELECT r.rolname AS role, m.rolname AS member, am.admin_option \
+                 FROM pg_auth_members am \
+                 JOIN pg_roles r ON r.oid = am.roleid \
+                 JOIN pg_roles m ON m.oid = am.member \
+                 ORDER BY r.rolname, m.rolname"
+            }
+            _ => {
+                "SELECT TO_ROLE AS role, FROM_USER AS member, WITH_ADMIN_OPTION AS admin_option \
+                 FROM mysql.role_edges ORDER BY TO_ROLE, FROM_USER"
+            }
+        };
+        let result = crate::cmd::run_sql(session, index, sql, None)?;
+        return Ok(json!({
+            "memberships": result.to_json()["rows"],
+            "count": result.row_count(),
+        }));
+    }
+    if action != "grant" && action != "revoke" {
+        return Err(Error::config(format!(
+            "unknown action {action:?}; use \"grant\" or \"revoke\", or leave it out to list"
+        )));
+    }
+    let role = p.str_arg("role")?;
+    let member = p.str_arg("member")?;
+    // A role name cannot be a bound parameter in GRANT, so it is quoted by the dialect's own rule
+    // rather than pasted.
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .unwrap_or(nook_core::Dialect::Postgres);
+    let sql = match (kind, action.as_str()) {
+        (DriverKind::Postgres, "grant") => format!(
+            "GRANT {} TO {};",
+            quote_ident(&role, dialect),
+            quote_ident(&member, dialect)
+        ),
+        (DriverKind::Postgres, _) => format!(
+            "REVOKE {} FROM {};",
+            quote_ident(&role, dialect),
+            quote_ident(&member, dialect)
+        ),
+        (_, "grant") => format!(
+            "GRANT {} TO {};",
+            quote_ident(&role, Dialect::MySql),
+            mysql_account(p, &member)
+        ),
+        (_, _) => format!(
+            "REVOKE {} FROM {};",
+            quote_ident(&role, Dialect::MySql),
+            mysql_account(p, &member)
+        ),
+    };
+    crate::cmd::run_sql(session, index, &sql, Some(1))?;
+    session.log(
+        Level::Success,
+        format!("{action}ed role {role} for {member}"),
+    );
+    Ok(json!({ "sql": sql, "action": action, "role": role, "member": member }))
+}
+
+/// Every privilege on every object, with where it came from.
+///
+/// `via` is the column that makes this an audit rather than a list: `direct`, `role:<name>`, `public`
+/// or `owner`. A privilege a user only has because they own the table is a different risk from one
+/// granted to PUBLIC, and a table that shows them the same way teaches the wrong lesson.
+fn audit(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    // Refused above for a file database: an audit of principals a file does not have would be an
+    // empty table claiming nothing is granted.
+    let (kind, _) = kind_and_dialect(session, index)?;
+    let schema = p.str_opt("schema").unwrap_or_else(|| "public".into());
+    let sql = match kind {
+        DriverKind::Postgres => format!(
+            "WITH RECURSIVE membership(member, role, depth) AS ( \
+               SELECT m.oid, m.oid, 0 FROM pg_roles m \
+               UNION ALL \
+               SELECT mb.member, am.roleid, mb.depth + 1 \
+               FROM membership mb JOIN pg_auth_members am ON am.member = mb.role \
+               WHERE mb.depth < 10 \
+             ) \
+             SELECT c.relname AS object, \
+                    COALESCE(g.grantee, r.rolname) AS principal, \
+                    g.privilege_type AS privilege, \
+                    CASE \
+                      WHEN g.grantee = 0 THEN 'public' \
+                      WHEN g.grantee = c.relowner THEN 'owner' \
+                      WHEN g.grantee = r.oid THEN 'direct' \
+                      ELSE 'role:' || r.rolname \
+                    END AS via \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN information_schema.role_table_grants g \
+                    ON g.table_name = c.relname AND g.table_schema = n.nspname \
+             LEFT JOIN pg_roles r ON r.oid = g.grantee \
+             WHERE n.nspname = '{}' AND c.relkind IN ('r','v','m','p') \
+             ORDER BY c.relname, principal, privilege",
+            schema.replace('\'', "''")
+        ),
+        // MySQL 8 has `mysql.role_edges`, so the `via` column is answerable there too. On 5.7 the
+        // table does not exist and the join is empty, which reads as "nothing came through a role" —
+        // true on a server that has no roles.
+        _ => format!(
+            "SELECT p.TABLE_NAME AS object, p.GRANTEE AS principal, p.PRIVILEGE_TYPE AS privilege, \
+                    CASE \
+                      WHEN p.GRANTEE = 'PUBLIC' THEN 'public' \
+                      WHEN re.TO_ROLE IS NOT NULL THEN CONCAT('role:', re.TO_ROLE) \
+                      ELSE 'direct' \
+                    END AS via \
+             FROM information_schema.TABLE_PRIVILEGES p \
+             LEFT JOIN mysql.role_edges re ON re.FROM_USER = p.GRANTEE \
+             WHERE p.TABLE_SCHEMA = '{}' \
+             ORDER BY p.TABLE_NAME, principal, privilege",
+            schema.replace('\'', "''")
+        ),
+    };
+    let result = crate::cmd::run_sql(session, index, &sql, None)?;
+    Ok(json!({
+        "schema": schema,
+        "grants": result.to_json()["rows"],
+        "count": result.row_count(),
+    }))
 }
 
 fn mysql_account(p: &Params, user: &str) -> String {

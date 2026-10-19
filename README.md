@@ -11,7 +11,7 @@ registered command shared by all three surfaces.
 
 | Area | What you get |
 |---|---|
-| **Connections** | SQLite files, PostgreSQL, MySQL/MariaDB; SSH tunnel through the system `ssh`; SSL modes (`disable`/`prefer`/`require`/`verify-ca`/`verify-full`); read-only profiles; passwords in the macOS login keychain; connection groups; saved profiles in JSON |
+| **Connections** | SQLite files, PostgreSQL, MySQL/MariaDB; SSH tunnel through the system `ssh`; SSL modes (`disable`/`prefer`/`require`/`verify-ca`/`verify-full`); read-only profiles; passwords in the OS keychain (`security` on macOS, `secret-tool` on Linux); connection groups; saved profiles in JSON |
 | **Browse** | Catalog read in one pass: schemas, tables, views, columns, types, defaults, comments, indexes, foreign keys, row estimates and sizes |
 | **Data grid** | Paging, sort by any column, `WHERE` filter, inline cell editing with type coercion, insert/duplicate/delete/`NULL`, a pending-changes list showing the exact statements, one-transaction apply with rollback on first failure |
 | **Query editor** | Multi-statement scripts, run statement at cursor, formatter, completion from the live catalog, `EXPLAIN`/`EXPLAIN ANALYZE`, history, snippets, transactions |
@@ -32,6 +32,11 @@ registered command shared by all three surfaces.
 
 - Rust 1.80 or newer (`rustup`)
 - macOS is fully supported; the GUI uses `egui`/`eframe`
+- Linux and Windows build from the same source, and `.github/workflows/ci.yml` runs the suite on all
+  three. The password store has a backend per platform: `security` on macOS, `secret-tool` on Linux
+  (install `libsecret-tools`), and — since Windows cannot read a `cmdkey` credential back — the
+  profile file with mode 0600 there. The support claim follows a green matrix run; until one exists,
+  macOS remains the supported target
 - `ssh` for tunneled connections; `pg_dump`/`mysqldump` only for those backup types
 
 ## Install

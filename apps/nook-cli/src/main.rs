@@ -58,6 +58,8 @@ fn usage() -> String {
   ai providers [--json]                  providers, their endpoints and whether a key is set
   ai key <provider> [--remove]           save a key from stdin, or forget the stored one
   job list | run <id> | serve [--interval S]
+  job import --path f.json|-             add jobs from a bundle (job.export's format)
+  job logs <id> [--limit N]              a job's run log
   mcp                                    MCP server on stdio
   help
 
@@ -1394,8 +1396,61 @@ fn job(args: &[String]) -> CliResult {
                 std::thread::sleep(std::time::Duration::from_secs(interval));
             }
         }
+        // The remote half of `job.agent`: read a bundle from stdin (so nothing lands in a temp file
+        // on the far side) and add its jobs here.
+        "import" => {
+            let given = opt(args, "--path").ok_or("pass --path, or --path - for stdin")?;
+            let path = if given == "-" {
+                use std::io::Read;
+                let mut buffer = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buffer)
+                    .map_err(|e| format!("stdin: {e}"))?;
+                // The bundle arrives as a file on stdin, so it is written to a scratch path the
+                // engine's own reader can open — the engine's contract is a path, not a stream.
+                let dir = nook_engine::profiles::config_dir();
+                nook_engine::profiles::ensure_dir().map_err(|e| e.to_string())?;
+                let scratch = dir.join(format!("incoming-jobs-{}.json", std::process::id()));
+                std::fs::write(&scratch, buffer).map_err(|e| format!("write: {e}"))?;
+                scratch.to_string_lossy().to_string()
+            } else {
+                given
+            };
+            let mut session = Session::new();
+            let out = run_command(&mut session, "job.import", json!({ "path": path }))
+                .map_err(|e| e.to_string())?;
+            println!("{}", serde_json::to_string(&out).unwrap_or_default());
+            Ok(())
+        }
+        "logs" => {
+            let id = positionals.get(1).ok_or("pass a job id")?;
+            let limit = opt(args, "--limit")
+                .and_then(|l| l.parse::<u64>().ok())
+                .unwrap_or(20);
+            let mut session = Session::new();
+            let out = run_command(
+                &mut session,
+                "job.logs",
+                json!({ "id": id, "limit": limit }),
+            )
+            .map_err(|e| e.to_string())?;
+            for entry in out["log"].as_array().cloned().unwrap_or_default() {
+                println!(
+                    "{} {} {} {}",
+                    entry["at"].as_u64().unwrap_or(0),
+                    if entry["ok"].as_bool().unwrap_or(false) {
+                        "ok"
+                    } else {
+                        "failed"
+                    },
+                    entry["ms"].as_u64().unwrap_or(0),
+                    entry["message"].as_str().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
         other => Err(format!(
-            "unknown job subcommand '{other}'; try list, run or serve"
+            "unknown job subcommand '{other}'; try list, run, serve, import or logs"
         )),
     }
 }

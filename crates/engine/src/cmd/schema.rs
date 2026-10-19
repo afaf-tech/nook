@@ -505,9 +505,7 @@ fn create_partition(session: &mut Session, p: &Params) -> Result<serde_json::Val
         };
         let (year, month, day) = (number(0..4), number(5..7), number(8..10));
         let valid = match (shaped, year, month, day) {
-            (true, Some(_), Some(m), Some(d)) => {
-                (1..=12).contains(&m) && (1..=31).contains(&d)
-            }
+            (true, Some(_), Some(m), Some(d)) => (1..=12).contains(&m) && (1..=31).contains(&d),
             _ => false,
         };
         if !valid {
@@ -630,9 +628,19 @@ fn table_rebuild(session: &mut Session, p: &Params) -> Result<serde_json::Value>
     }
     // The rows have to survive a destructive rebuild, so the count is compared across it. A change
     // that silently truncates is the failure this command exists to make impossible.
-    let rows_before = count_rows(session, index, reference.schema.as_deref(), &reference.table)?;
+    let rows_before = count_rows(
+        session,
+        index,
+        reference.schema.as_deref(),
+        &reference.table,
+    )?;
     let outcome = rebuild(session, index, reference.schema.as_deref(), &table)?;
-    let rows_after = count_rows(session, index, reference.schema.as_deref(), &reference.table)?;
+    let rows_after = count_rows(
+        session,
+        index,
+        reference.schema.as_deref(),
+        &reference.table,
+    )?;
     // The catalog is the proof, not a second implementation: every index, trigger and foreign key
     // the table had must still be there under the same name. One the plan could not replay is named
     // rather than silently missing.
@@ -690,7 +698,10 @@ fn table_rebuild(session: &mut Session, p: &Params) -> Result<serde_json::Value>
 
 /// Apply a `changes` diff to `table` in place: `rename`, `retype`, `nullable`, `default`, `drop`,
 /// `add`. Every key is optional and unknown keys are refused, so a typo cannot silently do nothing.
-fn apply_changes(table: &mut Table, changes: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+fn apply_changes(
+    table: &mut Table,
+    changes: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
     for (key, value) in changes {
         match key.as_str() {
             "rename" => {
@@ -789,13 +800,7 @@ fn apply_changes(table: &mut Table, changes: &serde_json::Map<String, serde_json
                     // Past every existing ordinal, not `len + 1`: after a drop, `len + 1` can equal
                     // a live column's ordinal and the rebuild would copy that column's data into
                     // the new one.
-                    column.ordinal = table
-                        .columns
-                        .iter()
-                        .map(|c| c.ordinal)
-                        .max()
-                        .unwrap_or(0)
-                        + 1;
+                    column.ordinal = table.columns.iter().map(|c| c.ordinal).max().unwrap_or(0) + 1;
                     table.columns.push(column);
                 }
             }
@@ -835,7 +840,10 @@ fn dangling_references(
         let fks = run_sql(
             session,
             index,
-            &format!("PRAGMA foreign_key_list({})", quote_ident(&child, Dialect::Sqlite)),
+            &format!(
+                "PRAGMA foreign_key_list({})",
+                quote_ident(&child, Dialect::Sqlite)
+            ),
             Some(1000),
         )?;
         for fk in &fks.rows {
@@ -866,7 +874,12 @@ fn count_rows(
     table: &str,
 ) -> Result<i64> {
     let qualified = quote_qualified(schema, table, session.driver_for(index)?.dialect());
-    let rs = run_sql(session, index, &format!("SELECT COUNT(*) FROM {qualified}"), Some(1))?;
+    let rs = run_sql(
+        session,
+        index,
+        &format!("SELECT COUNT(*) FROM {qualified}"),
+        Some(1),
+    )?;
     Ok(rs
         .rows
         .first()
@@ -939,7 +952,11 @@ fn rebuild(
             let _ = session.driver_for(index)?.rollback();
             return Err(Error::config(format!(
                 "the rebuild would leave {} dangling ({}); nothing was changed",
-                if dangling.len() == 1 { "a reference" } else { "references" },
+                if dangling.len() == 1 {
+                    "a reference"
+                } else {
+                    "references"
+                },
                 dangling.join(", ")
             )));
         }

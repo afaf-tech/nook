@@ -8,7 +8,9 @@ use nook_engine::{Conn, Session};
 use serde_json::json;
 
 fn live_pg() -> Option<Session> {
-    let uri = std::env::var("NOOK_PG_URI").ok().filter(|s| !s.is_empty())?;
+    let uri = std::env::var("NOOK_PG_URI")
+        .ok()
+        .filter(|s| !s.is_empty())?;
     let cfg = nook_core::ConnectionConfig::parse(&uri).ok()?;
     let mut session = Session::new();
     session.conns.push(Conn::new(cfg));
@@ -68,7 +70,11 @@ fn a_partitioned_table_lists_its_partitions_with_bounds() {
     );
     let after = run(&mut s, "schema.partitions", json!({"table": "p7_events"}));
     assert_eq!(after["partitions"].as_array().expect("partitions").len(), 0);
-    run(&mut s, "sql.run", json!({"sql": "DROP TABLE IF EXISTS p7_events CASCADE;"}));
+    run(
+        &mut s,
+        "sql.run",
+        json!({"sql": "DROP TABLE IF EXISTS p7_events CASCADE;"}),
+    );
 }
 
 #[test]
@@ -86,11 +92,18 @@ fn an_unpartitioned_table_answers_an_empty_list_with_a_reason() {
     assert_eq!(out["partitioned"], false);
     assert_eq!(out["partitions"], json!([]));
     assert!(
-        out["note"].as_str().unwrap_or_default().contains("not partitioned"),
+        out["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not partitioned"),
         "{}",
         out["note"]
     );
-    run(&mut s, "sql.run", json!({"sql": "DROP TABLE IF EXISTS p7_plain;"}));
+    run(
+        &mut s,
+        "sql.run",
+        json!({"sql": "DROP TABLE IF EXISTS p7_plain;"}),
+    );
 }
 
 #[test]
@@ -138,5 +151,9 @@ fn dropping_a_partition_needs_confirm() {
     assert!(message.contains("confirm"), "{message}");
     let still = run(&mut s, "schema.partitions", json!({"table": "p7_gate"}));
     assert_eq!(still["partitions"].as_array().expect("partitions").len(), 1);
-    run(&mut s, "sql.run", json!({"sql": "DROP TABLE IF EXISTS p7_gate CASCADE;"}));
+    run(
+        &mut s,
+        "sql.run",
+        json!({"sql": "DROP TABLE IF EXISTS p7_gate CASCADE;"}),
+    );
 }

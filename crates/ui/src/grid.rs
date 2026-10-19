@@ -4,6 +4,7 @@ use egui::RichText;
 use nook_engine::{Level, Session};
 
 use crate::app::{BlobEditor, FilterForm, QuickLook, RowJson, UiState};
+use crate::strings::tr;
 use crate::table::{TableColumn, TableEvent, TableView};
 use crate::theme::{self as design, Tokens};
 
@@ -221,7 +222,7 @@ pub fn show(
             {
                 command = Some(("grid.countRows", serde_json::json!({})));
             }
-            if design::ghost_button(ui, tokens, "Refresh", true)
+            if design::ghost_button(ui, tokens, tr("Refresh"), true)
                 .on_hover_text("Reload this page")
                 .clicked()
             {
@@ -246,7 +247,7 @@ pub fn show(
                     command = Some(("grid.duplicateRow", serde_json::json!({"row": row})));
                 }
             }
-            if design::ghost_button(ui, tokens, "Delete", editable && selected_row.is_some())
+            if design::ghost_button(ui, tokens, tr("Delete"), editable && selected_row.is_some())
                 .on_hover_text("Mark the selected row for deletion")
                 .clicked()
             {
@@ -524,7 +525,7 @@ pub fn show(
                                 }),
                             ));
                         }
-                        if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                        if design::ghost_button(ui, tokens, tr("Close"), true).clicked() {
                             state.bulk_edit = None;
                         }
                     });
@@ -860,7 +861,7 @@ pub fn show(
                     state.filter_edit.clear();
                     command = Some(("grid.clearFilter", serde_json::json!({})));
                 }
-                if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
+                if design::ghost_button(ui, tokens, tr("Refresh"), true).clicked() {
                     reload = true;
                 }
             }),
@@ -868,7 +869,7 @@ pub fn show(
                 if design::accent_button(ui, tokens, "+ Row", editable).clicked() {
                     command = Some(("grid.insertRow", serde_json::json!({"values": {}})));
                 }
-                if design::ghost_button(ui, tokens, "Refresh", true).clicked() {
+                if design::ghost_button(ui, tokens, tr("Refresh"), true).clicked() {
                     reload = true;
                 }
             }),
@@ -1015,10 +1016,10 @@ pub fn show(
                 tokens.info,
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                if design::ghost_button(ui, tokens, tr("Close"), true).clicked() {
                     close = true;
                 }
-                if design::primary_button(ui, tokens, "Save", true).clicked() {
+                if design::primary_button(ui, tokens, tr("Save"), true).clicked() {
                     save = true;
                 }
             });
@@ -1092,7 +1093,7 @@ pub fn show(
             );
             design::tag_lite(ui, tokens, "one level");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                if design::ghost_button(ui, tokens, tr("Close"), true).clicked() {
                     state.row_json = None;
                 }
                 if design::ghost_button(ui, tokens, "Copy", true).clicked() {
@@ -1131,7 +1132,7 @@ pub fn show(
                 ui.label(RichText::new(note).size(11.5).color(tokens.warn));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                if design::ghost_button(ui, tokens, tr("Close"), true).clicked() {
                     state.quick_look = None;
                 }
                 if design::ghost_button(ui, tokens, "Copy", true).clicked() {
@@ -1282,7 +1283,7 @@ pub fn show(
                         if design::primary_button(ui, tokens, "Set", true).clicked() {
                             command = Some(("grid.rawMode", serde_json::json!({ "sql": edited })));
                         }
-                        if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                        if design::ghost_button(ui, tokens, tr("Close"), true).clicked() {
                             state.raw_edit = None;
                         }
                     });

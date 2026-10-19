@@ -8,6 +8,7 @@ use nook_core::{DriverKind, SslMode};
 use nook_engine::{Level, Session};
 
 use crate::app::{Confirm, ConnStep, ConnectionForm, SshAuth, TestOutcome, UiState};
+use crate::strings::tr;
 use crate::table;
 use crate::theme::{self as design, Tokens};
 
@@ -899,7 +900,7 @@ fn editor_footer(ui: &mut egui::Ui, tokens: &Tokens, state: &UiState, action: &m
                 if save.clicked() {
                     action.save = true;
                 }
-                if design::dialogue_button(ui, tokens, "Cancel", design::Emphasis::Plain, true)
+                if design::dialogue_button(ui, tokens, tr("Cancel"), design::Emphasis::Plain, true)
                     .clicked()
                 {
                     action.close = true;
@@ -1274,7 +1275,7 @@ fn command_runner(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState,
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if design::primary_button(ui, tokens, "Run", true).clicked() {
+                if design::primary_button(ui, tokens, tr("Run"), true).clicked() {
                     match serde_json::from_str::<serde_json::Value>(&state.command_params) {
                         Ok(params) => {
                             let id = state.command_id.clone();
@@ -1312,7 +1313,7 @@ fn command_runner(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState,
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                    if design::ghost_button(ui, tokens, tr("Close"), true).clicked() {
                         close = true;
                     }
                 });
@@ -1475,7 +1476,7 @@ fn datagen_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState,
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                    if design::ghost_button(ui, tokens, tr("Close"), true).clicked() {
                         close = true;
                     }
                 });
@@ -1677,7 +1678,7 @@ fn import_wizard_dialog(
                     commit = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                    if design::ghost_button(ui, tokens, tr("Close"), true).clicked() {
                         close = true;
                     }
                 });
@@ -1892,7 +1893,7 @@ fn export_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, 
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if design::ghost_button(ui, tokens, "Cancel", true).clicked() {
+                    if design::ghost_button(ui, tokens, tr("Cancel"), true).clicked() {
                         close = true;
                     }
                 });
@@ -1928,7 +1929,7 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
     let frame = dialog(ui.ctx(), tokens);
     let mut open = true;
     let mut close = false;
-    egui::Window::new("Preferences")
+    egui::Window::new(tr("Preferences"))
         .open(&mut open)
         .frame(frame)
         .collapsible(false)
@@ -1942,6 +1943,13 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
                         .color(tokens.text_dim),
                 );
                 let dark = session.settings.theme != "light";
+                // Each segment pair gets its own label: two unlabelled switches stacked are a guess,
+                // not a setting.
+                ui.label(
+                    RichText::new(tr("Theme"))
+                        .size(11.0)
+                        .color(tokens.text_faint),
+                );
                 if let Some(index) =
                     design::segmented(ui, tokens, &[("Dark", dark), ("Light", !dark)])
                 {
@@ -1952,7 +1960,33 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
                     );
                 }
                 ui.add_space(6.0);
+                // The chrome's language. It goes through `platform.i18n`, so the same switch works
+                // from the CLI and the control channel.
+                ui.label(
+                    RichText::new(tr("Language"))
+                        .size(11.0)
+                        .color(tokens.text_faint),
+                );
+                let locale = session.settings.locale.clone();
+                let options: Vec<(String, bool)> = crate::strings::LOCALES
+                    .iter()
+                    .map(|(code, name)| ((*name).to_string(), *code == locale))
+                    .collect();
+                let pairs: Vec<(&str, bool)> = options
+                    .iter()
+                    .map(|(name, on)| (name.as_str(), *on))
+                    .collect();
+                if let Some(index) = design::segmented(ui, tokens, &pairs) {
+                    let next = crate::strings::LOCALES[index].0;
+                    let _ = session.run("platform.i18n", serde_json::json!({ "locale": next }));
+                }
+                ui.add_space(6.0);
                 let compact = session.settings.density == nook_engine::Density::Compact;
+                ui.label(
+                    RichText::new(tr("Density"))
+                        .size(11.0)
+                        .color(tokens.text_faint),
+                );
                 if let Some(index) = design::segmented(
                     ui,
                     tokens,
@@ -1972,7 +2006,7 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
                 ui.label(RichText::new("Data").size(11.5).color(tokens.text_dim));
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new("Rows per page")
+                        RichText::new(tr("Page size"))
                             .size(12.0)
                             .color(tokens.text_dim),
                     );
@@ -2090,7 +2124,7 @@ fn settings_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if design::primary_button(ui, tokens, "Close", true).clicked() {
+                if design::primary_button(ui, tokens, tr("Close"), true).clicked() {
                     close = true;
                 }
             });
@@ -2150,7 +2184,7 @@ fn safe_prompt(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                 {
                     submit = true;
                 }
-                if design::ghost_button(ui, tokens, "Cancel", true).clicked() {
+                if design::ghost_button(ui, tokens, tr("Cancel"), true).clicked() {
                     close = true;
                 }
             });

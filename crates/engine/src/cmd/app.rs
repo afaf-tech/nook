@@ -14,7 +14,7 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("Report the current preferences."),
         CommandSpec::new("app.setSetting", "Change a preference", "App", set_setting)
             .params(r#"{"key":"theme","value":"light"}"#)
-            .help("Set one preference: theme, page_size, max_rows, font_size, confirm_destructive, safe_mode, auto_commit_edits, keyword_case, show_system_objects, max_blob_bytes, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout."),
+            .help("Set one preference: theme, locale, page_size, max_rows, font_size, confirm_destructive, safe_mode, auto_commit_edits, keyword_case, show_system_objects, max_blob_bytes, ai_provider, ai_model, ai_base_url, ai_max_tokens, ai_temperature, ai_timeout."),
         CommandSpec::new("app.log", "Message log", "App", get_log)
             .params(r#"{"limit":50}"#)
             .help("Recent messages, oldest first."),
@@ -23,6 +23,13 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("app.about", "About Nook", "Help", about),
         CommandSpec::new("app.platform", "Platform information", "Help", platform)
             .help("Build target, UI toolkit and where the configuration lives."),
+        CommandSpec::new("platform.i18n", "Language", "App", i18n)
+            .params(r#"{"locale":"id"}"#)
+            .help("Report the chrome's languages, or set one. Only the UI's own strings translate; an error the engine raises stays English."),
+        CommandSpec::new("platform.control", "Control channel", "App", control_info)
+            .help("The live JSON control channel: port, key file, methods. `--control <port>` starts it."),
+        CommandSpec::new("platform.cli", "Command line", "App", cli_info)
+            .help("The `nook-cli` binary: version, command count, and whether it is on PATH."),
         CommandSpec::new("app.mcp", "MCP server", "Help", mcp_info)
             .help("How an agent reaches Nook: every command is an MCP tool."),
         CommandSpec::new("tab.new", "New query tab", "App", new_query_tab)
@@ -78,6 +85,7 @@ fn get_settings(session: &mut Session, _p: &crate::Params) -> Result<serde_json:
     let s = &session.settings;
     Ok(json!({
         "theme": s.theme,
+        "locale": s.locale,
         "density": s.density.as_str(),
         "page_size": s.page_size,
         "max_rows": s.max_rows,
@@ -280,6 +288,125 @@ fn platform(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Va
         "ai_db_file": crate::profiles::ai_db_path().to_string_lossy(),
         "keychain": crate::profiles::keychain_available(),
         "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// The chrome's languages, or a switch between them. `locale` is a preference, so it is written to
+/// the profile store and read back on the next run, the way `density` is.
+fn i18n(session: &mut Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let Some(locale) = p.get("locale").and_then(|v| v.as_str()) else {
+        return Ok(json!({
+            "locale": session.settings.locale,
+            "languages": nook_ui_languages(),
+            "scope": "the chrome; engine errors stay English",
+        }));
+    };
+    if !nook_ui_languages().iter().any(|(code, _)| *code == locale) {
+        return Err(Error::config(format!(
+            "locale must be one of {}",
+            nook_ui_languages()
+                .iter()
+                .map(|(code, _)| *code)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    session.settings.locale = locale.to_string();
+    session.profiles.set_setting("locale", json!(locale));
+    session.profiles.save()?;
+    Ok(json!({
+        "locale": locale,
+        "languages": nook_ui_languages(),
+        "saved": true,
+    }))
+}
+
+/// The languages the UI ships. The engine cannot depend on the UI crate, so the list lives here and
+/// a UI test asserts the two agree.
+fn nook_ui_languages() -> Vec<(&'static str, &'static str)> {
+    vec![("en", "English"), ("id", "Bahasa Indonesia")]
+}
+
+/// What the control channel is doing right now. The channel belongs to the desktop app, so this
+/// reports the port the process was started with and whether its key file is there — the answer a
+/// script needs before it tries to connect.
+fn control_info(session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    // The desktop app records the port it bound in the session's messages; the CLI and MCP have no
+    // channel, and say so rather than inventing a port.
+    let bound = session
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| m.text.strip_prefix("control channel on 127.0.0.1:"))
+        .map(|rest| {
+            rest.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        });
+    let key_dir = crate::profiles::config_dir();
+    let port = bound.as_ref().and_then(|p| p.parse::<u16>().ok());
+    let key_path = port.map(|p| key_dir.join(format!("control-key.{p}")));
+    Ok(json!({
+        "running": port.is_some(),
+        "port": port,
+        "key_file": key_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "key_present": key_path.as_ref().map(|p| p.is_file()).unwrap_or(false),
+        "transport": "one JSON object per line over TCP on 127.0.0.1",
+        "auth": "the first line carries the key from the key file",
+        "methods": nook_control_methods(),
+        "start": "nook --control <port>",
+    }))
+}
+
+/// The control channel's methods. The UI owns the server; this is the list it accepts, kept here so
+/// a caller can learn the surface from the engine alone.
+fn nook_control_methods() -> Vec<&'static str> {
+    vec![
+        "engine.run",
+        "ui.state",
+        "ui.selectTab",
+        "ui.selectTable",
+        "ui.setEditorText",
+        "ui.find",
+        "ui.setTheme",
+        "ui.setAiBand",
+        "ui.messages",
+        "ui.shot",
+        "ui.commands",
+        "ui.selectResult",
+        "ui.selectRange",
+        "ui.quickLook",
+        "ui.setResultView",
+        "ui.openConnection",
+        "ui.setConnectionTab",
+        "ui.setConnectionField",
+        "ui.quickOpen",
+        "ui.quit",
+    ]
+}
+
+/// `nook-cli` from the engine's side: the binary that runs the same command ids from a shell.
+fn cli_info(_session: &mut Session, _p: &crate::Params) -> Result<serde_json::Value> {
+    let on_path = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path).any(|dir| {
+                let candidate = dir.join(if cfg!(windows) {
+                    "nook-cli.exe"
+                } else {
+                    "nook-cli"
+                });
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false);
+    Ok(json!({
+        "binary": "nook-cli",
+        "version": env!("CARGO_PKG_VERSION"),
+        "commands": crate::registry().len(),
+        "on_path": on_path,
+        "shares_command_ids": true,
+        "entry": "nook-cli <command> or nook-cli mcp",
     }))
 }
 

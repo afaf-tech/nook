@@ -464,7 +464,11 @@ pub fn find_replace(
         ));
     }
     let hits = find_hits(text, find, case, word);
-    let hits: Vec<(usize, usize)> = if all { hits } else { hits.into_iter().take(1).collect() };
+    let hits: Vec<(usize, usize)> = if all {
+        hits
+    } else {
+        hits.into_iter().take(1).collect()
+    };
     if hits.is_empty() {
         return Ok((text.to_string(), Vec::new()));
     }
@@ -477,8 +481,16 @@ pub fn find_replace(
 
 /// Byte ranges of every match, left to right.
 pub fn find_hits(text: &str, find: &str, case: bool, word: bool) -> Vec<(usize, usize)> {
-    let hay = if case { text.to_string() } else { text.to_lowercase() };
-    let needle = if case { find.to_string() } else { find.to_lowercase() };
+    let hay = if case {
+        text.to_string()
+    } else {
+        text.to_lowercase()
+    };
+    let needle = if case {
+        find.to_string()
+    } else {
+        find.to_lowercase()
+    };
     let mut out = Vec::new();
     let mut from = 0;
     while from <= hay.len() {
@@ -594,7 +606,11 @@ pub fn bind_placeholders(sql: &str, style: BindStyle) -> (String, Vec<Option<Str
 
 fn push_named(out: &mut Params, name: &str) {
     out.style = ParamStyle::Colon;
-    match out.named.iter_mut().find(|p| p.name.as_deref() == Some(name)) {
+    match out
+        .named
+        .iter_mut()
+        .find(|p| p.name.as_deref() == Some(name))
+    {
         Some(existing) => existing.count += 1,
         None => out.named.push(Placeholder {
             name: Some(name.to_string()),
@@ -1402,7 +1418,8 @@ mod tests {
             "a repeated name fills two positions"
         );
 
-        let (sql, slots) = bind_placeholders("select ? as a, x::int as b, ? as c", BindStyle::Question);
+        let (sql, slots) =
+            bind_placeholders("select ? as a, x::int as b, ? as c", BindStyle::Question);
         assert_eq!(sql, "select ? as a, x::int as b, ? as c");
         assert_eq!(slots, vec![None, None]);
     }

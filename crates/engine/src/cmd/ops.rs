@@ -73,6 +73,17 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("job.notifications", "Webhook on failure", "Automation", job_notifications)
             .params(r#"{"id":"nightly","webhook":"https://hooks.example.com/nook"}"#)
             .help("List, set or clear a job's failure webhook. An empty webhook clears it. Email is a webhook to a mail relay."),
+        CommandSpec::new("job.profiles", "Job profiles", "Automation", job_profiles)
+            .help("Where the jobs live, how many there are, and the bundle format that moves them: `job.export` writes one, `job.import` reads it, `job.agent` pushes it."),
+        CommandSpec::new("job.export", "Export jobs", "Automation", job_export)
+            .params(r#"{"path":"~/jobs.json","ids":["nightly"]}"#)
+            .help("Writes a portable JSON bundle of the named jobs (all of them when \"ids\" is left out). No credential is written; the bundle says so in a \"secrets\" key."),
+        CommandSpec::new("job.import", "Import jobs", "Automation", job_import)
+            .params(r#"{"path":"~/jobs.json"}"#)
+            .help("Reads a bundle written by job.export. Refuses a chain that points at a job the bundle does not carry, and refuses a cycle, before writing anything."),
+        CommandSpec::new("job.agent", "Deploy to a host", "Automation", job_agent)
+            .params(r#"{"host":"build@db1","ids":["nightly"]}"#)
+            .help("Pushes a job bundle to a remote `nook-cli job serve` over ssh and reads its log back. Refuses when the remote binary is missing rather than half-deploying."),
         CommandSpec::new("job.chain", "List or set a job's chain", "Automation", job_chain)
             .params(r#"{"id":"nightly","then":["followup"]}"#)
             .help("List a job's `then` chain, or set it (an empty array clears). Targets must exist and the chain must stay acyclic; `job.create` accepts the same field."),
@@ -1140,6 +1151,261 @@ fn job_notifications(session: &mut Session, p: &Params) -> Result<serde_json::Va
             Ok(json!({ "id": id, "webhook": webhook }))
         }
     }
+}
+
+/// The job store itself: where it is, what is in it, and the format that moves it between machines.
+///
+/// A job is a saved profile the way a connection is, so this answers the same question `profiles`
+/// does for connections — without being a second, differently-shaped export path.
+fn job_profiles(session: &mut Session, _p: &Params) -> Result<serde_json::Value> {
+    let path = crate::profiles::jobs_path();
+    let enabled = session.jobs.jobs.iter().filter(|j| j.enabled).count();
+    let chained = session
+        .jobs
+        .jobs
+        .iter()
+        .filter(|j| !j.then.is_empty())
+        .count();
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "exists": path.is_file(),
+        "jobs": session.jobs.jobs.len(),
+        "enabled": enabled,
+        "chained": chained,
+        "log_entries": session.jobs.log.len(),
+        "bundle": {
+            "version": 1,
+            "secrets": "omitted",
+            "write": "job.export",
+            "read": "job.import",
+            "deploy": "job.agent",
+        },
+    }))
+}
+
+/// Write a portable bundle of jobs. Nothing credential-shaped goes in: a job's webhook URL is the
+/// point of the field, but an embedded password is not, and the bundle says which it did.
+fn job_export(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let path = p.str_arg("path")?;
+    let wanted = p.list("ids");
+    let jobs: Vec<&crate::jobs::Job> = session
+        .jobs
+        .jobs
+        .iter()
+        .filter(|job| wanted.is_empty() || wanted.iter().any(|id| id == &job.id || id == &job.name))
+        .collect();
+    if jobs.is_empty() {
+        return Err(Error::not_found(match wanted.is_empty() {
+            true => "there are no jobs to export".to_string(),
+            false => format!("no job named {}", wanted.join(", ")),
+        }));
+    }
+    // A job's `params` is free-form JSON a user typed, so it is scanned rather than trusted: a key
+    // that looks like a credential is dropped and named in the answer.
+    let mut stripped: Vec<String> = Vec::new();
+    let mut exported: Vec<serde_json::Value> = Vec::new();
+    for job in &jobs {
+        let mut value = serde_json::to_value(job).map_err(|e| Error::config(e.to_string()))?;
+        strip_secrets(&mut value, &mut stripped);
+        exported.push(value);
+    }
+    let bundle = json!({
+        "version": 1,
+        "secrets": "omitted",
+        "jobs": exported,
+    });
+    let text = serde_json::to_string_pretty(&bundle).map_err(|e| Error::config(e.to_string()))?;
+    std::fs::write(&path, text).map_err(|e| Error::io(format!("write {path}: {e}")))?;
+    Ok(json!({
+        "path": path,
+        "jobs": jobs.len(),
+        "ids": jobs.iter().map(|j| j.id.clone()).collect::<Vec<_>>(),
+        "stripped": stripped,
+        "summary": format!("wrote {path}"),
+    }))
+}
+
+/// Remove any key whose name says it holds a credential, recording what was removed so the answer
+/// can name it instead of silently changing the job.
+fn strip_secrets(value: &mut serde_json::Value, stripped: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                let lower = key.to_ascii_lowercase();
+                let secret = lower.contains("password")
+                    || lower.contains("passwd")
+                    || lower.contains("secret")
+                    || lower.contains("token")
+                    || lower == "key";
+                if secret {
+                    map.remove(&key);
+                    if !stripped.iter().any(|s| s == &key) {
+                        stripped.push(key);
+                    }
+                    continue;
+                }
+                if let Some(child) = map.get_mut(&key) {
+                    strip_secrets(child, stripped);
+                }
+            }
+        }
+        serde_json::Value::Array(list) => {
+            for item in list {
+                strip_secrets(item, stripped);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Read a bundle and add its jobs. Every check happens before the first write: a chain that points
+/// outside the bundle, or a cycle, leaves the store exactly as it was.
+fn job_import(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let path = p.str_arg("path")?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| Error::io(format!("read {path}: {e}")))?;
+    let bundle: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| Error::config(format!("{path}: not a job bundle: {e}")))?;
+    let Some(list) = bundle.get("jobs").and_then(|v| v.as_array()) else {
+        return Err(Error::config(format!(
+            "{path}: a job bundle needs a \"jobs\" array"
+        )));
+    };
+    let mut incoming: Vec<crate::jobs::Job> = Vec::new();
+    for entry in list {
+        let job: crate::jobs::Job = serde_json::from_value(entry.clone())
+            .map_err(|e| Error::config(format!("{path}: a job is not shaped like a job: {e}")))?;
+        if job.id.trim().is_empty() || job.name.trim().is_empty() {
+            return Err(Error::config(format!(
+                "{path}: a job needs an id and a name"
+            )));
+        }
+        incoming.push(job);
+    }
+    // Chain references are checked against the bundle plus what this machine already has, so a
+    // bundle that only carries the second half of a chain is refused rather than half-installed.
+    let known: Vec<String> = incoming
+        .iter()
+        .map(|j| j.id.clone())
+        .chain(session.jobs.jobs.iter().map(|j| j.id.clone()))
+        .collect();
+    for job in &incoming {
+        for next in &job.then {
+            if !known.contains(next) {
+                return Err(Error::config(format!(
+                    "job '{}' chains to '{next}', which is neither in the bundle nor on this machine",
+                    job.id
+                )));
+            }
+        }
+    }
+    // A cycle is refused before writing: a chain that runs forever is not a schedule.
+    for job in &incoming {
+        let mut seen: Vec<String> = vec![job.id.clone()];
+        let mut cursor = job.then.clone();
+        while let Some(next) = cursor.first().cloned() {
+            if seen.contains(&next) {
+                return Err(Error::config(format!(
+                    "the chain from '{}' loops back to '{next}'",
+                    job.id
+                )));
+            }
+            seen.push(next.clone());
+            cursor = incoming
+                .iter()
+                .find(|j| j.id == next)
+                .map(|j| j.then.clone())
+                .unwrap_or_default();
+        }
+    }
+    let mut added: Vec<String> = Vec::new();
+    for job in incoming {
+        let id = job.id.clone();
+        session.jobs.upsert(job)?;
+        added.push(id);
+    }
+    Ok(json!({
+        "path": path,
+        "imported": added.len(),
+        "ids": added,
+        "summary": format!("imported {} job(s)", added.len()),
+    }))
+}
+
+/// Push a bundle to a remote `nook-cli job serve` over ssh, then read its log back.
+///
+/// The shell-out is the same discipline the SSH tunnel uses: `ssh` itself, so agent keys and
+/// `~/.ssh/config` work without this code learning about either.
+fn job_agent(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let host = p.str_arg("host")?;
+    let ids = p.list("ids");
+    let dir = crate::profiles::config_dir();
+    crate::profiles::ensure_dir()?;
+    let bundle = dir.join("agent-bundle.json");
+    let mut params = serde_json::Map::new();
+    params.insert("path".into(), json!(bundle));
+    if !ids.is_empty() {
+        params.insert("ids".into(), json!(ids));
+    }
+    let exported = job_export(session, &Params::from_json(json!(params))?)?;
+    // The remote has to have the binary before anything is copied: half a deployment is worse than
+    // a refusal that says what is missing.
+    let version = std::process::Command::new("ssh")
+        .arg(&host)
+        .arg("nook-cli --version")
+        .output()
+        .map_err(|e| Error::io(format!("ssh {host}: {e}")))?;
+    if !version.status.success() {
+        return Err(Error::config(format!(
+            "{} does not have nook-cli on its PATH; install it there before deploying jobs",
+            host
+        )));
+    }
+    let remote_version = String::from_utf8_lossy(&version.stdout).trim().to_string();
+    let push = std::process::Command::new("ssh")
+        .arg(&host)
+        .arg(format!(
+            "nook-cli job import --path - < {}",
+            shell_quote(&bundle.to_string_lossy())
+        ))
+        .output()
+        .map_err(|e| Error::io(format!("ssh {host}: {e}")))?;
+    if !push.status.success() {
+        return Err(Error::config(format!(
+            "the remote refused the bundle: {}",
+            String::from_utf8_lossy(&push.stderr).trim()
+        )));
+    }
+    let imported: serde_json::Value =
+        serde_json::from_slice(&push.stdout).unwrap_or_else(|_| json!({}));
+    let mut logs: Vec<serde_json::Value> = Vec::new();
+    for id in exported["ids"].as_array().cloned().unwrap_or_default() {
+        let id = id.as_str().unwrap_or_default().to_string();
+        let read = std::process::Command::new("ssh")
+            .arg(&host)
+            .arg(format!("nook-cli job logs {}", shell_quote(&id)))
+            .output()
+            .map_err(|e| Error::io(format!("ssh {host}: {e}")))?;
+        logs.push(json!({
+            "id": id,
+            "ok": read.status.success(),
+            "log": String::from_utf8_lossy(&read.stdout).trim(),
+        }));
+    }
+    Ok(json!({
+        "host": host,
+        "remote_version": remote_version,
+        "imported": imported["imported"].clone(),
+        "logs": logs,
+        "summary": format!("deployed {} job(s) to {host}", exported["jobs"]),
+    }))
+}
+
+/// One shell word, quoted for the remote `sh`. A host or id from a user is not trusted to be one
+/// word, so it is always quoted rather than interpolated.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 fn job_chain(session: &mut Session, p: &Params) -> Result<serde_json::Value> {

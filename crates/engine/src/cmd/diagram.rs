@@ -32,7 +32,9 @@ pub fn commands() -> Vec<CommandSpec> {
             forward_engineer,
         )
         .params(r#"{"model":{"version":1,"conn":"local","tables":[]}}"#)
-        .help("A model document to DDL, ordered by dependency; a cycle's keys are added afterwards."),
+        .help(
+            "A model document to DDL, ordered by dependency; a cycle's keys are added afterwards.",
+        ),
         CommandSpec::new(
             "diagram.manualLayout",
             "Save box positions",
@@ -253,7 +255,8 @@ fn reverse_engineer(session: &mut crate::Session, p: &crate::Params) -> Result<s
     // and what is on screen includes where the person put the boxes.
     let mut doc = doc;
     if let Some(saved) = crate::store::load_ui_state(&layout_key(&conn, schema.as_deref()))? {
-        if let Ok(overrides) = serde_json::from_str::<std::collections::BTreeMap<String, [f32; 2]>>(&saved)
+        if let Ok(overrides) =
+            serde_json::from_str::<std::collections::BTreeMap<String, [f32; 2]>>(&saved)
         {
             for (key, [x, y]) in overrides {
                 doc.place(&key, x, y);
@@ -381,7 +384,8 @@ fn model_file(session: &mut crate::Session, p: &crate::Params) -> Result<serde_j
                 let catalog = session.catalog_of(index)?;
                 nook_model::DiagramDocument::from_catalog(&conn, catalog, schema.as_deref())
             };
-            if let Some(saved) = crate::store::load_ui_state(&layout_key(&conn, schema.as_deref()))? {
+            if let Some(saved) = crate::store::load_ui_state(&layout_key(&conn, schema.as_deref()))?
+            {
                 if let Ok(overrides) =
                     serde_json::from_str::<std::collections::BTreeMap<String, [f32; 2]>>(&saved)
                 {
@@ -412,8 +416,9 @@ fn model_file(session: &mut crate::Session, p: &crate::Params) -> Result<serde_j
         "load" => {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
-            let doc: nook_model::DiagramDocument = serde_json::from_str(&text)
-                .map_err(|e| Error::config(format!("{} is not a model document: {e}", path.display())))?;
+            let doc: nook_model::DiagramDocument = serde_json::from_str(&text).map_err(|e| {
+                Error::config(format!("{} is not a model document: {e}", path.display()))
+            })?;
             // Loading restores the positions into the store too, so reopening the diagram shows the
             // saved layout rather than the deterministic one.
             let key = layout_key(&doc.conn, doc.schema.as_deref());
@@ -501,4 +506,3 @@ mod tests {
         assert!(table_card(&mut session, &crate::Params::none()).is_err());
     }
 }
-

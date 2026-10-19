@@ -39,11 +39,7 @@ impl Fixture {
         session.conns.push(Conn::new(cfg));
         let index = session.conn_index(&conn).expect("registered");
         open_now(&mut session, index).expect("sqlite opens");
-        let mut f = Fixture {
-            session,
-            conn,
-            dir,
-        };
+        let mut f = Fixture { session, conn, dir };
         f.run(
             "sql.run",
             json!({"sql": "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL); \
@@ -80,15 +76,14 @@ fn reverse_engineering_returns_the_catalog_as_a_document_with_positions() {
     assert_eq!(out["version"], 1);
     let boxes = out["boxes"].as_array().expect("boxes");
     assert_eq!(boxes.len(), 2, "one box per table");
-    assert!(boxes.iter().all(|b| b["x"].is_number() && b["y"].is_number()));
+    assert!(boxes
+        .iter()
+        .all(|b| b["x"].is_number() && b["y"].is_number()));
     // The model travels with the tables, which is what makes it a document.
     let model = &out["model"];
     let tables = model["tables"].as_array().expect("tables");
     assert_eq!(tables.len(), 2);
-    let posts = tables
-        .iter()
-        .find(|t| t["name"] == "posts")
-        .expect("posts");
+    let posts = tables.iter().find(|t| t["name"] == "posts").expect("posts");
     assert_eq!(posts["columns"].as_array().expect("columns").len(), 3);
     assert_eq!(posts["foreign_keys"].as_array().expect("fks").len(), 1);
 }
@@ -97,7 +92,10 @@ fn reverse_engineering_returns_the_catalog_as_a_document_with_positions() {
 fn a_manual_position_survives_and_a_reset_clears_it() {
     let mut f = Fixture::new("layout");
     let before = f.run("diagram.reverseEngineer", json!({}));
-    let key = before["boxes"][0]["key"].as_str().expect("a key").to_string();
+    let key = before["boxes"][0]["key"]
+        .as_str()
+        .expect("a key")
+        .to_string();
     let original = (
         before["boxes"][0]["x"].as_f64().expect("x"),
         before["boxes"][0]["y"].as_f64().expect("y"),
@@ -150,10 +148,7 @@ fn a_model_file_round_trips_the_positions_it_saved() {
     positions.insert(users_key.clone(), json!([512.0, 64.0]));
     f.run("diagram.manualLayout", json!({"positions": positions}));
     let path = f.path("shop.json");
-    let saved = f.run(
-        "diagram.modelFile",
-        json!({"path": path, "action": "save"}),
-    );
+    let saved = f.run("diagram.modelFile", json!({"path": path, "action": "save"}));
     assert!(saved["bytes"].as_u64().unwrap_or(0) > 0);
     // The file is readable without a connection: the tables are inside it.
     let text = std::fs::read_to_string(&path).expect("the file exists");
@@ -233,7 +228,11 @@ fn a_cycle_is_broken_with_a_later_alter_table() {
         .expect("postgres can defer");
     let creates = statements
         .iter()
-        .filter(|s| s.trim_start().to_ascii_uppercase().starts_with("CREATE TABLE"))
+        .filter(|s| {
+            s.trim_start()
+                .to_ascii_uppercase()
+                .starts_with("CREATE TABLE")
+        })
         .count();
     let alters = statements
         .iter()
@@ -243,7 +242,10 @@ fn a_cycle_is_broken_with_a_later_alter_table() {
     assert_eq!(alters, 1, "{statements:#?}");
     // The ALTER comes last: every table has to exist before a key can reference it.
     assert!(
-        statements.last().expect("a statement").contains("ADD CONSTRAINT"),
+        statements
+            .last()
+            .expect("a statement")
+            .contains("ADD CONSTRAINT"),
         "{statements:#?}"
     );
 }
@@ -284,10 +286,16 @@ fn the_dictionary_carries_columns_indexes_and_foreign_keys() {
         json!({"format": "markdown", "schema": "main"}),
     );
     let text = md["text"].as_str().expect("text");
-    assert!(text.contains("### posts") || text.contains("### main.posts"), "{text}");
+    assert!(
+        text.contains("### posts") || text.contains("### main.posts"),
+        "{text}"
+    );
     assert!(text.contains("| email | TEXT | no |"), "{text}");
     assert!(text.contains("ix_posts_title"), "{text}");
-    assert!(text.contains("fk") || text.contains("Foreign keys"), "{text}");
+    assert!(
+        text.contains("fk") || text.contains("Foreign keys"),
+        "{text}"
+    );
     assert_eq!(md["tables"], 2);
     assert_eq!(md["columns"], 5);
 

@@ -255,7 +255,7 @@ pub fn forward_engineer(
 ) -> Result<Vec<String>, nook_core::Error> {
     let mut order: Vec<usize> = Vec::new();
     let mut state = vec![0u8; doc.tables.len()]; // 0 = unvisited, 1 = in progress, 2 = done
-    // Deferred constraints, by table index.
+                                                 // Deferred constraints, by table index.
     let mut deferred: Vec<(usize, Vec<crate::ForeignKey>)> = Vec::new();
 
     fn visit(
@@ -271,11 +271,7 @@ pub fn forward_engineer(
         state[i] = 1;
         let mut cycle_fks = Vec::new();
         for fk in &doc.tables[i].foreign_keys {
-            let Some(target) = doc
-                .tables
-                .iter()
-                .position(|t| t.name == fk.ref_table)
-            else {
+            let Some(target) = doc.tables.iter().position(|t| t.name == fk.ref_table) else {
                 continue;
             };
             if target == i {

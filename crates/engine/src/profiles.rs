@@ -259,8 +259,116 @@ pub fn ssh_askpass_line(id: &str) -> Result<String> {
         .ok_or_else(|| Error::not_found(format!("no SSH password is stored for '{id}'")))
 }
 
+/// The `secret-tool` binary the Linux keychain calls shell out to. `NOOK_SECRET_TOOL_BIN` points it
+/// at a fake, which is how the tests exercise the accounts without a running secret service.
+pub fn secret_tool_bin() -> String {
+    std::env::var("NOOK_SECRET_TOOL_BIN").unwrap_or_else(|_| "secret-tool".to_string())
+}
+
+/// Is there a keychain this build can reach?
+///
+/// macOS always has one. Linux has one only when `secret-tool` is installed *and* a secret service
+/// answers; the binary being on `PATH` is the cheap half of that check, and a service that is absent
+/// fails the store with its own sentence rather than pretending the key was kept. Windows has
+/// `cmdkey`, which writes a credential but cannot read the password back, so it is not a keychain for
+/// this purpose and the honest message stands.
 pub fn keychain_available() -> bool {
-    cfg!(target_os = "macos")
+    if cfg!(target_os = "macos") {
+        return true;
+    }
+    if cfg!(target_os = "linux") {
+        return on_path(&secret_tool_bin());
+    }
+    false
+}
+
+/// Is `binary` an executable on `PATH`? No dependency for one check.
+fn on_path(binary: &str) -> bool {
+    let name = if cfg!(windows) {
+        format!("{binary}.exe")
+    } else {
+        binary.to_string()
+    };
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(&name).is_file()))
+        .unwrap_or(false)
+}
+
+// ------------------------------------------------------------------ linux backend
+//
+// `secret-tool` is libsecret's CLI: `store` reads the secret from stdin, `lookup` prints it, and
+// `clear` removes it. Attributes are `service` and `account`, the same two facts the macOS keychain
+// is keyed by, so a profile means the same thing on either platform.
+
+fn secret_tool_store(id: &str, secret: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(secret_tool_bin())
+        .args([
+            "store",
+            "--label",
+            &format!("Nook {id}"),
+            "service",
+            KEYCHAIN_SERVICE,
+            "account",
+            id,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::io(format!("secret-tool: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(secret.as_bytes())
+            .map_err(|e| Error::io(format!("secret-tool: {e}")))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| Error::io(format!("secret-tool: {e}")))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(Error::io(format!(
+            "the secret service refused the password: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
+fn secret_tool_lookup(id: &str) -> Result<Option<String>> {
+    let out = Command::new(secret_tool_bin())
+        .args(["lookup", "service", KEYCHAIN_SERVICE, "account", id])
+        .output()
+        .map_err(|e| Error::io(format!("secret-tool: {e}")))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if secret.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(secret))
+}
+
+fn secret_tool_delete(id: &str) -> Result<()> {
+    let out = Command::new(secret_tool_bin())
+        .args(["clear", "service", KEYCHAIN_SERVICE, "account", id])
+        .output()
+        .map_err(|e| Error::io(format!("secret-tool: {e}")))?;
+    // `clear` exits non-zero when there was nothing to clear, which is not a failure here.
+    if out.status.success()
+        || String::from_utf8_lossy(&out.stderr)
+            .to_lowercase()
+            .contains("no such")
+    {
+        Ok(())
+    } else {
+        Err(Error::io(format!(
+            "secret-tool clear failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
 }
 
 /// Store a password in the login keychain.
@@ -284,9 +392,18 @@ pub fn keychain_available() -> bool {
 /// `security` side of that change is already proven to work.
 pub fn keychain_store(id: &str, secret: &str) -> Result<()> {
     if !keychain_available() {
-        return Err(Error::unsupported(
-            "keychain storage is macOS only; keep the password in the profile file (mode 0600) instead",
-        ));
+        return Err(Error::unsupported(if cfg!(target_os = "linux") {
+            "this system has no `secret-tool`, so the password cannot be saved; install libsecret \
+             or keep it in the profile file (mode 0600) instead"
+        } else if cfg!(windows) {
+            "Windows can write a credential with cmdkey but cannot read the password back, so it is \
+             not used as a keychain; keep the password in the profile file instead"
+        } else {
+            "keychain storage is macOS only; keep the password in the profile file (mode 0600) instead"
+        }));
+    }
+    if cfg!(target_os = "linux") {
+        return secret_tool_store(id, secret);
     }
     let out = Command::new(security_bin())
         .args([
@@ -314,6 +431,9 @@ pub fn keychain_store(id: &str, secret: &str) -> Result<()> {
 pub fn keychain_lookup(id: &str) -> Result<Option<String>> {
     if !keychain_available() {
         return Ok(None);
+    }
+    if cfg!(target_os = "linux") {
+        return secret_tool_lookup(id);
     }
     let out = Command::new(security_bin())
         .args([
@@ -403,6 +523,9 @@ fn random_token() -> String {
 pub fn keychain_delete(id: &str) -> Result<()> {
     if !keychain_available() {
         return Ok(());
+    }
+    if cfg!(target_os = "linux") {
+        return secret_tool_delete(id);
     }
     let out = Command::new(security_bin())
         .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id])

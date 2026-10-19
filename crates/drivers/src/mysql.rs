@@ -66,7 +66,9 @@ impl MySql {
             cfg: cfg.clone(),
             pid: None,
         };
-        me.pid = me.one("SELECT CONNECTION_ID()").and_then(|v| v.parse().ok());
+        me.pid = me
+            .one("SELECT CONNECTION_ID()")
+            .and_then(|v| v.parse().ok());
         if let Some(db) = me.one("SELECT DATABASE()") {
             if !db.is_empty() {
                 me.database = db;
