@@ -18,13 +18,10 @@ const ID: &[(&str, &str)] = &[
     ("Help", "Bantuan"),
     // Status bar
     ("no connection", "belum tersambung"),
-    ("nothing to pivot", "tidak ada yang bisa diputar"),
-    ("no rows in this report", "laporan ini belum punya baris"),
-    ("Preferences", "Preferensi"),
     (" rows", " baris"),
     // Empty states
-    ("no rows in this report", "laporan ini belum punya baris"),
     ("nothing to pivot", "tidak ada yang bisa diputar"),
+    ("no rows in this report", "laporan ini belum punya baris"),
     // Preferences
     ("Preferences", "Preferensi"),
     ("Language", "Bahasa"),
@@ -92,6 +89,16 @@ pub fn locale_label(locale: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_key_is_translated_twice() {
+        // A duplicate is invisible at a glance and means a scripted insert landed on top of an
+        // existing entry. Only the first one would ever be read.
+        let mut seen = std::collections::HashSet::new();
+        for (key, _) in ID {
+            assert!(seen.insert(*key), "{key:?} is translated twice");
+        }
+    }
 
     #[test]
     fn every_indonesian_entry_translates_a_key_that_english_uses() {

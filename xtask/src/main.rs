@@ -63,8 +63,7 @@ fn main() {
         }
         _ => {
             println!(
-                "cargo xtask <task>\n\n  ci           fmt --check, clippy -D warnings, tests, layers, parity freshness\n  test         the whole test suite\n  clippy       clippy with warnings denied\n  fmt          format every crate\n  parity       regenerate docs/parity-checklist.md
-  parity-check fail when the checked-in checklist differs from the generated one\n  layers       enforce the crate layering\n  build        build the workspace"
+                "cargo xtask <task>\n\n  ci           fmt --check, clippy -D warnings, tests, layers, parity freshness\n  test         the whole test suite\n  clippy       clippy with warnings denied\n  fmt          format every crate\n  parity       regenerate docs/parity-checklist.md\n  parity-check fail when the checked-in checklist differs from the generated one\n  layers       enforce the crate layering\n  build        build the workspace"
             );
             0
         }
