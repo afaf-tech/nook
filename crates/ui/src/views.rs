@@ -1866,11 +1866,23 @@ pub fn transfer(
         });
         if let Some(report) = &sync_report {
             ui.add_space(4.0);
-            ui.label(
-                RichText::new(report["summary"].as_str().unwrap_or(""))
-                    .size(11.5)
-                    .color(tokens.text_dim),
-            );
+            // The two sync commands report different shapes: the merge has `summary` and
+            // `conflicts`, the delete half has `deletes`/`applied`/`skipped`. Rendering only the
+            // merge's keys left the card blank right after "Delete extras" ran.
+            let line = match report["summary"].as_str() {
+                Some(summary) => summary.to_string(),
+                None => format!(
+                    "{} to delete · {} applied · {} skipped{}",
+                    report["deletes"].as_u64().unwrap_or(0),
+                    report["applied"].as_u64().unwrap_or(0),
+                    report["skipped"].as_u64().unwrap_or(0),
+                    match report["dry_run"].as_bool() {
+                        Some(true) => " (dry run)",
+                        _ => "",
+                    }
+                ),
+            };
+            ui.label(RichText::new(line).size(11.5).color(tokens.text_dim));
             if let Some(conflicts) = report["conflicts"].as_array() {
                 for conflict in conflicts.iter().take(20) {
                     let key = conflict["key"]

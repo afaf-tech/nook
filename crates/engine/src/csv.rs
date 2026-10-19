@@ -28,6 +28,13 @@ pub struct Rows<R: BufRead> {
 }
 
 impl<R: BufRead> Rows<R> {
+    /// Bytes the reader is currently holding. Only for tests: it exists so the bounded-memory
+    /// claim is a measured assertion instead of a comment.
+    #[cfg(test)]
+    fn buffered_bytes(&self) -> usize {
+        self.source.buf.len()
+    }
+
     pub fn new(reader: R, delimiter: char) -> Self {
         Rows {
             source: CharSource::new(reader),
@@ -73,6 +80,10 @@ impl<R: BufRead> CharSource<R> {
                     Err(()) => return Err(invalid_utf8(&self.buf[self.at..])),
                 }
             }
+            // Every byte decoded so far is dead weight. Dropping them here — not only in the
+            // partial-character branch — is what keeps the buffer at one chunk instead of the
+            // whole file: without it a 543 MB CSV leaves 543 MB resident.
+            self.compact();
             let available = self.reader.fill_buf()?;
             if available.is_empty() {
                 return if self.at < self.buf.len() {
@@ -374,6 +385,33 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         assert_eq!(whole, chunked);
+    }
+
+    #[test]
+    fn the_reader_does_not_hold_the_bytes_it_has_already_decoded() {
+        // The regression this pins: `compact` used to run only on the partial-character branch, so
+        // on an all-ASCII file the buffer grew to the whole file — a 543 MB CSV held 543 MB
+        // resident. The buffer must stay bounded by one read chunk.
+        let mut text = String::from("id,name\n");
+        for i in 0..200_000 {
+            text.push_str(&format!("{i},name-{i}\n"));
+        }
+        // `Cursor::fill_buf` hands out the whole remainder, so the buffer has to be capped the way
+        // `csv::open` caps it or this measures the fixture instead of the reader.
+        let capped =
+            std::io::BufReader::with_capacity(64 * 1024, std::io::Cursor::new(text.into_bytes()));
+        let mut reader = rows(capped, ',');
+        let mut peak = 0usize;
+        for _ in 0..150_000 {
+            if reader.next().is_none() {
+                break;
+            }
+            peak = peak.max(reader.buffered_bytes());
+        }
+        assert!(
+            peak < 64 * 1024 * 2,
+            "the reader held {peak} bytes; it is accumulating the file instead of streaming it"
+        );
     }
 
     #[test]

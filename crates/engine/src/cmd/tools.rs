@@ -1064,7 +1064,10 @@ fn import_wizard(session: &mut Session, p: &Params) -> Result<serde_json::Value>
                     "a fixed-width file needs \"widths\": [3, 12, 8]",
                 ));
             }
-            let rows = fixed_width_rows(&path, &widths, header, sample_limit + preview_rows)?;
+            let rows: Vec<Vec<String>> = fixed_width_rows(&path, &widths)?
+                .take(sample_limit + preview_rows)
+                .filter_map(|r| r.ok())
+                .collect();
             let columns: Vec<String> = if header {
                 rows.first().cloned().unwrap_or_default()
             } else {
@@ -1240,35 +1243,64 @@ fn type_fits(inferred: &str, declared: &str) -> bool {
 
 /// Rows of a fixed-width file, split on `widths`. Short lines are padded rather than refused: a
 /// trailing blank column is common, and a refused import over it helps nobody.
-fn fixed_width_rows(
-    path: &std::path::Path,
-    widths: &[usize],
-    _header: bool,
-    limit: usize,
-) -> Result<Vec<Vec<String>>> {
+/// Split a fixed-width file into rows, one line at a time.
+///
+/// Lazy on purpose: `text_importer` used to collect the whole file first, which is the defect the
+/// CSV path removed. A width is a count of characters, not bytes, so a non-ASCII name is never cut
+/// mid-codepoint.
+struct FixedWidth {
+    lines: std::io::Lines<std::io::BufReader<std::fs::File>>,
+    widths: Vec<usize>,
+    path: std::path::PathBuf,
+    done: bool,
+}
+
+impl Iterator for FixedWidth {
+    type Item = Result<Vec<String>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.done {
+                return None;
+            }
+            let line = match self.lines.next() {
+                Some(Ok(line)) => line,
+                Some(Err(e)) => {
+                    self.done = true;
+                    return Some(Err(Error::io(format!("read {}: {e}", self.path.display()))));
+                }
+                None => {
+                    self.done = true;
+                    return None;
+                }
+            };
+            let chars: Vec<char> = line.chars().collect();
+            let mut at = 0usize;
+            let mut row = Vec::with_capacity(self.widths.len());
+            for width in &self.widths {
+                let end = (at + width).min(chars.len());
+                row.push(chars[at..end].iter().collect::<String>().trim().to_string());
+                at = end;
+            }
+            // A blank line is padding, not a row of empty strings.
+            if row.iter().all(|c| c.is_empty()) {
+                continue;
+            }
+            return Some(Ok(row));
+        }
+    }
+}
+
+fn fixed_width_rows(path: &std::path::Path, widths: &[usize]) -> Result<FixedWidth> {
     use std::io::BufRead;
     let file = std::fs::File::open(path)
         .map_err(|e| Error::io(format!("open {}: {e}", path.display())))?;
-    let reader = std::io::BufReader::new(file);
-    let mut out = Vec::new();
-    for line in reader.lines().take(limit) {
-        let line = line.map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
-        // Chars, not bytes: a width is a count of characters, and a fixed-width file with a
-        // non-ASCII name would otherwise split mid-codepoint.
-        let chars: Vec<char> = line.chars().collect();
-        let mut at = 0usize;
-        let mut row = Vec::with_capacity(widths.len());
-        for width in widths {
-            let end = (at + width).min(chars.len());
-            row.push(chars[at..end].iter().collect::<String>().trim().to_string());
-            at = end;
-        }
-        if row.iter().all(|c| c.is_empty()) {
-            continue;
-        }
-        out.push(row);
-    }
-    Ok(out)
+    Ok(FixedWidth {
+        lines: std::io::BufReader::new(file).lines(),
+        widths: widths.to_vec(),
+        path: path.to_path_buf(),
+        done: false,
+    })
 }
 
 fn import_xml(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
@@ -1307,23 +1339,25 @@ fn text_importer(session: &mut Session, p: &Params) -> Result<serde_json::Value>
             "pass \"widths\": [3, 12, 8] — the character count of each column",
         ));
     }
-    let max = p.int_opt("max_rows", 5_000_000).clamp(1, 100_000_000) as usize;
-    let all = fixed_width_rows(&path, &widths, header, max.saturating_add(1))?;
-    if all.is_empty() {
-        return Err(Error::config(format!("{} has no rows", path.display())));
-    }
-    let (file_columns, data) = if header {
-        (all[0].clone(), all[1..].to_vec())
+    // Lazy: the header is the first row, and the rest is pulled by the import loop.
+    let mut rows = fixed_width_rows(&path, &widths)?;
+    let first = match rows.next() {
+        Some(Ok(row)) => row,
+        Some(Err(e)) => return Err(e),
+        None => return Err(Error::config(format!("{} has no rows", path.display()))),
+    };
+    let (file_columns, rest): (Vec<String>, RowIter) = if header {
+        (first, Box::new(rows))
     } else {
         (
             (0..widths.len())
                 .map(|i| format!("column_{}", i + 1))
                 .collect(),
-            all,
+            Box::new(std::iter::once(Ok(first)).chain(rows)),
         )
     };
     let plan = prepare_import(session, index, &reference, file_columns, p, create_table)?;
-    let mut out = import_stream(session, index, &reference, plan, data.into_iter().map(Ok))?;
+    let mut out = import_stream(session, index, &reference, plan, rest)?;
     out["path"] = json!(path.to_string_lossy());
     out["format"] = json!("fixed-width");
     out["widths"] = json!(widths);

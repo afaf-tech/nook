@@ -26,13 +26,18 @@ pub struct XmlRow {
     pub values: Vec<String>,
 }
 
+/// Rows of a parsed XML document.
+///
+/// Collected, not streamed: the reader pulls tokens lazily but `rows` returns every row it found,
+/// so an XML import holds the whole file's rows. That is the ceiling for this path — CSV streams,
+/// XML does not. Making it a real iterator means exposing the header after the first row, which is
+/// a bigger change than this phase's scope.
+type RowIter = Vec<Result<Vec<String>>>;
+
 /// Read a flat XML document as a header plus rows.
 ///
 /// The row element is inferred from the first element that has child elements, or named by the
-/// caller. Everything is pulled from the reader, so a 500 MB file is not held.
-/// Rows pulled from the reader one at a time, so a large file is never held whole.
-type RowIter = Vec<Result<Vec<String>>>;
-
+/// caller. A nested document is refused by element name rather than silently flattened.
 pub fn rows<R: BufRead>(reader: R, row_element: Option<&str>) -> Result<(Vec<String>, RowIter)> {
     let mut source = Source::new(reader);
     let mut columns: Vec<String> = Vec::new();
