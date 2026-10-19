@@ -150,6 +150,236 @@ fn describe(error: &postgres::Error, cfg: Option<&ConnectionConfig>) -> String {
     text
 }
 
+/// Raw column bytes, decoded by `decode_raw` instead of by `postgres-types`.
+///
+/// Needed because the prepared path gets binary results and the crate's `FromSql` impls only cover a
+/// handful of types (no `numeric`, no `json` without a feature flag).
+#[derive(Debug)]
+struct Raw(Vec<u8>);
+
+impl Raw {
+    /// Parameters are sent as text, which every type accepts through its input function.
+    fn from_value(v: &Value) -> Raw {
+        Raw(match v {
+            Value::Null => return Raw(Vec::new()),
+            other => other.as_text().into_bytes(),
+        })
+    }
+}
+
+impl postgres::types::ToSql for Raw {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut postgres::types::private::BytesMut,
+    ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        // An empty payload is how a NULL is spelled here; every non-NULL value is non-empty text.
+        if self.0.is_empty() {
+            return Ok(postgres::types::IsNull::Yes);
+        }
+        out.extend_from_slice(&self.0);
+        Ok(postgres::types::IsNull::No)
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    /// The payload is text, so the bind must declare text — the default is binary, which would make
+    /// the server read `"42"` as four bytes of an int4.
+    fn encode_format(&self, _ty: &Type) -> postgres::types::Format {
+        postgres::types::Format::Text
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut postgres::types::private::BytesMut,
+    ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        self.to_sql(ty, out)
+    }
+}
+
+impl<'a> postgres::types::FromSql<'a> for Raw {
+    fn from_sql(
+        _ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Raw, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(Raw(raw.to_vec()))
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+}
+
+/// Turn one binary column payload into a cell, by the type the server declared.
+fn decode_raw(bytes: &[u8], ty: &Type, column: &str) -> Result<Value> {
+    let be = |n: usize| -> Option<i64> {
+        if bytes.len() < n {
+            return None;
+        }
+        let mut buf = [0u8; 8];
+        buf[8 - n..].copy_from_slice(&bytes[..n]);
+        Some(i64::from_be_bytes(buf))
+    };
+    match *ty {
+        Type::BOOL => Ok(Value::Bool(bytes.first().copied().unwrap_or(0) != 0)),
+        Type::INT2 => be(2).map(Value::Int).ok_or_else(|| short(column, ty)),
+        Type::INT4 => be(4).map(Value::Int).ok_or_else(|| short(column, ty)),
+        Type::INT8 => be(8).map(Value::Int).ok_or_else(|| short(column, ty)),
+        Type::OID => be(4).map(|v| Value::UInt(v as u64)).ok_or_else(|| short(column, ty)),
+        Type::FLOAT4 => be(4)
+            .map(|v| Value::Float(f32::from_bits(v as u32) as f64))
+            .ok_or_else(|| short(column, ty)),
+        Type::FLOAT8 => be(8)
+            .map(|v| Value::Float(f64::from_bits(v as u64)))
+            .ok_or_else(|| short(column, ty)),
+        Type::BYTEA => Ok(Value::Bytes(bytes.to_vec())),
+        Type::JSON | Type::JSONB => Ok(Value::Json(
+            // jsonb carries a one-byte version prefix.
+            String::from_utf8_lossy(if *ty == Type::JSONB { &bytes[1..] } else { bytes })
+                .into_owned(),
+        )),
+        Type::DATE => {
+            // Days since 2000-01-01.
+            let days = be(4).ok_or_else(|| short(column, ty))?;
+            Ok(Value::Date(civil_from_days(days).to_string()))
+        }
+        Type::TIMESTAMP | Type::TIMESTAMPTZ => {
+            // Microseconds since 2000-01-01 00:00:00 UTC.
+            let us = be(8).ok_or_else(|| short(column, ty))?;
+            Ok(Value::Timestamp(format_timestamp(us)))
+        }
+        Type::TIME => {
+            let us = be(8).ok_or_else(|| short(column, ty))?;
+            let s = us / 1_000_000;
+            Ok(Value::Time(format!(
+                "{:02}:{:02}:{:02}",
+                s / 3600,
+                (s / 60) % 60,
+                s % 60
+            )))
+        }
+        Type::NUMERIC => Ok(Value::text(decode_numeric(bytes).ok_or_else(|| {
+            Error::query(format!(
+                "column {column}: numeric payload of {} bytes is not readable",
+                bytes.len()
+            ))
+        })?)),
+        ref t if is_text_type(t) => Ok(Value::text(String::from_utf8_lossy(bytes).into_owned())),
+        ref t => Err(Error::unsupported(format!(
+            "column {column}: a prepared statement cannot render type {} yet — run the statement              without parameters, or cast the column to text",
+            t.name()
+        ))),
+    }
+}
+
+fn short(column: &str, ty: &Type) -> Error {
+    Error::query(format!(
+        "column {column}: expected a {} payload",
+        ty.name()
+    ))
+}
+
+fn is_text_type(ty: &Type) -> bool {
+    matches!(
+        *ty,
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN | Type::CHAR
+    ) || matches!(ty.name(), "citext" | "uuid" | "xml" | "ltree")
+}
+
+/// Postgres `numeric` on the wire: ndigits, weight, sign, dscale, then base-10000 digits.
+fn decode_numeric(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let ndigits = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+    let weight = i16::from_be_bytes([bytes[2], bytes[3]]);
+    let sign = u16::from_be_bytes([bytes[4], bytes[5]]);
+    let dscale = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
+    if sign == 0xC000 {
+        return Some("NaN".into());
+    }
+    let negative = sign == 0x4000;
+    let mut digits: Vec<u16> = Vec::with_capacity(ndigits);
+    for i in 0..ndigits {
+        let at = 8 + i * 2;
+        if at + 1 >= bytes.len() {
+            return None;
+        }
+        digits.push(u16::from_be_bytes([bytes[at], bytes[at + 1]]));
+    }
+    // Integer part: digits 0..=weight; fraction: weight+1.. with `dscale` decimal places.
+    let mut whole = String::new();
+    if weight < 0 {
+        whole.push('0');
+    } else {
+        for i in 0..=weight as usize {
+            let d = digits.get(i).copied().unwrap_or(0);
+            if i == 0 {
+                whole.push_str(&d.to_string());
+            } else {
+                whole.push_str(&format!("{d:04}"));
+            }
+        }
+    }
+    let mut frac = String::new();
+    let mut i = (weight + 1).max(0) as usize;
+    while frac.len() < dscale {
+        let d = digits.get(i).copied().unwrap_or(0);
+        frac.push_str(&format!("{d:04}"));
+        i += 1;
+    }
+    frac.truncate(dscale);
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    out.push_str(&whole);
+    if dscale > 0 {
+        out.push('.');
+        out.push_str(&frac);
+    }
+    Some(out)
+}
+
+/// Days since 1970-01-01 to a `YYYY-MM-DD` date.
+fn civil_from_days(days: i64) -> String {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Microseconds since 2000-01-01 UTC to `YYYY-MM-DD HH:MM:SS[.ffffff]`.
+fn format_timestamp(us_since_2000: i64) -> String {
+    const EPOCH_OFFSET_US: i64 = 946_684_800 * 1_000_000;
+    let total = us_since_2000 + EPOCH_OFFSET_US;
+    let secs = total.div_euclid(1_000_000);
+    let micros = total.rem_euclid(1_000_000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let date = civil_from_days(days);
+    let mut out = format!(
+        "{date} {:02}:{:02}:{:02}",
+        rem / 3600,
+        (rem / 60) % 60,
+        rem % 60
+    );
+    if micros > 0 {
+        out.push_str(&format!(".{micros:06}"));
+    }
+    out
+}
+
 fn parse_value(raw: Option<&str>, ty: &Type) -> Value {
     let Some(text) = raw else { return Value::Null };
     match *ty {
@@ -310,6 +540,57 @@ impl Driver for Postgres {
             declared.iter().map(|(_, t)| t.name().to_string()).collect()
         };
         rs.truncated = truncated;
+        rs.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(rs)
+    }
+
+    /// A real prepared statement: the server binds the values, and the statement it prepares carries
+    /// `$n` placeholders rather than the data.
+    ///
+    /// Results arrive in the binary format, so each column is decoded by its declared type. A type
+    /// this driver cannot decode is refused by name rather than rendered as hex or an empty cell.
+    fn run_prepared(&mut self, sql: &str, values: &[Value], limit: usize) -> Result<ResultSet> {
+        if sql.trim().is_empty() {
+            return Err(Error::query("empty statement"));
+        }
+        guard_read_only(self.cfg.read_only, sql)?;
+        let started = Instant::now();
+        let limit = limit.max(1);
+        let bound: Vec<Raw> = values.iter().map(Raw::from_value).collect();
+        let params: Vec<&(dyn postgres::types::ToSql + Sync)> = bound
+            .iter()
+            .map(|v| v as &(dyn postgres::types::ToSql + Sync))
+            .collect();
+        let rows = self
+            .client
+            .query(sql, &params)
+            .map_err(|e| Error::query(describe(&e, None)))?;
+        let mut rs = ResultSet::default();
+        for row in &rows {
+            if rs.columns.is_empty() {
+                rs.columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                rs.column_types = row
+                    .columns()
+                    .iter()
+                    .map(|c| c.type_().name().to_string())
+                    .collect();
+            }
+            if rs.rows.len() >= limit {
+                rs.truncated = true;
+                break;
+            }
+            let mut vals = Vec::with_capacity(rs.columns.len());
+            for (i, column) in row.columns().iter().enumerate() {
+                let raw: Option<Raw> = row
+                    .try_get(i)
+                    .map_err(|e| Error::query(describe(&e, None)))?;
+                vals.push(match raw {
+                    None => Value::Null,
+                    Some(raw) => decode_raw(&raw.0, column.type_(), column.name())?,
+                });
+            }
+            rs.rows.push(vals);
+        }
         rs.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(rs)
     }

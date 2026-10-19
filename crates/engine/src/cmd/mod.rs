@@ -13,7 +13,7 @@ pub mod schema;
 pub mod sql;
 pub mod tools;
 
-use nook_core::{Error, Result};
+use nook_core::{Error, Result, Value};
 use nook_model::ResultSet;
 
 use crate::{Conn, ConnState, Level, Params, Session, SshSecret, Tab, TableRef, Tunnel};
@@ -188,6 +188,48 @@ pub fn refresh_catalog(session: &mut Session, index: usize) -> Result<u64> {
 }
 
 /// Run SQL on a connection, bounding the row count to the session setting.
+/// Run one statement with its placeholders bound by the server.
+///
+/// `values` are the bindings in placeholder order, already resolved: an explicit NULL is
+/// `Value::Null`, and a caller that could not resolve a name never reaches here — `sql.run` refuses
+/// first and names what is missing. A driver that cannot prepare refuses through the trait's default,
+/// which is the point of the seam: there is no client-side substitution to fall back to.
+pub fn run_prepared_sql(
+    session: &mut Session,
+    index: usize,
+    sql: &str,
+    values: &[Value],
+    limit: Option<usize>,
+) -> Result<ResultSet> {
+    let max = limit.unwrap_or(session.settings.max_rows);
+    let started = std::time::Instant::now();
+    let rs = {
+        let driver = session.driver_for(index)?;
+        driver.run_prepared(sql, values, max)?
+    };
+    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    let mut rs = rs;
+    rs.elapsed_ms = if rs.elapsed_ms > 0.0 {
+        rs.elapsed_ms
+    } else {
+        elapsed
+    };
+    let conn_name = session
+        .conns
+        .get(index)
+        .map(|c| c.cfg.name.clone())
+        .unwrap_or_default();
+    session.remember(crate::HistoryEntry {
+        conn: conn_name,
+        sql: sql.to_string(),
+        ok: true,
+        elapsed_ms: rs.elapsed_ms,
+        rows: rs.row_count(),
+        at: crate::jobs::now(),
+    });
+    Ok(rs)
+}
+
 pub fn run_sql(
     session: &mut Session,
     index: usize,

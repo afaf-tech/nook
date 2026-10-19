@@ -496,6 +496,21 @@ pub struct SqlState {
     /// the statement index it belongs to and the key the writes are keyed by. `None` is the normal
     /// state — a result is read-only until someone asks for otherwise.
     pub editable: Option<EditableSource>,
+    /// A second editor beside this tab's (`sql.splitPane`): its own text and results, on the same
+    /// connection. `None` is the normal one-editor tab.
+    pub split: Option<SplitState>,
+    /// Values bound to this tab's named parameters. `Some(None)` is an explicit NULL, which is a
+    /// different query from `None` (unbound): one returns rows, the other refuses to run.
+    pub params: std::collections::BTreeMap<String, Option<String>>,
+}
+
+/// The right-hand editor of a split tab. Deliberately the same shape as the left pane's own fields:
+/// two editors that behave differently would be a second set of rules to keep in sync.
+#[derive(Debug, Clone, Default)]
+pub struct SplitState {
+    pub text: String,
+    pub ran_script: String,
+    pub results: Vec<StatementRun>,
 }
 
 /// A query result that `grid.editQueryResult` made writable, and why it is safe to.
@@ -658,6 +673,9 @@ pub struct Session {
     pub active_conn: Option<usize>,
     pub tabs: Vec<Tab>,
     pub active_tab: Option<usize>,
+    /// Full-bleed editor (`sql.zen`). A layout flag: the UI stops painting the chrome, nothing else
+    /// changes, and `ui.state` reports it so a script can prove the mode is on.
+    pub zen: bool,
     pub profiles: ProfileStore,
     pub jobs: JobStore,
     pub history: Vec<HistoryEntry>,
@@ -698,6 +716,7 @@ impl Session {
             active_conn: None,
             tabs: vec![Tab::new(0, TabKind::Welcome, "Welcome")],
             active_tab: Some(0),
+            zen: false,
             profiles,
             jobs,
             history: Vec::new(),

@@ -98,6 +98,24 @@ fn is_read_statement(sql: &str) -> bool {
     nook_core::returns_rows(sql) && !sql.to_ascii_lowercase().contains(" into ")
 }
 
+/// A cell as rusqlite wants it, so a bound value keeps its type instead of arriving as text.
+fn to_sql_value(v: &Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value as S;
+    match v {
+        Value::Null => S::Null,
+        Value::Int(i) => S::Integer(*i),
+        Value::UInt(u) => S::Integer(*u as i64),
+        Value::Float(f) => S::Real(*f),
+        Value::Bool(b) => S::Integer(i64::from(*b)),
+        Value::Bytes(b) => S::Blob(b.clone()),
+        Value::Text(s)
+        | Value::Json(s)
+        | Value::Date(s)
+        | Value::Time(s)
+        | Value::Timestamp(s) => S::Text(s.clone()),
+    }
+}
+
 fn value_from(v: ValueRef<'_>) -> Value {
     match v {
         ValueRef::Null => Value::Null,
@@ -202,6 +220,72 @@ impl Driver for Sqlite {
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
             notices: vec![],
             truncated,
+        })
+    }
+
+    fn run_prepared(&mut self, sql: &str, values: &[Value], limit: usize) -> Result<ResultSet> {
+        if sql.trim().is_empty() {
+            return Err(Error::query("empty statement"));
+        }
+        self.guard_write(sql)?;
+        let started = Instant::now();
+        let limit = limit.max(1);
+        let bound: Vec<rusqlite::types::Value> = values.iter().map(to_sql_value).collect();
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| map_err(e, sql))?;
+        if stmt.column_count() == 0 {
+            let affected = stmt
+                .execute(rusqlite::params_from_iter(bound.iter()))
+                .map_err(|e| map_err(e, sql))? as u64;
+            let last = self.conn.last_insert_rowid();
+            return Ok(ResultSet {
+                affected,
+                last_insert_id: if last > 0 { Some(last as u64) } else { None },
+                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                ..ResultSet::default()
+            });
+        }
+        let declared: Vec<(String, Option<String>)> = stmt
+            .columns()
+            .iter()
+            .map(|c| (c.name().to_string(), c.decl_type().map(|s| s.to_string())))
+            .collect();
+        let columns: Vec<String> = declared.iter().map(|(n, _)| n.clone()).collect();
+        let mut types: Vec<String> = declared
+            .iter()
+            .map(|(_, d)| d.clone().unwrap_or_default())
+            .collect();
+        let mut rows_out: Vec<Vec<Value>> = Vec::new();
+        let mut truncated = false;
+        {
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(bound.iter()))
+                .map_err(|e| map_err(e, sql))?;
+            while let Some(row) = rows.next().map_err(|e| map_err(e, sql))? {
+                if rows_out.len() >= limit {
+                    truncated = true;
+                    break;
+                }
+                let mut vals = Vec::with_capacity(columns.len());
+                for (i, declared_type) in types.iter_mut().enumerate() {
+                    let v = value_from(row.get_ref(i).map_err(|e| map_err(e, sql))?);
+                    if declared_type.is_empty() && rows_out.is_empty() {
+                        *declared_type = v.type_name().to_ascii_uppercase();
+                    }
+                    vals.push(v);
+                }
+                rows_out.push(vals);
+            }
+        }
+        Ok(ResultSet {
+            columns,
+            column_types: types,
+            rows: rows_out,
+            truncated,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            ..ResultSet::default()
         })
     }
 

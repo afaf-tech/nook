@@ -574,6 +574,21 @@ pub struct UiState {
     /// retried once the credential is confirmed. Without it the refusal would cost the user their
     /// click and their pending buffer's meaning.
     pub apply_after_confirm: Option<usize>,
+    /// The find bar: `None` is closed. `Cmd+F` opens it on the current selection, `Cmd+Alt+F` adds
+    /// the replace field, `Esc` closes.
+    pub find: Option<FindBar>,
+}
+
+/// The find bar's half-typed query and its toggles.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FindBar {
+    pub find: String,
+    pub replace: String,
+    pub replace_open: bool,
+    pub case: bool,
+    pub word: bool,
+    /// Which hit Enter walks to next. `None` until the first walk.
+    pub current: Option<usize>,
 }
 
 /// The half-typed safe-mode confirmation. `error` keeps the driver's own refusal on screen instead
@@ -687,6 +702,7 @@ impl Default for UiState {
             safe_prompt: None,
             safe_token: None,
             apply_after_confirm: None,
+            find: None,
         }
     }
 }
@@ -1030,6 +1046,23 @@ impl NookApp {
                         "rows": t.grid.result.row_count(), "pending": t.grid.pending.len(),
                     })).collect::<Vec<_>>(),
                     "messages": self.session.messages.len(),
+                    // Reported so a script can prove zen and a split are on without a screenshot.
+                    "zen": self.session.zen,
+                    "split": self.session.active_tab.as_ref()
+                        .and_then(|i| self.session.tabs.get(*i))
+                        .map(|t| t.sql.split.is_some())
+                        .unwrap_or(false),
+                    // The find bar's own state: the shortcut opens it, and a script proves it the
+                    // same way it proves zen.
+                    "find": self.state.find.as_ref().map(|bar| serde_json::json!({
+                        "find": bar.find, "replace": bar.replace,
+                        "replace_open": bar.replace_open, "case": bar.case, "word": bar.word,
+                        "current": bar.current,
+                    })),
+                    "params": self.session.active_tab.as_ref()
+                        .and_then(|i| self.session.tabs.get(*i))
+                        .map(|t| t.sql.params.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect::<serde_json::Map<_, _>>())
+                        .unwrap_or_default(),
                     "control_key": control_key_path,
                 }),
                 "ui.selectTab" => {
@@ -1209,6 +1242,32 @@ impl NookApp {
                         }
                         Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
                     }
+                }
+                "ui.find" => {
+                    // `null` or `{"close": true}` closes it; otherwise the given fields are set, so
+                    // a script can type a query into the bar it just opened.
+                    if request.params.get("close").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        self.state.find = None;
+                    } else {
+                        let bar = self.state.find.get_or_insert_with(FindBar::default);
+                        if let Some(text) = request.params.get("find").and_then(|v| v.as_str()) {
+                            bar.find = text.to_string();
+                            bar.current = None;
+                        }
+                        if let Some(text) = request.params.get("replace").and_then(|v| v.as_str()) {
+                            bar.replace = text.to_string();
+                        }
+                        for key in ["replace_open", "case", "word"] {
+                            if let Some(on) = request.params.get(key).and_then(|v| v.as_bool()) {
+                                match key {
+                                    "replace_open" => bar.replace_open = on,
+                                    "case" => bar.case = on,
+                                    _ => bar.word = on,
+                                }
+                            }
+                        }
+                    }
+                    serde_json::json!({"ok": true})
                 }
                 "ui.setTheme" => {
                     let theme = request
@@ -2028,7 +2087,28 @@ impl NookApp {
         match kind {
             TabKind::Welcome => views::welcome(ui, &mut self.session, &mut self.state, tokens),
             TabKind::Query => {
-                crate::editor::show(ui, &mut self.session, index, &mut self.state, tokens);
+                // A split tab is two editors side by side, fixed 50/50: the left keeps the tab's own
+                // text and results, the right is `SplitState`. Dragging the divider is a ceiling.
+                if self.session.tabs[index].sql.split.is_some() {
+                    let width = ui.available_width();
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui(egui::vec2(width / 2.0 - 1.0, ui.available_height()), |ui| {
+                            crate::editor::show(ui, &mut self.session, index, &mut self.state, tokens);
+                        });
+                        ui.separator();
+                        ui.allocate_ui(egui::vec2(ui.available_width(), ui.available_height()), |ui| {
+                            crate::editor::show_pane(
+                                ui,
+                                &mut self.session,
+                                index,
+                                &mut self.state,
+                                tokens,
+                            );
+                        });
+                    });
+                } else {
+                    crate::editor::show(ui, &mut self.session, index, &mut self.state, tokens);
+                }
             }
             TabKind::Data => grid::show(ui, &mut self.session, index, &mut self.state, tokens),
             TabKind::Design => views::design(ui, &mut self.session, index, &mut self.state, tokens),
@@ -2997,6 +3077,26 @@ impl NookApp {
         if toggle_log {
             self.state.log_open = !self.state.log_open;
         }
+
+        // Find & replace: `Cmd+F` opens the bar, `Cmd+Alt+F` opens it with the replace field, `Esc`
+        // closes it. In zen `Esc` is zen's own exit, so the find bar does not swallow it.
+        let (find, find_replace, escape) = ctx.input(|i| {
+            (
+                i.modifiers.command && !i.modifiers.alt && i.key_pressed(egui::Key::F),
+                i.modifiers.command && i.modifiers.alt && i.key_pressed(egui::Key::F),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if find || find_replace {
+            let bar = self.state.find.get_or_insert_with(FindBar::default);
+            bar.replace_open = find_replace;
+        }
+        if escape && self.state.find.is_some() && !self.session.zen {
+            self.state.find = None;
+        }
+        if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z)) {
+            self.session.zen = !self.session.zen;
+        }
         // Cmd/Ctrl+C on a data grid copies the selection (or the whole page) as TSV — the plan's
         // "pastes into a spreadsheet as a real table". Skipped while a text field has focus, so the
         // inline editor and the filter keep their own copy.
@@ -3091,6 +3191,22 @@ impl eframe::App for NookApp {
         // Bars paint their own fill and hairline inside an exact band, so neither the frame around
         // them nor egui's built-in separator line may add anything: each one costs a pixel, and the
         // design's bars are exactly 40, 35 and 26 tall with a single border inside that height.
+        // Zen: the editor and nothing else. One early return, so every bar, panel and the inspector
+        // stop painting without a second layout to keep in sync with the full one below.
+        if self.session.zen {
+            egui::CentralPanel::default_margins()
+                .frame(egui::Frame::new().fill(tokens.panel))
+                .show(ui, |ui| self.central(ui, &tokens));
+            dialogs::show(ui, &mut self.session, &mut self.state, &tokens);
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.session.zen = false;
+            }
+            if self.state.quit {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
+
         egui::Panel::top("app-bar")
             .show_separator_line(false)
             .frame(t::bar_frame(&tokens))

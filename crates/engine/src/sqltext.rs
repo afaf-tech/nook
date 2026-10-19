@@ -313,6 +313,296 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
     out
 }
 
+/// One placeholder found in a script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placeholder {
+    /// The name for `:name` / `${name}`; `None` for a positional `?`.
+    pub name: Option<String>,
+    /// How many times it appears. Positional slots are counted by index instead.
+    pub count: usize,
+}
+
+/// The placeholders a script contains, and which style it uses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Params {
+    pub style: ParamStyle,
+    /// Named placeholders in order of first appearance; empty for positional style.
+    pub named: Vec<Placeholder>,
+    /// How many `?` slots the script has.
+    pub positional: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParamStyle {
+    #[default]
+    None,
+    Colon,
+    Positional,
+}
+
+impl Params {
+    pub fn is_empty(&self) -> bool {
+        self.named.is_empty() && self.positional == 0
+    }
+
+    pub fn style_name(&self) -> &'static str {
+        match self.style {
+            ParamStyle::None => "none",
+            ParamStyle::Colon => "colon",
+            ParamStyle::Positional => "positional",
+        }
+    }
+
+    /// Every name the script needs a value for, in order.
+    pub fn names(&self) -> Vec<String> {
+        self.named.iter().filter_map(|p| p.name.clone()).collect()
+    }
+}
+
+/// Find the parameter placeholders in a script.
+///
+/// Runs on the token stream, not a regex: `:name` inside a string literal or a comment is text, and
+/// `x::int` is a cast — the two things a regex gets wrong. `%name%` is deliberately not a style: it
+/// collides with `LIKE '%x%'` and would eat a wildcard.
+pub fn parameters(sql: &str) -> Params {
+    let tokens = tokenize(sql);
+    let mut out = Params::default();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        // A cast: `::` is two Punct tokens, or one, depending on the tokenizer's run.
+        let is_double_colon = token.text == "::"
+            || (token.text == ":" && tokens.get(index + 1).map(|t| t.text.as_str()) == Some(":"));
+        if is_double_colon {
+            index += if token.text == "::" { 1 } else { 2 };
+            // Skip the type name that follows so `::text` is never read as `:text`.
+            if tokens
+                .get(index)
+                .map(|t| matches!(t.kind, TokenKind::Word | TokenKind::Keyword))
+                == Some(true)
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if token.kind == TokenKind::Punct && token.text == ":" {
+            if let Some(next) = tokens.get(index + 1) {
+                if next.kind == TokenKind::Word || next.kind == TokenKind::Keyword {
+                    // `${name}` tokenizes as `$` (word-ish) + `{` + `name` + `}`; the plain form is
+                    // `:` + word.
+                    push_named(&mut out, &next.text);
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        // `$` starts a Word token in this tokenizer, so `${name}` arrives as Word("$") + `{` + Word.
+        if token.text == "$" {
+            // `${name}`
+            if tokens.get(index + 1).map(|t| t.text.as_str()) == Some("{") {
+                if let Some(name) = tokens.get(index + 2) {
+                    if matches!(name.kind, TokenKind::Word | TokenKind::Keyword)
+                        && tokens.get(index + 3).map(|t| t.text.as_str()) == Some("}")
+                    {
+                        push_named(&mut out, &name.text);
+                        index += 4;
+                        continue;
+                    }
+                }
+            }
+        }
+        // A Postgres dollar-quoted body: `$$ … $$` or `$tag$ … $tag$`. The tokenizer reads each
+        // delimiter as one Word, so skip to the matching close and treat the body as text.
+        if is_dollar_quote(&token.text) {
+            let closer = token.text.clone();
+            index += 1;
+            while index < tokens.len() && tokens[index].text != closer {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if token.kind == TokenKind::Punct && token.text == "?" {
+            out.positional += 1;
+            out.style = ParamStyle::Positional;
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    out
+}
+
+/// Whether a token is a dollar-quote delimiter: `$$`, `$tag$`, `$_x$`.
+fn is_dollar_quote(text: &str) -> bool {
+    text.len() >= 2
+        && text.starts_with('$')
+        && text.ends_with('$')
+        && text[1..text.len() - 1]
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_')
+        && !text[1..text.len() - 1].starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// Replace matches of `find` in `text`, returning the new text and the byte range of each hit in the
+/// **original** text.
+///
+/// Replace-all builds the result right to left so the earlier offsets stay valid, and a replacement
+/// longer than the match never shifts a later hit. `word` uses the same boundary rule completion
+/// does, so `user` does not match inside `users`.
+pub fn find_replace(
+    text: &str,
+    find: &str,
+    replace: &str,
+    all: bool,
+    case: bool,
+    word: bool,
+) -> std::result::Result<(String, Vec<(usize, usize)>), nook_core::Error> {
+    if find.is_empty() {
+        return Err(nook_core::Error::config(
+            "an empty \"find\" would insert the replacement between every character",
+        ));
+    }
+    let hits = find_hits(text, find, case, word);
+    let hits: Vec<(usize, usize)> = if all { hits } else { hits.into_iter().take(1).collect() };
+    if hits.is_empty() {
+        return Ok((text.to_string(), Vec::new()));
+    }
+    let mut out = text.to_string();
+    for &(start, end) in hits.iter().rev() {
+        out.replace_range(start..end, replace);
+    }
+    Ok((out, hits))
+}
+
+/// Byte ranges of every match, left to right.
+pub fn find_hits(text: &str, find: &str, case: bool, word: bool) -> Vec<(usize, usize)> {
+    let hay = if case { text.to_string() } else { text.to_lowercase() };
+    let needle = if case { find.to_string() } else { find.to_lowercase() };
+    let mut out = Vec::new();
+    let mut from = 0;
+    while from <= hay.len() {
+        let Some(at) = hay[from..].find(&needle) else {
+            break;
+        };
+        let start = from + at;
+        let end = start + needle.len();
+        let boundary_ok = !word || {
+            let before_ok = hay[..start]
+                .chars()
+                .next_back()
+                .map(|c| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(true);
+            let after_ok = hay[end..]
+                .chars()
+                .next()
+                .map(|c| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(true);
+            before_ok && after_ok
+        };
+        if boundary_ok {
+            out.push((start, end));
+        }
+        from = start + needle.len().max(1);
+    }
+    out
+}
+
+/// Which placeholder syntax a driver wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindStyle {
+    /// `?` — SQLite and MySQL.
+    Question,
+    /// `$1`, `$2` — Postgres.
+    Dollar,
+}
+
+/// Rewrite a script's placeholders into the driver's positional form, returning the SQL and the
+/// value each position takes: `Some(name)` for a named placeholder, `None` for a `?` slot.
+///
+/// The rewrite is a rebuild from the token stream, which reproduces the original text exactly except
+/// at the placeholders, so a `:name` inside a literal or a comment is left alone.
+pub fn bind_placeholders(sql: &str, style: BindStyle) -> (String, Vec<Option<String>>) {
+    let tokens = tokenize(sql);
+    let mut out = String::with_capacity(sql.len());
+    let mut slots: Vec<Option<String>> = Vec::new();
+    let next = |slots: &mut Vec<Option<String>>, name: Option<String>| -> String {
+        slots.push(name);
+        match style {
+            BindStyle::Question => "?".to_string(),
+            BindStyle::Dollar => format!("${}", slots.len()),
+        }
+    };
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let double_colon = token.text == "::"
+            || (token.text == ":" && tokens.get(index + 1).map(|t| t.text.as_str()) == Some(":"));
+        if double_colon {
+            let take = if token.text == "::" { 1 } else { 2 };
+            for t in &tokens[index..(index + take).min(tokens.len())] {
+                out.push_str(&t.text);
+            }
+            index += take;
+            continue;
+        }
+        if token.kind == TokenKind::Punct && token.text == ":" {
+            if let Some(n) = tokens.get(index + 1) {
+                if matches!(n.kind, TokenKind::Word | TokenKind::Keyword) {
+                    out.push_str(&next(&mut slots, Some(n.text.clone())));
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        if token.text == "$"
+            && tokens.get(index + 1).map(|t| t.text.as_str()) == Some("{")
+            && tokens.get(index + 3).map(|t| t.text.as_str()) == Some("}")
+        {
+            if let Some(n) = tokens.get(index + 2) {
+                if matches!(n.kind, TokenKind::Word | TokenKind::Keyword) {
+                    out.push_str(&next(&mut slots, Some(n.text.clone())));
+                    index += 4;
+                    continue;
+                }
+            }
+        }
+        if is_dollar_quote(&token.text) {
+            let closer = token.text.clone();
+            out.push_str(&token.text);
+            index += 1;
+            while index < tokens.len() && tokens[index].text != closer {
+                out.push_str(&tokens[index].text);
+                index += 1;
+            }
+            if index < tokens.len() {
+                out.push_str(&tokens[index].text);
+                index += 1;
+            }
+            continue;
+        }
+        if token.kind == TokenKind::Punct && token.text == "?" {
+            out.push_str(&next(&mut slots, None));
+            index += 1;
+            continue;
+        }
+        out.push_str(&token.text);
+        index += 1;
+    }
+    (out, slots)
+}
+
+fn push_named(out: &mut Params, name: &str) {
+    out.style = ParamStyle::Colon;
+    match out.named.iter_mut().find(|p| p.name.as_deref() == Some(name)) {
+        Some(existing) => existing.count += 1,
+        None => out.named.push(Placeholder {
+            name: Some(name.to_string()),
+            count: 1,
+        }),
+    }
+}
+
 /// Pretty-print a statement. Conservative on purpose: it never changes meaning, only whitespace,
 /// keyword case and where the lines break.
 pub fn format(sql: &str, case: KeywordCase, indent_width: usize) -> String {
@@ -1053,5 +1343,67 @@ mod tests {
             statement_index_at(sql, sql.find("select 2").unwrap_or(0) + 3),
             Some(1)
         );
+    }
+
+    #[test]
+    fn parameters_are_found_on_the_token_stream_not_by_regex() {
+        let p = parameters("select * from u where email = :email");
+        assert_eq!(p.style_name(), "colon");
+        assert_eq!(p.names(), vec!["email"]);
+
+        // A cast is not a parameter. This is the classic bug a regex has.
+        let p = parameters("select * from u where x::int = 1 and y = :email");
+        assert_eq!(p.names(), vec!["email"]);
+
+        // Neither is text inside a literal or a comment.
+        assert!(parameters("select 'a:name' as x").is_empty());
+        assert!(parameters("-- :x\nselect 1").is_empty());
+        assert!(parameters("/* :x */ select 1").is_empty());
+    }
+
+    #[test]
+    fn a_repeated_name_is_one_parameter_with_a_count() {
+        let p = parameters("select * from u where a = :x or b = :x or c = :y");
+        assert_eq!(p.names(), vec!["x", "y"]);
+        assert_eq!(p.named[0].count, 2);
+        assert_eq!(p.named[1].count, 1);
+    }
+
+    #[test]
+    fn positional_slots_are_counted_and_the_brace_alias_works() {
+        let p = parameters("select * from u where a = ? and b = ?");
+        assert_eq!(p.style_name(), "positional");
+        assert_eq!(p.positional, 2);
+        assert!(p.named.is_empty());
+
+        let p = parameters("select * from u where a = ${name}");
+        assert_eq!(p.names(), vec!["name"]);
+
+        // A `?` inside a literal is text, not a slot.
+        assert!(parameters("select 'a?b' as x").is_empty());
+    }
+
+    #[test]
+    fn a_parameter_after_a_dollar_quoted_body_is_still_found() {
+        let p = parameters("select $$ :notme $$ as body, :real as x");
+        assert_eq!(p.names(), vec!["real"]);
+    }
+
+    #[test]
+    fn binding_rewrites_only_the_placeholders() {
+        let (sql, slots) = bind_placeholders(
+            "select * from u where a = :x and b = :x and c = 'p:q'",
+            BindStyle::Dollar,
+        );
+        assert_eq!(sql, "select * from u where a = $1 and b = $2 and c = 'p:q'");
+        assert_eq!(
+            slots,
+            vec![Some("x".to_string()), Some("x".to_string())],
+            "a repeated name fills two positions"
+        );
+
+        let (sql, slots) = bind_placeholders("select ? as a, x::int as b, ? as c", BindStyle::Question);
+        assert_eq!(sql, "select ? as a, x::int as b, ? as c");
+        assert_eq!(slots, vec![None, None]);
     }
 }

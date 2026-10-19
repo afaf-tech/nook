@@ -15,7 +15,7 @@ pub mod sqlite;
 pub mod transfer;
 pub mod xlsx;
 
-use nook_core::{quote_qualified, ConnectionConfig, Dialect, DriverKind, Error, Result};
+use nook_core::{quote_qualified, ConnectionConfig, Dialect, DriverKind, Error, Result, Value};
 use nook_model::{Catalog, Column, DbProcess, DbUser, ResultSet, ServerInfo, Table};
 
 /// Rows a single fetch may hold before the driver stops reading. Grid pages ask for far fewer.
@@ -32,6 +32,18 @@ pub trait Driver: Send {
 
     /// Run one statement and return whatever it produced.
     fn run(&mut self, sql: &str, limit: usize) -> Result<ResultSet>;
+
+    /// Run one statement with its values bound by the server, never interpolated.
+    ///
+    /// `sql` carries the driver's own placeholders (`?` for SQLite and MySQL, `$n` for Postgres) and
+    /// `values` is what fills them, in order. A driver that cannot prepare refuses here rather than
+    /// falling back to substitution: a silent fallback is the ceiling this seam exists to remove.
+    fn run_prepared(&mut self, sql: &str, values: &[Value], limit: usize) -> Result<ResultSet> {
+        let _ = (sql, values, limit);
+        Err(Error::unsupported(
+            "this driver cannot run prepared statements; bind the values into the SQL instead",
+        ))
+    }
 
     /// Run several statements, returning the last tabular result and every notice.
     fn run_script(&mut self, sql: &str, limit: usize) -> Result<ResultSet> {

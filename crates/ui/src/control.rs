@@ -220,6 +220,7 @@ pub const METHODS: &[&str] = &[
     "ui.selectTab",
     "ui.selectTable",
     "ui.setEditorText",
+    "ui.find",
     "ui.setTheme",
     "ui.setAiBand",
     "ui.messages",

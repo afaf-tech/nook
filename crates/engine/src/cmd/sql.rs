@@ -1,10 +1,10 @@
 //! Query editor commands: run, format, complete, explain, history, transactions.
 
-use nook_core::{Error, Result};
+use nook_core::{Error, Result, Value};
 use nook_model::ResultSet;
 use serde_json::json;
 
-use crate::cmd::{run_sql, sql_from_params_or_editor};
+use crate::cmd::{run_prepared_sql, run_sql, sql_from_params_or_editor};
 use crate::sqltext::{self, Completion};
 use crate::{CommandSpec, Level, Params, Session, StatementRun, TabKind};
 
@@ -66,6 +66,24 @@ pub fn commands() -> Vec<CommandSpec> {
         )
         .params(r#"{"enabled":true}"#)
         .help("When on, grid.apply and every destructive command additionally require the connection's token in \"safe_token\". The token is minted into the keychain and handed back only after a live conn.test passes, so a rotated password fails. It stops a stray script and a slip of the mouse, not a local attacker who can already read the keychain — they have the credentials."),
+        CommandSpec::new("sql.parameters", "Find query parameters", "Query", parameters)
+            .params(r#"{"sql":"select * from u where email = :email"}"#)
+            .help("Reports the style (colon or positional), each name with its occurrence count, and the tab's current bindings. Detected on the token stream, so a \":name\" inside a literal or a comment is not a parameter and \"x::int\" is a cast. \"%name%\" is deliberately not a style: it collides with LIKE '%x%' and would eat a wildcard."),
+        CommandSpec::new("sql.setParameter", "Bind a parameter", "Query", set_parameter)
+            .params(r#"{"name":"email","value":"a@b.c"}"#)
+            .help("Binds a value to this tab's named parameter. Pass \"value\": null to bind an explicit NULL, or \"clear\": true to unbind."),
+        CommandSpec::new("sql.findReplace", "Find and replace", "Query", find_replace)
+            .params(r#"{"find":"users","replace":"accounts","all":true}"#)
+            .help("Operates on the editor's text. \"all\" replaces every hit; without it, the first at or after \"at\". Returns the new text and the byte ranges it touched."),
+        CommandSpec::new("sql.zen", "Zen mode", "Query", zen)
+            .params(r#"{"on":true}"#)
+            .help("Full-bleed editor: the app bar, tree, inspector, tab strip and status bar stop painting."),
+        CommandSpec::new("sql.splitPane", "Split the editor", "Query", split_pane)
+            .params(r#"{"on":true}"#)
+            .help("A second editor beside this tab's, on the same connection, with its own text and results."),
+        CommandSpec::new("sql.parameterised", "Parameterised queries", "Query", parameterised)
+            .params(r#"{"sql":"select * from u where email = :email","params":{"email":"a@b.c"}}"#)
+            .help("The capability: report what this script needs, and run it as a prepared statement when every value is bound."),
         CommandSpec::new("sql.stop", "Stop", "Query", stop).help(
             "Cancelling a running statement is not possible yet; each run is bounded by max_rows.",
         ),
@@ -137,8 +155,17 @@ fn new_query(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 /// request was issued against — the `sql` the command resolved, which is the tab's own text when the
 /// command was given none — so the register can tell whether the editor has moved on since the run,
 /// and a run whose source differed from the editor still says so.
-fn begin_run(session: &mut Session, ran_script: &str, statements: Vec<String>) {
+fn begin_run(session: &mut Session, ran_script: &str, statements: Vec<String>, right: bool) {
     if let Ok(tab) = session.active_tab_mut() {
+        // The right pane of a split keeps its own results: two panes side by side are two queries,
+        // and one clearing the other's rows would make the split useless for comparison.
+        if right {
+            if let Some(split) = tab.sql.split.as_mut() {
+                split.results.clear();
+                split.ran_script = ran_script.to_owned();
+            }
+            return;
+        }
         if tab.kind == TabKind::Query {
             tab.sql.results.clear();
             tab.sql.statements = statements;
@@ -172,11 +199,17 @@ fn fold(last: &mut ResultSet, rs: &ResultSet) {
 /// The single writer of a tab's SQL state: appends the statement's run, and keeps `last_result` and
 /// `elapsed_ms` describing the run so far — the aggregate the status bar reads, built by `fold`. A run
 /// with no result (the failure that stopped the run) changes only `results`.
-fn record_run(session: &mut Session, run: StatementRun, run_so_far: &mut ResultSet) {
+fn record_run(session: &mut Session, run: StatementRun, run_so_far: &mut ResultSet, right: bool) {
     if let Some(result) = run.result.as_ref() {
         fold(run_so_far, result);
     }
     if let Ok(tab) = session.active_tab_mut() {
+        if right {
+            if let Some(split) = tab.sql.split.as_mut() {
+                split.results.push(run);
+            }
+            return;
+        }
         if tab.kind == TabKind::Query {
             if run.result.is_some() {
                 tab.sql.last_result = Some(run_so_far.clone());
@@ -217,6 +250,7 @@ fn run_and_record(
     statement: &str,
     limit: Option<usize>,
     run_so_far: &mut ResultSet,
+    right: bool,
 ) -> Result<serde_json::Value> {
     let started = std::time::Instant::now();
     let outcome = run_sql(session, conn, statement, limit);
@@ -238,6 +272,7 @@ fn run_and_record(
                     error: None,
                 },
                 run_so_far,
+                right,
             );
             Ok(summary)
         }
@@ -251,6 +286,7 @@ fn run_and_record(
                     error: Some(e.to_string()),
                 },
                 run_so_far,
+                right,
             );
             Err(e)
         }
@@ -326,8 +362,22 @@ fn summarize(
     })
 }
 
+/// Which editor the request is for. `"right"` addresses a split tab's second pane; anything else is
+/// the tab's own editor, so every existing caller keeps working unchanged.
+fn pane_is_right(p: &Params) -> bool {
+    p.str_opt("pane").as_deref() == Some("right")
+}
+
 fn run(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let sql = sql_from_params_or_editor(session, p)?;
+    // A script with placeholders is one prepared statement, not a script: sending `:email` to the
+    // server would be a syntax error, and interpolating it here is the ceiling this phase removes.
+    let found = sqltext::parameters(&sql);
+    if !found.is_empty() {
+        let mut out = run_prepared(session, p, &sql, &found)?;
+        out["style"] = json!(found.style_name());
+        return Ok(out);
+    }
     let statements = split(&sql);
     run_statements(session, p, &sql, statements)
 }
@@ -347,7 +397,8 @@ fn run_statements(
         n if n > 0 => Some(n.clamp(1, 5_000_000) as usize),
         _ => None,
     };
-    begin_run(session, ran_script, statements.clone());
+    let right = pane_is_right(p);
+    begin_run(session, ran_script, statements.clone(), right);
     let mut run_so_far = ResultSet::default();
     let mut results: Vec<serde_json::Value> = Vec::new();
     for (index, statement) in statements.iter().enumerate() {
@@ -358,6 +409,7 @@ fn run_statements(
             statement,
             limit,
             &mut run_so_far,
+            right,
         )?);
     }
     session.log(
@@ -393,9 +445,10 @@ fn run_statement(session: &mut Session, p: &Params) -> Result<serde_json::Value>
     // cut out of it: `Register::stale` compares that against the editor's whole text, and the caret's
     // statement is not the text the editor holds. `sql` is that text — the parameter when the command
     // was given one, the tab's own otherwise.
-    begin_run(session, &sql, vec![picked.clone()]);
+    let right = pane_is_right(p);
+    begin_run(session, &sql, vec![picked.clone()], right);
     let mut run_so_far = ResultSet::default();
-    run_and_record(session, conn, 0, &picked, None, &mut run_so_far)?;
+    run_and_record(session, conn, 0, &picked, None, &mut run_so_far, right)?;
     Ok(json!({
         "statement": picked,
         "rows": run_so_far.row_count(),
@@ -501,14 +554,329 @@ fn explain(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let mut run_so_far = ResultSet::default();
     // The same stamp the other runs leave: the text the request was issued against, so the register
     // can tell whether the editor has moved on since — not the statement the explain was reduced to.
-    begin_run(session, &sql, vec![run.statement.clone()]);
-    record_run(session, run, &mut run_so_far);
+    let right = pane_is_right(p);
+    begin_run(session, &sql, vec![run.statement.clone()], right);
+    record_run(session, run, &mut run_so_far, right);
     Ok(out)
+}
+
+/// Report the placeholders a script needs, with the tab's current bindings.
+fn parameters(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let sql = p.str_opt("sql").unwrap_or_else(|| {
+        session
+            .active_tab()
+            .map(|t| t.sql.text.clone())
+            .unwrap_or_default()
+    });
+    let found = sqltext::parameters(&sql);
+    let bound = session
+        .active_tab()
+        .map(|t| t.sql.params.clone())
+        .unwrap_or_default();
+    let params: Vec<serde_json::Value> = found
+        .named
+        .iter()
+        .map(|ph| {
+            let name = ph.name.clone().unwrap_or_default();
+            json!({
+                "name": name,
+                "count": ph.count,
+                "value": bound.get(&name).cloned().flatten(),
+                "bound": bound.contains_key(&name),
+            })
+        })
+        .collect();
+    let missing: Vec<String> = found
+        .names()
+        .into_iter()
+        .filter(|n| !bound.contains_key(n))
+        .collect();
+    Ok(json!({
+        "style": found.style_name(),
+        "params": params,
+        "positional": found.positional,
+        "missing": missing,
+    }))
+}
+
+/// Bind a value to this tab's named parameter, or clear the binding.
+fn set_parameter(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let name = p.str_arg("name")?;
+    if p.bool_opt("clear", false) {
+        session.active_tab_mut()?.sql.params.remove(&name);
+        return Ok(json!({ "name": name, "bound": false, "cleared": true }));
+    }
+    // A missing "value" is not the same as `"value": null`: the first is a caller mistake, the second
+    // is an explicit NULL, which is a different query.
+    let raw = p
+        .get("value")
+        .ok_or_else(|| Error::config("pass \"value\" (use null for an explicit NULL, or \"clear\": true to unbind)"))?;
+    let value = if raw.is_null() {
+        None
+    } else {
+        Some(match raw.as_str() {
+            Some(s) => s.to_string(),
+            None => raw.to_string(),
+        })
+    };
+    session
+        .active_tab_mut()?
+        .sql
+        .params
+        .insert(name.clone(), value.clone());
+    Ok(json!({ "name": name, "bound": true, "value": value }))
+}
+
+/// The capability the Navicat catalog names: report what a script needs and run it prepared.
+fn parameterised(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    // Reporting is the default: the caller says it wants a run by passing values (or `run: true`).
+    // A capability command that writes the database whenever it is asked a question is a footgun.
+    let wants_run = p.bool_opt("run", false)
+        || p.get("params").is_some()
+        || p.get("positional").is_some();
+    let sql = match p.str_opt("sql") {
+        Some(sql) => sql,
+        None => {
+            let found = parameters(session, p)?;
+            return Ok(json!({ "parameters": found, "ran": false }));
+        }
+    };
+    let found = sqltext::parameters(&sql);
+    if !wants_run {
+        let report = parameters(session, p)?;
+        return Ok(json!({ "parameters": report, "ran": false }));
+    }
+    if found.is_empty() {
+        return Err(Error::config(
+            "no placeholders in this script; run it with sql.run",
+        ));
+    }
+    let mut out = run_prepared(session, p, &sql, &found)?;
+    out["style"] = json!(found.style_name());
+    Ok(out)
+}
+
+/// Run a script as a prepared statement: refuse if a value is missing, otherwise bind and run.
+fn run_prepared(
+    session: &mut Session,
+    p: &Params,
+    sql: &str,
+    found: &sqltext::Params,
+) -> Result<serde_json::Value> {
+    let conn = session.resolve_conn(p)?;
+    let dialect = session.driver_for(conn)?.dialect();
+    let style = match dialect {
+        nook_core::Dialect::Postgres => sqltext::BindStyle::Dollar,
+        _ => sqltext::BindStyle::Question,
+    };
+    let (prepared, slots) = sqltext::bind_placeholders(sql, style);
+    // Values come from the request's `params` object, else the tab's bindings.
+    let given = p.get("params").and_then(|v| v.as_object()).cloned();
+    let bound = session
+        .active_tab()
+        .map(|t| t.sql.params.clone())
+        .unwrap_or_default();
+    let mut values = Vec::with_capacity(slots.len());
+    let mut missing: Vec<String> = Vec::new();
+    for (i, slot) in slots.iter().enumerate() {
+        // `Some(Some(v))` = a value, `Some(None)` = an explicit NULL, `None` = unbound.
+        let raw: Option<Option<String>> = match slot {
+            Some(name) => match given.as_ref().and_then(|g| g.get(name)) {
+                Some(serde_json::Value::Null) => Some(None),
+                Some(v) => Some(Some(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))),
+                None => bound.get(name).cloned(),
+            },
+            // A positional slot is filled by `positional` (an array), one entry per slot.
+            None => p
+                .get("positional")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.get(i))
+                .map(|v| {
+                    if v.is_null() {
+                        None
+                    } else {
+                        Some(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
+                    }
+                }),
+        };
+        let Some(raw) = raw else {
+            missing.push(slot.clone().unwrap_or_else(|| format!("#{}", i + 1)));
+            continue;
+        };
+        values.push(match raw {
+            None => Value::Null,
+            Some(s) => Value::text(s),
+        });
+    }
+    if !missing.is_empty() {
+        return Err(Error::config(format!(
+            "unbound parameter{}: {} — bind {} with sql.setParameter, or pass \"params\"",
+            if missing.len() == 1 { "" } else { "s" },
+            missing.join(", "),
+            if missing.len() == 1 { "it" } else { "them" }
+        )));
+    }
+    if found.style == sqltext::ParamStyle::Positional && values.len() != found.positional {
+        return Err(Error::config(format!(
+            "this script has {} positional slot(s) but {} value(s) were given",
+            found.positional,
+            values.len()
+        )));
+    }
+    let limit = match p.int_opt("limit", 0) {
+        n if n > 0 => Some(n.clamp(1, 5_000_000) as usize),
+        _ => None,
+    };
+    let right = pane_is_right(p);
+    begin_run(session, sql, vec![prepared.clone()], right);
+    let started = std::time::Instant::now();
+    let result = run_prepared_sql(session, conn, &prepared, &values, limit);
+    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    match result {
+        Ok(rs) => {
+            record_run(
+                session,
+                StatementRun {
+                    statement: prepared.clone(),
+                    result: Some(rs.clone()),
+                    elapsed_ms: rs.elapsed_ms,
+                    error: None,
+                },
+                &mut ResultSet::default(),
+                right,
+            );
+            let summary = statement_summary(0, &prepared, Some(&rs), rs.elapsed_ms, None);
+            Ok(json!({
+                "prepared": true,
+                "sql": prepared,
+                "bound": values.len(),
+                "summary": summary,
+                "columns": rs.columns,
+                "rows": rs.row_count(),
+                "data": rs.rows.iter().map(|r| {
+                    serde_json::Value::Array(r.iter().map(|v| v.to_json()).collect())
+                }).collect::<Vec<_>>(),
+                "objects": rs.to_json()["rows"],
+            }))
+        }
+        Err(e) => {
+            record_run(
+                session,
+                StatementRun {
+                    statement: prepared,
+                    result: None,
+                    elapsed_ms: elapsed,
+                    error: Some(e.to_string()),
+                },
+                &mut ResultSet::default(),
+                right,
+            );
+            Err(e)
+        }
+    }
+}
+
+/// Find and replace over the editor's text.
+fn find_replace(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let find = p.str_arg("find")?;
+    if find.is_empty() {
+        return Err(Error::config(
+            "an empty \"find\" would insert the replacement between every character",
+        ));
+    }
+    let replace = p.str_opt("replace").unwrap_or_default();
+    let all = p.bool_opt("all", false);
+    let case = p.bool_opt("case", false);
+    let word = p.bool_opt("word", false);
+    let tab = session.active_tab_mut()?;
+    let text = tab.sql.text.clone();
+    // `at: [start, end]` replaces the one hit the find bar has selected. Without it, `all: false`
+    // means "the first hit", which is a different question once the user has walked to the third.
+    if let Some(range) = p.get("at").and_then(|v| v.as_array()) {
+        let (Some(start), Some(end)) = (
+            range.first().and_then(|v| v.as_u64()),
+            range.get(1).and_then(|v| v.as_u64()),
+        ) else {
+            return Err(Error::config(r#""at" needs [start, end] byte offsets"#));
+        };
+        let (start, end) = (start as usize, end as usize);
+        if !sqltext::find_hits(&text, &find, case, word).contains(&(start, end)) {
+            return Err(Error::config(format!(
+                "at {start}..{end} is not a hit of {find:?}; the text has moved on"
+            )));
+        }
+        let mut new_text = text.clone();
+        new_text.replace_range(start..end, &replace);
+        let shift = replace.len() as isize - (end - start) as isize;
+        tab.sql.text = new_text.clone();
+        return Ok(json!({
+            "text": new_text,
+            "replaced": 1,
+            "ranges": [[start, end]],
+            "shift": shift,
+            "changed": true,
+        }));
+    }
+    let (new_text, ranges) = sqltext::find_replace(&text, &find, &replace, all, case, word)?;
+    tab.sql.text = new_text.clone();
+    Ok(json!({
+        "text": new_text,
+        "replaced": ranges.len(),
+        "ranges": ranges,
+        "changed": !ranges.is_empty(),
+    }))
+}
+
+/// Zen mode: a layout flag the UI reads, reported here so a script can prove it.
+fn zen(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let on = p.strict_bool_opt("on", !session.zen)?;
+    session.zen = on;
+    Ok(json!({ "zen": on }))
+}
+
+/// Toggle the second editor beside this tab's.
+fn split_pane(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let tab = session.active_tab_mut()?;
+    let on = p.strict_bool_opt("on", tab.sql.split.is_none())?;
+    if on {
+        if tab.sql.split.is_none() {
+            tab.sql.split = Some(crate::SplitState::default());
+        }
+    } else {
+        // Closing the split discards the right pane's text and results with it.
+        tab.sql.split = None;
+    }
+    Ok(json!({ "split": tab.sql.split.is_some() }))
 }
 
 fn history(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let limit = p.int_opt("limit", 20).clamp(1, 1000) as usize;
-    let filter = p.conn_id();
+    // History records the connection's name, so a filter given as an id is resolved to it first —
+    // otherwise `{"conn": "sqlite-abc123"}` silently matches nothing.
+    let filter = p.conn_id().map(|id| {
+        session
+            .conn_index(&id)
+            .ok()
+            .and_then(|i| session.conns.get(i))
+            .map_or(id, |c| c.cfg.name.clone())
+    });
+    // `reuse: n` copies the nth entry (0 = most recent) back into the active tab. The thing every
+    // history panel is for, and today requires retyping.
+    if let Some(index) = p.get("reuse").and_then(|v| v.as_u64()) {
+        let entry = session
+            .history
+            .iter()
+            .rev()
+            .filter(|h| filter.as_deref().map(|f| h.conn == f).unwrap_or(true))
+            .nth(index as usize)
+            .cloned()
+            .ok_or_else(|| {
+                Error::config(format!("history has no entry {index} for this connection"))
+            })?;
+        let tab = session.active_tab_mut()?;
+        tab.sql.text = entry.sql.clone();
+        return Ok(json!({ "reused": entry.sql, "conn": entry.conn }));
+    }
     let entries: Vec<serde_json::Value> = session
         .history
         .iter()

@@ -196,6 +196,11 @@ pub fn show(
     let caret = caret_in(&text, state.caret.map_or(0, |caret| caret.index));
 
     layout.toolbar = Some(toolbar(ui, caret, &text, tokens, &mut actions));
+    // The find bar sits above the script when it is open: it edits the text below it, so it belongs
+    // between the toolbar and the editor rather than floating over the code.
+    find_bar(ui, session, tab_index, state, tokens, &mut actions);
+    // Parameters are chips, not a form: what the script needs, and whether this tab has a value.
+    parameter_chips(ui, session, tab_index, tokens);
     // The band sits between the toolbar and the script: it drafts *into* this tab, so a modal would
     // cover the editor it exists to fill.
     crate::ai::band(ui, session, state, tokens);
@@ -287,6 +292,109 @@ pub fn show(
     layout
 }
 
+/// The right-hand editor of a split tab.
+///
+/// Deliberately thin: the pane has its own text and its own Run, and nothing else. The register, the
+/// strips and the bands all belong to the left pane, because a second copy of the run bookkeeping is
+/// a second set of rules to keep in sync for a feature whose whole point is two queries side by side.
+pub fn show_pane(
+    ui: &mut Ui,
+    session: &mut Session,
+    tab_index: usize,
+    state: &mut UiState,
+    tokens: &Tokens,
+) -> Layout {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let mut layout = Layout::default();
+    let mut actions = Actions::default();
+    let pane_id = egui::Id::new(("editor-split", tab_index));
+
+    let split = session.tabs[tab_index].sql.split.take();
+    let Some(mut split) = split else {
+        return layout;
+    };
+    let caret = caret_in(&split.text, 0);
+    layout.toolbar = Some(toolbar(ui, caret, &split.text, tokens, &mut actions));
+    // The pane's Run runs *its* text: `sql.run` is handed the script explicitly, so the engine does
+    // not fall back to the left pane's editor text.
+    if let Some((command, mut params)) = actions.command.take() {
+        if command == "sql.run" {
+            params["sql"] = serde_json::Value::String(split.text.clone());
+            // `pane: right` is what keeps this run's rows in `SplitState.results` instead of
+            // replacing the left pane's.
+            params["pane"] = serde_json::Value::String("right".into());
+        }
+        if let Err(e) = session.run(command, params) {
+            session.log(Level::Warn, e.to_string());
+        }
+    }
+    actions.command = None;
+    design::band_fill(
+        ui,
+        design::EDITOR_H,
+        tokens.panel,
+        0,
+        egui::Align::Min,
+        |ui| {
+            let mut layouter = |ui: &Ui, buffer: &dyn egui::TextBuffer, _wrap: f32| {
+                ui.fonts_mut(|fonts| fonts.layout_job(sql_job(tokens, buffer.as_str())))
+            };
+            egui::TextEdit::multiline(&mut split.text)
+                .id(pane_id)
+                .code_editor()
+                .frame(egui::Frame::new().inner_margin(Margin {
+                    left: CODE_X as i8,
+                    right: design::S5,
+                    top: 0,
+                    bottom: 0,
+                }))
+                .desired_width(f32::INFINITY)
+                .desired_rows(design::EDITOR_H as usize / design::EDITOR_ROW_H as usize)
+                .layouter(&mut layouter)
+                .show(ui);
+        },
+    );
+    border_row(ui, tokens);
+    // The right pane's own result: a plain read-only table of the last run's rows. The full register
+    // (views, copy, selection) stays on the left pane — this is two queries side by side, not two
+    // result workbenches, and a second register is a second set of rules for no extra question.
+    let pane_rows = session.tabs[tab_index]
+        .sql
+        .split
+        .as_ref()
+        .and_then(|split| split.results.iter().rev().find_map(|run| run.result.clone()));
+    if let Some(rs) = pane_rows.as_ref() {
+        let _ = state;
+        ui.spacing_mut().item_spacing = egui::vec2(f32::from(design::S4), 2.0);
+        egui::ScrollArea::both().id_salt(pane_id).show(ui, |ui| {
+            egui::Grid::new(("split-grid", tab_index))
+                .striped(true)
+                .show(ui, |ui| {
+                    for name in &rs.columns {
+                        ui.label(RichText::new(name).strong().color(tokens.text));
+                    }
+                    ui.end_row();
+                    for row in rs.rows.iter().take(200) {
+                        for cell in row {
+                            ui.label(
+                                RichText::new(cell.display())
+                                    .font(tokens.mono(design::T_XS))
+                                    .color(if cell.is_null() {
+                                        tokens.text_dim
+                                    } else {
+                                        tokens.text
+                                    }),
+                            );
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+    session.tabs[tab_index].sql.split = Some(split);
+    layout
+}
+
 /// What one painted frame asked the caller to do. The widget never touches the run itself, so a test
 /// can drive it headlessly and read the request back.
 #[derive(Debug, Default)]
@@ -321,6 +429,203 @@ fn run_moved_on(register: &Register, session: &Session, tab_index: usize) -> boo
 /// `Explain`, `Format`, `Clear`, then the caret read-out and the statement count. The connection chip
 /// is cut because it does not fit (the fit is a test below); `Chart`, `Pivot`, `Save snippet` and
 /// `Export` are cut because the Query menu, the palette and the register's own `.rbar` reach them.
+/// The find bar: a field, the replace field when it is open, and the two toggles.
+///
+/// Replaces through `sql.findReplace`, so the caret rules and the whole-word rule live in one place
+/// (the engine) instead of being re-implemented by the widget that happens to be painting.
+fn find_bar(
+    ui: &mut Ui,
+    session: &mut Session,
+    tab_index: usize,
+    state: &mut UiState,
+    tokens: &Tokens,
+    actions: &mut Actions,
+) {
+    let Some(mut bar) = state.find.take() else {
+        return;
+    };
+    let mut close = false;
+    // Set when this frame walked to a hit: the editor's selection is moved after the bar paints, so
+    // "find next" is visible as a selection instead of only as a number nobody sees.
+    let mut walked = false;
+    design::band_fill(
+        ui,
+        design::TOOLBAR_H,
+        tokens.panel,
+        design::S4,
+        egui::Align::Center,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = f32::from(design::S3);
+            ui.label(
+                RichText::new("Find")
+                    .font(tokens.mono(design::T_XS))
+                    .color(tokens.text_dim),
+            );
+            let field = egui::TextEdit::singleline(&mut bar.find)
+                .desired_width(180.0)
+                .hint_text("find");
+            let response = ui.add(field);
+            if bar.replace_open {
+                ui.label(
+                    RichText::new("Replace")
+                        .font(tokens.mono(design::T_XS))
+                        .color(tokens.text_dim),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut bar.replace)
+                        .desired_width(180.0)
+                        .hint_text("replace"),
+                );
+            }
+            for (label, hint, on) in [
+                ("Aa", "Match case", &mut bar.case),
+                ("|ab|", "Whole word", &mut bar.word),
+            ] {
+                if ui
+                    .toggle_value(on, label)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    *on = !*on;
+                }
+            }
+            if design::toolbar_button(
+                ui,
+                tokens,
+                if bar.replace_open { "Replace all" } else { "Find next" },
+                None,
+                tokens.panel_high,
+                Emphasis::Plain,
+                true,
+                |_| {},
+            )
+            .clicked()
+            {
+                if bar.replace_open {
+                    actions.command = Some((
+                        "sql.findReplace",
+                        serde_json::json!({
+                            "find": bar.find, "replace": bar.replace,
+                            "case": bar.case, "word": bar.word, "all": true,
+                        }),
+                    ));
+                } else {
+                    // Find next only *walks*: it moves the selection onto the next hit and writes
+                    // nothing. Going through `sql.findReplace` with an empty replacement would
+                    // delete the hit it claims to find.
+                    bar.current = next_hit(&session.tabs[tab_index].sql.text, &bar, bar.current);
+                    walked = true;
+                }
+            }
+            if ui.button("✕").on_hover_text("Close (Esc)").clicked() {
+                close = true;
+            }
+            if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                // Enter walks too, and `Cmd+Enter` replaces the hit it is sitting on.
+                if bar.replace_open && ui.input(|i| i.modifiers.command) {
+                    if let Some(index) = bar.current {
+                        let text = &session.tabs[tab_index].sql.text;
+                        let hits = nook_engine::sqltext::find_hits(text, &bar.find, bar.case, bar.word);
+                        if let Some((start, end)) = hits.get(index).copied() {
+                            actions.command = Some((
+                                "sql.findReplace",
+                                serde_json::json!({
+                                    "find": bar.find, "replace": bar.replace,
+                                    "case": bar.case, "word": bar.word,
+                                    "at": [start, end],
+                                }),
+                            ));
+                        }
+                    }
+                } else {
+                    bar.current = next_hit(&session.tabs[tab_index].sql.text, &bar, bar.current);
+                    walked = true;
+                }
+            }
+            if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+        },
+    );
+    if walked {
+        if let Some(index) = bar.current {
+            let text = &session.tabs[tab_index].sql.text;
+            let hits = nook_engine::sqltext::find_hits(text, &bar.find, bar.case, bar.word);
+            if let Some(&(start, end)) = hits.get(index) {
+                // Byte offsets to character offsets: `CCursor` counts chars, and a hit after a
+                // multi-byte character would land in the wrong place if the two were conflated.
+                let from = text[..start].chars().count();
+                let to = from + text[start..end].chars().count();
+                let mut edit = egui::text_edit::TextEditState::load(ui.ctx(), editor_id(tab_index))
+                    .unwrap_or_default();
+                edit.cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(from),
+                        egui::text::CCursor::new(to),
+                    )));
+                edit.store(ui.ctx(), editor_id(tab_index));
+            }
+        }
+    }
+    if !close {
+        state.find = Some(bar);
+    }
+}
+
+/// The hit after `current`, wrapping at the end. `None` when the text has no hits at all, so the
+/// bar can say so instead of pretending it moved.
+fn next_hit(text: &str, bar: &crate::app::FindBar, current: Option<usize>) -> Option<usize> {
+    let hits = nook_engine::sqltext::find_hits(text, &bar.find, bar.case, bar.word);
+    if hits.is_empty() {
+        return None;
+    }
+    Some(current.map_or(0, |index| (index + 1) % hits.len()))
+}
+
+/// The parameter chips: one per placeholder the script needs, filled or not.
+fn parameter_chips(ui: &mut Ui, session: &mut Session, tab_index: usize, tokens: &Tokens) {
+    let sql = session.tabs[tab_index].sql.text.clone();
+    let found = nook_engine::sqltext::parameters(&sql);
+    if found.is_empty() {
+        return;
+    }
+    let bound = session.tabs[tab_index].sql.params.clone();
+    design::band_fill(
+        ui,
+        design::TOOLBAR_H,
+        tokens.panel_alt,
+        design::S4,
+        egui::Align::Center,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = f32::from(design::S2);
+            ui.label(
+                RichText::new(format!("{} parameter(s)", found.named.len().max(found.positional)))
+                    .font(tokens.mono(design::T_XS))
+                    .color(tokens.text_dim),
+            );
+            for name in found.names() {
+                let value = bound.get(&name).cloned().flatten();
+                let (label, colour) = match &value {
+                    Some(v) => (format!(":{name} = {v}"), tokens.text),
+                    None => (format!(":{name}"), tokens.error_fill),
+                };
+                ui.label(
+                    RichText::new(label)
+                        .font(tokens.mono(design::T_XS))
+                        .color(colour),
+                );
+            }
+            if found.positional > 0 {
+                ui.label(
+                    RichText::new(format!("{} positional slot(s)", found.positional))
+                        .font(tokens.mono(design::T_XS))
+                        .color(tokens.text_dim),
+                );
+            }
+        },
+    );
+}
+
 fn toolbar(ui: &mut Ui, caret: Caret, text: &str, tokens: &Tokens, actions: &mut Actions) -> Rect {
     let index = caret_statement(text, Some(caret)).unwrap_or(0);
     let rect = design::band_fill(
