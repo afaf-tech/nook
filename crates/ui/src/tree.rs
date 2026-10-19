@@ -674,6 +674,13 @@ pub fn show(
                                             state.open_datagen(index, reference.clone());
                                             ui.close();
                                         }
+                                        if ui.button("Import into this table…").clicked() {
+                                            let mut wizard =
+                                                crate::app::ImportWizard::new(Some(index));
+                                            wizard.table = reference.key();
+                                            state.import_wizard = Some(wizard);
+                                            ui.close();
+                                        }
                                         if ui.button("Export…").clicked() {
                                             state.open_export(index, reference.clone());
                                             ui.close();

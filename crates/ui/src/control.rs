@@ -6,6 +6,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use nook_core::{Error, Result};
 use serde_json::{json, Value};
@@ -23,6 +24,10 @@ pub struct Control {
     pub key: String,
     requests: Receiver<Request>,
     pub served: u64,
+    /// Set once the app has a context. The socket thread wakes the UI through it: a request that
+    /// only waits for the next frame waits forever when the window is not drawing (occluded,
+    /// minimised, or driven from a script with nobody at the keyboard).
+    wake: Arc<Mutex<Option<egui::Context>>>,
 }
 
 impl Control {
@@ -42,13 +47,16 @@ impl Control {
         restrict(&key_path);
         let (tx, rx) = channel::<Request>();
         let listening_key = key.clone();
+        let wake: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
+        let socket_wake = Arc::clone(&wake);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
                         let tx = tx.clone();
                         let key = listening_key.clone();
-                        std::thread::spawn(move || serve_client(stream, tx, key));
+                        let wake = Arc::clone(&socket_wake);
+                        std::thread::spawn(move || serve_client(stream, tx, key, wake));
                     }
                     Err(_) => break,
                 }
@@ -59,6 +67,7 @@ impl Control {
             key,
             requests: rx,
             served: 0,
+            wake,
         })
     }
 
@@ -72,12 +81,26 @@ impl Control {
         out
     }
 
+    /// Called once per frame with the live context, so a request from any thread can wake the app.
+    pub fn attach(&self, ctx: &egui::Context) {
+        if let Ok(mut slot) = self.wake.lock() {
+            if slot.is_none() {
+                *slot = Some(ctx.clone());
+            }
+        }
+    }
+
     pub fn key_path(&self) -> std::path::PathBuf {
         nook_engine::profiles::config_dir().join(format!("control-key.{}", self.port))
     }
 }
 
-fn serve_client(stream: TcpStream, tx: Sender<Request>, key: String) {
+fn serve_client(
+    stream: TcpStream,
+    tx: Sender<Request>,
+    key: String,
+    wake: Arc<Mutex<Option<egui::Context>>>,
+) {
     let peer = stream.peer_addr().ok();
     let _ = peer;
     let reader_stream = match stream.try_clone() {
@@ -125,6 +148,10 @@ fn serve_client(stream: TcpStream, tx: Sender<Request>, key: String) {
             .to_string();
         let params = message.get("params").cloned().unwrap_or(json!({}));
         let (reply_tx, reply_rx) = channel();
+        // Wake the UI thread before the request is even queued: it may be idle waiting on input.
+        if let Some(ctx) = wake.lock().ok().and_then(|slot| slot.clone()) {
+            ctx.request_repaint();
+        }
         if tx
             .send(Request {
                 method,

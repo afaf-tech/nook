@@ -27,9 +27,33 @@ pub fn commands() -> Vec<CommandSpec> {
             .help("The DDL that would make the target look like the source."),
         CommandSpec::new("sync.structure", "Structure synchronization", "Sync", sync_structure)
             .params(r#"{"from":"prod","to":"staging","apply":false,"allow_destructive":false}"#),
+        CommandSpec::new("transfer.columnMapping", "Column mapping", "Transfer", transfer_mapping)
+            .params(r#"{"map":[{"source":"mail","target":"email"}]}"#)
+            .help("Normalises a mapping editor's rows into the columnMapping form transfer.data and the imports take."),
+        CommandSpec::new("transfer.speedTest", "Time one page", "Transfer", speed_test)
+            .params(r#"{"from":"local","to":"staging","table":"orders","rows":2000}"#)
+            .help("Reads one page and writes it to a scratch table that is rolled back; reports rows/s and the batch size to pass to transfer.data."),
+        CommandSpec::new("sync.dataDelete", "Delete rows missing from the source", "Sync", sync_data_delete)
+            .params(r#"{"from":"prod","to":"staging","tables":["orders"],"delete_missing":true,"confirm":true,"dry_run":true}"#)
+            .help("The delete half of the data sync, on its own. Dry run by default; confirm:true to apply."),
+        CommandSpec::new("sync.conflictRules", "Conflict rules", "Sync", sync_conflict_rules)
+            .params(r#"{"rules":[{"column":"total","on_conflict":"newer","by":"updated_at"}]}"#)
+            .help("Validate and report per-column resolution: source, target, newer (by a timestamp) or skip."),
+        CommandSpec::new("sync.bidirectional", "Bi-directional sync", "Sync", sync_bidirectional)
+            .params(r#"{"a":"local","b":"staging","tables":["orders"],"dry_run":true}"#)
+            .help("Two passes with conflict rules deciding. A row changed on both sides is reported, never silently overwritten."),
         CommandSpec::new("backup.dump", "Backup", "Backup", dump)
             .params(r#"{"conn":"local","path":"~/backups/shop.sql","schema_only":false}"#)
             .help("SQLite writes a portable .sql script; Postgres and MySQL use pg_dump/mysqldump."),
+        CommandSpec::new("backup.compression", "Compressed backups", "Backup", backup_compressed)
+            .params(r#"{"conn":"local","path":"~/backups/shop.sql","compress":true}"#)
+            .help("A dump piped through gzip, so the file is a normal .gz every other tool reads."),
+        CommandSpec::new("backup.encryption", "Encrypted backups", "Backup", backup_encrypted)
+            .params(r#"{"conn":"local","path":"~/backups/shop.sql","encrypt":"age","recipient":"age1…"}"#)
+            .help("age or gpg; a missing binary is refused before any file is renamed."),
+        CommandSpec::new("backup.local", "Local backup copy", "Backup", backup_local)
+            .params(r#"{"conn":"local","path":"~/backups/shop.sql","keep":{"dir":"~/backups/offsite","copies":7}}"#)
+            .help("Copies the finished dump to a second location and prunes older copies there."),
         CommandSpec::new("backup.restore", "Restore", "Backup", restore)
             .params(r#"{"conn":"local","path":"~/backups/shop.sql"}"#),
         CommandSpec::new("backup.list", "List backups", "Backup", list_backups)
@@ -229,6 +253,265 @@ fn sync_data(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     }))
 }
 
+/// Normalise a mapping editor's rows into `["src=target"]` entries.
+///
+/// The UI and the CLI both hold a list of pairs; `transfer.data` and the imports take the
+/// `source=target` strings. One command does the conversion so the three callers cannot drift.
+fn transfer_mapping(_session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let rows = p.get("map").and_then(|v| v.as_array()).ok_or_else(|| {
+        Error::config("pass \"map\": [{\"source\":\"mail\",\"target\":\"email\"}]")
+    })?;
+    let mut entries = Vec::with_capacity(rows.len());
+    let mut seen_targets: Vec<String> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let source = row
+            .get("source")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::config(format!("map[{i}] has no \"source\"")))?;
+        let target = row
+            .get("target")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::config(format!("map[{i}] has no \"target\"")))?;
+        if source.trim().is_empty() || target.trim().is_empty() {
+            return Err(Error::config(format!(
+                "map[{i}] has an empty source or target"
+            )));
+        }
+        if seen_targets.iter().any(|t| t == target) {
+            // Two sources into one target is not a mapping, it is a race for the column.
+            return Err(Error::config(format!(
+                "two sources map to '{target}'; a column takes one source"
+            )));
+        }
+        seen_targets.push(target.to_string());
+        entries.push(format!("{}={}", source.trim(), target.trim()));
+    }
+    Ok(json!({
+        "columnMapping": entries,
+        "count": entries.len(),
+        "note": "pass this list as \"columnMapping\" to transfer.data or an import",
+    }))
+}
+
+/// One timed page against the destination, rolled back.
+fn speed_test(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let (from, to) = pair(session, p)?;
+    let table = p
+        .str_opt("table")
+        .ok_or_else(|| Error::config("pass \"table\""))?;
+    let rows = p.int_opt("rows", 2_000).clamp(1, 50_000) as usize;
+    let report = {
+        let (src, dst) = session.two_drivers(from, to)?;
+        transfer::speed_probe(src, dst, None, &table, rows)?
+    };
+    Ok(json!({
+        "from": conn_id_at(session, from)?,
+        "to": conn_id_at(session, to)?,
+        "table": table,
+        "rows": report.rows,
+        "read_ms": report.read_ms,
+        "write_ms": report.write_ms,
+        "rows_per_second": report.rows_per_second.round(),
+        "suggested_batch": report.suggested_batch,
+        "note": report.note,
+        "wrote": 0,
+    }))
+}
+
+/// The delete half of the data sync, on its own.
+///
+/// Dry run by default and `confirm: true` to apply: a command whose whole job is deleting rows must
+/// not delete them because someone forgot a flag.
+fn sync_data_delete(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let (from, to) = pair(session, p)?;
+    let catalog = session.catalog_of(from)?.clone();
+    let tables = tables_of(p);
+    let dst_schema = p.str_opt("dst_schema");
+    let max_rows = p.int_opt("max_rows", 5_000_000).clamp(1, 100_000_000) as usize;
+    let dry_run = p.bool_opt("dry_run", true) || !p.bool_opt("confirm", false);
+    let plan = {
+        let (src, dst) = session.two_drivers(from, to)?;
+        transfer::plan_rows(src, dst, &catalog, &tables, dst_schema.as_deref(), max_rows)?
+    };
+    let mut deletes: Vec<(String, Vec<(String, nook_core::Value)>)> = Vec::new();
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
+    for diff in &plan {
+        if let Some(reason) = &diff.skipped {
+            skipped.push(json!({"table": diff.table, "reason": reason}));
+            continue;
+        }
+        for change in &diff.changes {
+            if change.kind == transfer::RowChangeKind::Delete {
+                deletes.push((diff.table.clone(), change.key.clone()));
+            }
+        }
+    }
+    let mut applied = 0usize;
+    if !dry_run {
+        let dialect = {
+            let driver = session.driver_for(to)?;
+            driver.dialect()
+        };
+        let statements: Vec<String> = deletes
+            .iter()
+            .map(|(table, key)| {
+                let where_clause = key
+                    .iter()
+                    .map(|(c, v)| {
+                        if v.is_null() {
+                            format!("{} IS NULL", nook_core::quote_ident(c, dialect))
+                        } else {
+                            format!(
+                                "{} = {}",
+                                nook_core::quote_ident(c, dialect),
+                                nook_core::sql_literal(v, dialect)
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                format!(
+                    "DELETE FROM {} WHERE {where_clause};",
+                    nook_core::quote_qualified(dst_schema.as_deref(), table, dialect)
+                )
+            })
+            .collect();
+        let driver = session.driver_for(to)?;
+        driver.begin()?;
+        for stmt in &statements {
+            if let Err(e) = session.driver_for(to)?.run(stmt, 0) {
+                let _ = session.driver_for(to).and_then(|d| d.rollback());
+                return Err(e);
+            }
+            applied += 1;
+        }
+        session.driver_for(to)?.commit()?;
+        let _ = crate::cmd::refresh_catalog(session, to);
+    }
+    Ok(json!({
+        "from": conn_id_at(session, from)?,
+        "to": conn_id_at(session, to)?,
+        "deletes": deletes.len(),
+        "applied": applied,
+        "dry_run": dry_run,
+        "skipped": skipped,
+        "note": if dry_run {
+            "dry run: nothing was deleted. Pass \"confirm\": true to apply"
+        } else {
+            "the rows missing from the source were deleted from the target"
+        },
+    }))
+}
+
+/// Parse and validate the per-column rules, and say what each one will do.
+fn sync_conflict_rules(_session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let rules = conflict_rules(p)?;
+    Ok(json!({
+        "rules": rules.iter().map(|r| json!({
+            "column": r.column,
+            "on_conflict": match r.on_conflict {
+                transfer::OnConflict::Source => "source",
+                transfer::OnConflict::Target => "target",
+                transfer::OnConflict::Newer => "newer",
+                transfer::OnConflict::Skip => "skip",
+            },
+            "by": r.by,
+        })).collect::<Vec<_>>(),
+        "count": rules.len(),
+        "note": "pass these to sync.bidirectional; sync.data and sync.dataDelete take a single \
+                 direction and do not need them",
+    }))
+}
+
+fn conflict_rules(p: &Params) -> Result<Vec<transfer::ConflictRule>> {
+    let Some(rows) = p.get("rules").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let column = row
+            .get("column")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::config(format!("rules[{i}] has no \"column\"")))?;
+        let on_conflict = row
+            .get("on_conflict")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::config(format!("rules[{i}] has no \"on_conflict\"")))?;
+        let parsed = transfer::OnConflict::parse(on_conflict)?;
+        let by = row.get("by").and_then(|v| v.as_str()).map(str::to_string);
+        if parsed == transfer::OnConflict::Newer && by.is_none() {
+            return Err(Error::config(format!(
+                "rules[{i}] uses on_conflict: newer and needs \"by\": a timestamp column"
+            )));
+        }
+        out.push(transfer::ConflictRule {
+            column: column.to_string(),
+            on_conflict: parsed,
+            by,
+        });
+    }
+    Ok(out)
+}
+
+/// Two passes, with the rules deciding. Never a silent last-writer-wins.
+fn sync_bidirectional(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let a = match p.str_opt("a").or_else(|| p.str_opt("from")) {
+        Some(id) => session.conn_index(&id)?,
+        None => session
+            .active_conn
+            .ok_or_else(|| Error::config("pass \"a\" and \"b\""))?,
+    };
+    let b = match p.str_opt("b").or_else(|| p.str_opt("to")) {
+        Some(id) => session.conn_index(&id)?,
+        None => return Err(Error::config("pass \"b\" with the second connection")),
+    };
+    let tables = tables_of(p);
+    let rules = conflict_rules(p)?;
+    let dry_run = p.bool_opt("dry_run", true);
+    let batch = p.int_opt("batch", 500).clamp(1, 20_000) as usize;
+    let a_catalog = session.catalog_of(a)?.clone();
+    let b_catalog = session.catalog_of(b)?.clone();
+    let mut log: Vec<String> = Vec::new();
+    let report = {
+        let (da, db) = session.two_drivers(a, b)?;
+        transfer::bidirectional(
+            da,
+            db,
+            &a_catalog,
+            &b_catalog,
+            &transfer::BiPlan {
+                tables: &tables,
+                rules: &rules,
+                batch,
+                dry_run,
+            },
+            &mut |line: &str| log.push(line.to_string()),
+        )?
+    };
+    if !dry_run {
+        let _ = crate::cmd::refresh_catalog(session, a);
+        let _ = crate::cmd::refresh_catalog(session, b);
+    }
+    Ok(json!({
+        "a": conn_id_at(session, a)?,
+        "b": conn_id_at(session, b)?,
+        "summary": report.summary(),
+        "a_to_b": report.a_to_b,
+        "b_to_a": report.b_to_a,
+        "conflicts": report.conflicts.iter().map(|c| json!({
+            "key": c.key.iter().map(|(k, v)| json!({k: v.display()})).collect::<Vec<_>>(),
+            "column": c.column,
+            "source": c.source.display(),
+            "target": c.target.display(),
+            "reason": c.reason,
+        })).collect::<Vec<_>>(),
+        "applied": report.applied,
+        "dry_run": dry_run,
+        "elapsed_ms": report.elapsed_ms,
+        "log": log,
+    }))
+}
+
 /// Structure diff between the source catalog and the target catalog of two open connections.
 fn structure_changes(
     session: &mut Session,
@@ -309,6 +592,66 @@ fn sync_structure(session: &mut Session, p: &Params) -> Result<serde_json::Value
     Ok(json!({ "applied": applied, "skipped": skipped, "planned": changes.len() }))
 }
 
+/// The three backup ids are the same dump with a filter forced on.
+///
+/// They exist as their own ids because the parity catalog names them, and because a caller asking
+/// for "an encrypted backup" should get an error when it cannot be encrypted rather than a plain
+/// file with a `.age` name. Each delegates to `dump`, which owns the one dump path.
+fn backup_compressed(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let mut params = p.raw().clone();
+    params.insert("compress".into(), json!(true));
+    dump(session, &Params(params))
+}
+
+fn backup_encrypted(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    if p.str_opt("encrypt").filter(|e| !e.is_empty()).is_none() {
+        return Err(Error::config(
+            "pass \"encrypt\": \"age\" or \"gpg\", and \"recipient\": the key the file is addressed to",
+        ));
+    }
+    if p.str_opt("recipient").filter(|r| !r.is_empty()).is_none() {
+        return Err(Error::config(
+            "pass \"recipient\": the age or GPG key id the backup is encrypted to",
+        ));
+    }
+    dump(session, p)
+}
+
+fn backup_local(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let keep = p.get("keep");
+    if keep
+        .and_then(|k| k.get("dir"))
+        .and_then(|d| d.as_str())
+        .is_none()
+    {
+        return Err(Error::config(
+            "pass \"keep\": {\"dir\": \"~/backups/offsite\", \"copies\": 7}",
+        ));
+    }
+    dump(session, p)
+}
+
+/// `compress`/`encrypt`/`keep` from the parameters.
+fn backup_filters(p: &Params, home: &std::path::Path) -> Result<backup::Filters> {
+    let keep = p.get("keep");
+    let keep_dir = keep
+        .and_then(|k| k.get("dir"))
+        .and_then(|d| d.as_str())
+        .map(|d| expand(d, home));
+    let copies = keep
+        .and_then(|k| k.get("copies"))
+        .and_then(|c| c.as_u64())
+        .map(|c| c as usize);
+    let encrypt = p.str_opt("encrypt").filter(|e| !e.is_empty());
+    Ok(backup::Filters {
+        compress: p.bool_opt("compress", false),
+        encrypt,
+        recipient: p.str_opt("recipient"),
+        keep_dir,
+        copies,
+    })
+}
+
 fn dump(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let index = session.resolve_conn(p)?;
     let kind = session.conns[index].cfg.kind;
@@ -324,7 +667,9 @@ fn dump(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     if kind == DriverKind::Sqlite {
         let catalog = session.catalog_of(index)?.clone();
         let mut log = Vec::new();
-        let max_rows = session.settings.max_rows;
+        // Not `settings.max_rows`: that is the grid's display cap. A backup that silently stopped
+        // at a screenful would be a restore that loses rows. The limit is the caller's to set.
+        let max_rows = p.int_opt("max_rows", 5_000_000).clamp(1, 100_000_000) as usize;
         let script = {
             let driver = session.driver_for(index)?;
             transfer::dump_script(
@@ -342,16 +687,41 @@ fn dump(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         }
         std::fs::write(&path, &script)
             .map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
+        let filters = backup_filters(p, &session.home)?;
+        let final_path = if filters.is_empty() {
+            path.clone()
+        } else {
+            backup::apply_filters(&path, &filters)?
+        };
+        let bytes = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+        let truncated: Vec<String> = script
+            .lines()
+            .filter(|l| l.contains("truncated at"))
+            .map(str::to_string)
+            .collect();
+        if !truncated.is_empty() {
+            session.log(
+                Level::Warn,
+                format!(
+                    "backup is incomplete: {} table(s) hit the {max_rows}-row limit",
+                    truncated.len()
+                ),
+            );
+        }
         session.log(
             Level::Success,
-            format!("backup written: {}", path.display()),
+            format!("backup written: {}", final_path.display()),
         );
         return Ok(json!({
-            "path": path.to_string_lossy(),
-            "bytes": script.len(),
+            "path": final_path.to_string_lossy(),
+            "bytes": bytes,
+            "truncated": truncated,
             "statements": nook_drivers::split_script(&script).len(),
             "engine": "in-process SQL script",
             "schema_only": schema_only,
+            "compressed": filters.compress,
+            "encrypted": filters.encrypt.clone(),
+            "kept": filters.keep_dir.as_ref().map(|d| d.to_string_lossy().to_string()),
         }));
     }
 
@@ -361,20 +731,26 @@ fn dump(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             .map_err(|e| Error::io(format!("create {}: {e}", parent.display())))?;
     }
     let outcome = backup::execute(&plan, Some(&path))?;
+    let filters = backup_filters(p, &session.home)?;
+    let final_path = if filters.is_empty() {
+        path.clone()
+    } else {
+        backup::apply_filters(&path, &filters)?
+    };
+    let bytes = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
     session.log(
         Level::Success,
-        format!(
-            "backup written: {} ({} bytes)",
-            path.display(),
-            outcome.bytes
-        ),
+        format!("backup written: {} ({bytes} bytes)", final_path.display()),
     );
     Ok(json!({
-        "path": path.to_string_lossy(),
-        "bytes": outcome.bytes,
+        "path": final_path.to_string_lossy(),
+        "bytes": bytes,
         "command": outcome.command,
         "engine": kind.label(),
         "elapsed_ms": outcome.elapsed_ms,
+        "compressed": filters.compress,
+        "encrypted": filters.encrypt.clone(),
+        "kept": filters.keep_dir.as_ref().map(|d| d.to_string_lossy().to_string()),
     }))
 }
 

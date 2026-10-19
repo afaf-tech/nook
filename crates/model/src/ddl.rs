@@ -1,6 +1,6 @@
 //! DDL for all three dialects: the table designer, the structure diff and the dump all call these.
 
-use nook_core::{quote_ident, quote_qualified, Dialect, Error, Result};
+use nook_core::{quote_ident, quote_qualified, sql_literal, Dialect, Error, Result, Value};
 
 use crate::{Column, ForeignKey, Index, Table};
 
@@ -209,6 +209,90 @@ pub fn truncate_table(schema: Option<&str>, table: &str, dialect: Dialect) -> St
         Dialect::Sqlite => format!("DELETE FROM {target};"),
         Dialect::MySql => format!("TRUNCATE TABLE {target};"),
         Dialect::Postgres => format!("TRUNCATE TABLE {target} RESTART IDENTITY CASCADE;"),
+    }
+}
+
+/// An insert that updates instead of colliding, in the dialect's own syntax.
+///
+/// `columns` is the full insert list, `key` the columns whose uniqueness decides a collision. Every
+/// non-key column is overwritten on conflict: an upsert whose point is "make the row match the file"
+/// that leaves half the columns stale is a worse lie than a failed insert.
+///
+/// MySQL has no column list on the update side — it rewrites every column not named in the key —
+/// so the two shapes genuinely differ and both are written out rather than approximated.
+pub fn upsert_statement(
+    schema: Option<&str>,
+    table: &str,
+    columns: &[String],
+    key: &[String],
+    values: &[Value],
+    dialect: Dialect,
+) -> String {
+    let target = quote_qualified(schema, table, dialect);
+    let column_list = columns
+        .iter()
+        .map(|c| quote_ident(c, dialect))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let literals = values
+        .iter()
+        .map(|v| sql_literal(v, dialect))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let updating: Vec<&String> = columns
+        .iter()
+        .filter(|c| !key.iter().any(|k| k == *c))
+        .collect();
+    let key_list = key
+        .iter()
+        .map(|c| quote_ident(c, dialect))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match dialect {
+        Dialect::Sqlite | Dialect::Postgres => {
+            if updating.is_empty() {
+                format!(
+                    "INSERT INTO {target} ({column_list}) VALUES ({literals}) \
+                     ON CONFLICT ({key_list}) DO NOTHING;"
+                )
+            } else {
+                let sets = updating
+                    .iter()
+                    .map(|c| format!("{col} = excluded.{col}", col = quote_ident(c, dialect)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "INSERT INTO {target} ({column_list}) VALUES ({literals}) \
+                     ON CONFLICT ({key_list}) DO UPDATE SET {sets};"
+                )
+            }
+        }
+        Dialect::MySql => {
+            if updating.is_empty() {
+                // A key-only insert has nothing to update; the key column keeps its value.
+                let first = key
+                    .first()
+                    .map(|c| quote_ident(c, dialect))
+                    .unwrap_or_else(|| "id".into());
+                format!(
+                    "INSERT INTO {target} ({column_list}) VALUES ({literals}) \
+                     ON DUPLICATE KEY UPDATE {first} = {first};"
+                )
+            } else {
+                let sets = updating
+                    .iter()
+                    .map(|c| {
+                        let col = quote_ident(c, dialect);
+                        format!("{col} = VALUES({col})")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "INSERT INTO {target} ({column_list}) VALUES ({literals}) \
+                     ON DUPLICATE KEY UPDATE {sets};"
+                )
+            }
+        }
     }
 }
 

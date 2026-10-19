@@ -253,6 +253,190 @@ pub fn restore_plan(cfg: &ConnectionConfig, file: &Path) -> Result<Plan> {
     }
 }
 
+/// What to do to a finished dump file: compress it, encrypt it, and keep N copies of it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Filters {
+    pub compress: bool,
+    /// `"age"` or `"gpg"`; `None` leaves the file plain.
+    pub encrypt: Option<String>,
+    /// The recipient (`age1…` or a GPG key id) the encryption is addressed to.
+    pub recipient: Option<String>,
+    pub keep_dir: Option<PathBuf>,
+    pub copies: Option<usize>,
+}
+
+impl Filters {
+    pub fn is_empty(&self) -> bool {
+        !self.compress && self.encrypt.is_none() && self.keep_dir.is_none()
+    }
+
+    /// The final file name, before `keep` copies it elsewhere.
+    pub fn final_name(&self, path: &Path) -> PathBuf {
+        let mut out = path.to_path_buf();
+        if self.compress {
+            out = with_suffix(&out, "gz");
+        }
+        if let Some(kind) = &self.encrypt {
+            out = with_suffix(
+                &out,
+                match kind.as_str() {
+                    "gpg" => "gpg",
+                    _ => "age",
+                },
+            );
+        }
+        out
+    }
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// Apply the filter chain to a finished dump.
+///
+/// Every step is a child process, not a crate: `gzip -c` and `age`/`gpg` are tools the user already
+/// trusts, and a backup that only this application can read is a worse backup. A missing binary is
+/// refused **before** anything is renamed, so there is never an unencrypted file sitting under an
+/// encrypted name.
+pub fn apply_filters(source: &Path, filters: &Filters) -> Result<PathBuf> {
+    let mut current = source.to_path_buf();
+    if filters.compress {
+        let program = resolve_tool("gzip")?;
+        let target = with_suffix(&current, "gz");
+        run_filter(&program, &["-c".into()], &current, &target)?;
+        let _ = std::fs::remove_file(&current);
+        current = target;
+    }
+    if let Some(kind) = &filters.encrypt {
+        let recipient = filters.recipient.clone().ok_or_else(|| {
+            Error::config(format!(
+                "encrypt: \"{kind}\" needs \"recipient\": the key the file is addressed to"
+            ))
+        })?;
+        let (program_name, args) = match kind.as_str() {
+            "age" => ("age", vec!["-r".to_string(), recipient.clone()]),
+            "gpg" => (
+                "gpg",
+                vec![
+                    "--batch".to_string(),
+                    "--yes".to_string(),
+                    "--encrypt".to_string(),
+                    "--recipient".to_string(),
+                    recipient.clone(),
+                ],
+            ),
+            other => {
+                return Err(Error::config(format!(
+                    "unknown encryption '{other}'; try age or gpg"
+                )))
+            }
+        };
+        let program = resolve_tool(program_name)?;
+        let target = with_suffix(&current, if kind == "gpg" { "gpg" } else { "age" });
+        run_filter(&program, &args, &current, &target)?;
+        let _ = std::fs::remove_file(&current);
+        current = target;
+    }
+    if let Some(dir) = &filters.keep_dir {
+        let copies = filters.copies.unwrap_or(7).max(1);
+        std::fs::create_dir_all(dir)
+            .map_err(|e| Error::io(format!("create {}: {e}", dir.display())))?;
+        let name = current
+            .file_name()
+            .ok_or_else(|| Error::config("the backup file has no name"))?;
+        let target = dir.join(name);
+        if target != current {
+            std::fs::copy(&current, &target)
+                .map_err(|e| Error::io(format!("copy to {}: {e}", target.display())))?;
+        }
+        prune(dir, copies)?;
+        current = target;
+    }
+    Ok(current)
+}
+
+/// Copy `from` through `program args` into `to`, failing if the program does.
+fn run_filter(program: &Path, args: &[String], from: &Path, to: &Path) -> Result<()> {
+    use std::io::Read;
+    let input = std::fs::File::open(from)
+        .map_err(|e| Error::io(format!("open {}: {e}", from.display())))?;
+    let output = std::fs::File::create(to)
+        .map_err(|e| Error::io(format!("create {}: {e}", to.display())))?;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            Error::io(format!(
+                "running {}: {e}",
+                shell_quote(&program.to_string_lossy())
+            ))
+        })?;
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    let status = child
+        .wait()
+        .map_err(|e| Error::io(format!("waiting for {}: {e}", program.display())))?;
+    if !status.success() {
+        // Never leave a half-written file under the final name.
+        let _ = std::fs::remove_file(to);
+        return Err(Error::io(format!(
+            "{} failed ({}): {}",
+            program.display(),
+            status.code().unwrap_or(-1),
+            stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Keep the newest `copies` backups in `dir`, deleting the rest. Only files that look like backups
+/// are considered, so a stray file in the directory is never deleted.
+fn prune(dir: &Path, copies: usize) -> Result<Vec<PathBuf>> {
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let listing =
+        std::fs::read_dir(dir).map_err(|e| Error::io(format!("read {}: {e}", dir.display())))?;
+    for entry in listing.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let looks_like_backup = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| {
+                [".sql", ".gz", ".age", ".gpg", ".dump"]
+                    .iter()
+                    .any(|ext| n.ends_with(ext))
+            })
+            .unwrap_or(false);
+        if !looks_like_backup {
+            continue;
+        }
+        let at = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        entries.push((at, path));
+    }
+    entries.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut removed = Vec::new();
+    for (_, path) in entries.into_iter().skip(copies) {
+        if std::fs::remove_file(&path).is_ok() {
+            removed.push(path);
+        }
+    }
+    Ok(removed)
+}
+
 /// Run a plan and report what actually landed on disk.
 pub fn execute(plan: &Plan, output: Option<&Path>) -> Result<Outcome> {
     let started = Instant::now();

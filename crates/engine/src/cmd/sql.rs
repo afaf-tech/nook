@@ -836,6 +836,9 @@ mod tests {
 
     #[test]
     fn history_reads_back_and_clears() {
+        // A real config directory would already hold the history of every previous run, and this
+        // test counts entries.
+        let _guard = crate::test_support::scratch_config();
         let mut session = Session::new();
         session.remember(crate::HistoryEntry {
             conn: "local".into(),

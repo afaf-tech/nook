@@ -11,8 +11,10 @@
 
 pub mod catalog;
 pub mod cmd;
+pub mod csv;
 pub mod datagen;
 pub mod filter;
+pub mod infer;
 pub mod jobs;
 pub mod parity;
 pub mod profiles;
@@ -20,6 +22,7 @@ pub mod report;
 pub mod sqltext;
 pub mod store;
 pub mod tunnel;
+pub mod xml;
 
 use std::collections::BTreeMap;
 

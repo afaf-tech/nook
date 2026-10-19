@@ -310,6 +310,42 @@ impl Default for DatagenForm {
     }
 }
 
+/// The import wizard: the file, the target table, and whatever the dry run reported.
+///
+/// The report is held as the engine's own JSON, not a re-typed struct: the wizard is a view of
+/// `tools.importWizard`, and a second shape for it would drift the moment the engine gained a field.
+#[derive(Debug, Clone, Default)]
+pub struct ImportWizard {
+    pub conn: Option<usize>,
+    pub path: String,
+    pub table: String,
+    pub mode: String,
+    /// The dry run's JSON, once one has been run.
+    pub report: Option<serde_json::Value>,
+    /// A mapping edited in the wizard, keyed by source column.
+    pub mapping: std::collections::BTreeMap<String, String>,
+    pub error: Option<String>,
+}
+
+impl ImportWizard {
+    pub fn new(conn: Option<usize>) -> Self {
+        ImportWizard {
+            conn,
+            mode: "append".to_string(),
+            ..ImportWizard::default()
+        }
+    }
+
+    /// The `columnMapping` entries this wizard would send.
+    pub fn mapping_entries(&self) -> Vec<String> {
+        self.mapping
+            .iter()
+            .filter(|(source, target)| !target.trim().is_empty() && *source != *target)
+            .map(|(source, target)| format!("{source}={target}"))
+            .collect()
+    }
+}
+
 /// The AI band's working copy, seeded from the session when the band opens and written back through
 /// the command registry when a field changes. It is the *only* place a half-typed address lives, so a
 /// frame that is merely painted never touches the engine.
@@ -446,6 +482,8 @@ pub struct UiState {
     pub command_result: Option<String>,
     pub datagen_target: Option<(usize, TableRef)>,
     pub datagen_form: DatagenForm,
+    /// The import wizard: a file, a table, and the dry run's report. `None` when closed.
+    pub import_wizard: Option<ImportWizard>,
     pub export_table: Option<TableRef>,
     pub export_conn: Option<usize>,
     pub export_format: String,
@@ -606,6 +644,7 @@ impl Default for UiState {
             command_result: None,
             datagen_target: None,
             datagen_form: DatagenForm::default(),
+            import_wizard: None,
             export_table: None,
             export_conn: None,
             export_format: "csv".into(),
@@ -954,6 +993,7 @@ impl NookApp {
         let Some(control) = self.state.control.as_mut() else {
             return;
         };
+        control.attach(ctx);
         let requests = control.drain();
         if requests.is_empty() {
             return;

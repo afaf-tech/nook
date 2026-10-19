@@ -496,7 +496,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Import/Export",
         "tools.importXml",
         "Import XML",
-        "not implemented",
+        "flat XML: one element per row, one child per column; nesting is refused by name",
     ),
     (
         "Import/Export",
@@ -508,7 +508,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Import/Export",
         "tools.importWizard",
         "Mapping wizard with preview",
-        "columns map by name via columnMapping (src=target), preview is the first rows",
+        "dry run: detected delimiter and encoding, inferred type per column, the mapping and the first 20 rows. Writes nothing",
     ),
     // ---------------------------------------------------------------- Transfer and sync
     (
@@ -527,13 +527,13 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Transfer",
         "transfer.columnMapping",
         "Column mapping",
-        "name mapping via columnMapping (src=target) for transfer.data and imports",
+        "the mapping editor's rows, normalised into the columnMapping form transfer.data and the imports take",
     ),
     (
         "Transfer",
         "transfer.speedTest",
         "Transfer speed settings",
-        "pages of 2000 rows per transaction",
+        "one timed page written to a scratch table and rolled back: rows/s and the batch size to pass",
     ),
     (
         "Sync",
@@ -557,19 +557,19 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Sync",
         "sync.dataDelete",
         "Delete rows missing from the source",
-        "part of the data sync diff",
+        "the delete half on its own; dry run by default, confirm:true to apply",
     ),
     (
         "Sync",
         "sync.bidirectional",
         "Bi-directional sync",
-        "not implemented; choose a source",
+        "two passes with conflict rules deciding; a row changed on both sides is reported, never silently overwritten",
     ),
     (
         "Sync",
         "sync.conflictRules",
         "Conflict rules",
-        "source wins, per column",
+        "per column: source, target, newer (by a timestamp) or skip; validated before a sync uses them",
     ),
     // ---------------------------------------------------------------- Backup
     (
@@ -589,19 +589,19 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Backup",
         "backup.local",
         "Local backup copy",
-        "not implemented; the file is written where you say",
+        "keep: {dir, copies} copies the finished file to a second location and prunes older copies there",
     ),
     (
         "Backup",
         "backup.compression",
         "Compressed backups",
-        "not implemented; the tools write plain files",
+        "compress:true pipes the dump through gzip, so the file is a normal .gz every other tool reads",
     ),
     (
         "Backup",
         "backup.encryption",
         "Encrypted backups",
-        "not implemented",
+        "encrypt: age or gpg with a recipient; a missing binary is refused before any file is renamed",
     ),
     // ---------------------------------------------------------------- Automation
     ("Automation", "job.list", "Job list", ""),
@@ -890,7 +890,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Tools",
         "tools.textImporter",
         "Import a text file as a table",
-        "not implemented",
+        "a delimiter-less file split on explicit column widths (\"widths\": [3, 12, 8])",
     ),
     (
         "Tools",

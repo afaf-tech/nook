@@ -27,6 +27,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
     confirmation(ui, session, state, tokens);
     command_runner(ui, session, state, tokens);
     datagen_dialog(ui, session, state, tokens);
+    import_wizard_dialog(ui, session, state, tokens);
     export_dialog(ui, session, state, tokens);
     settings_dialog(ui, session, state, tokens);
     safe_prompt(ui, session, state, tokens);
@@ -1489,6 +1490,274 @@ fn datagen_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState,
     if close || !open {
         state.datagen_target = None;
     }
+}
+
+/// The import wizard: pick a file and a table, run the dry run, read the mapping, then commit.
+///
+/// The dry run is the point. `tools.importWizard` writes nothing, so a person can see the inferred
+/// types, the columns that would be skipped and the first rows before a 2 GB file lands in the wrong
+/// table. The commit sends the same parameters plus `mode` and the edited mapping.
+fn import_wizard_dialog(
+    ui: &mut egui::Ui,
+    session: &mut Session,
+    state: &mut UiState,
+    tokens: &Tokens,
+) {
+    let Some(wizard) = state.import_wizard.clone() else {
+        return;
+    };
+    let frame = dialog(ui.ctx(), tokens);
+    let mut open = true;
+    let mut close = false;
+    let mut next = wizard.clone();
+    let mut run_dry = false;
+    let mut commit = false;
+    egui::Window::new("Import")
+        .open(&mut open)
+        .frame(frame)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(660.0)
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(620.0);
+            design::card_frame(tokens).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("File").size(11.5).color(tokens.text_dim));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut next.path)
+                            .desired_width(300.0)
+                            .hint_text("~/data/users.csv"),
+                    );
+                    if design::ghost_button(ui, tokens, "Browse…", true).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Import")
+                            .add_filter("Data", &["csv", "json", "jsonl", "xml", "txt", "xlsx"])
+                            .pick_file()
+                        {
+                            next.path = path.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Table").size(11.5).color(tokens.text_dim));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut next.table)
+                            .desired_width(240.0)
+                            .hint_text("users"),
+                    );
+                    ui.label(RichText::new("Mode").size(11.5).color(tokens.text_dim));
+                    egui::ComboBox::from_id_salt("import-mode")
+                        .selected_text(next.mode.clone())
+                        .show_ui(ui, |ui| {
+                            for mode in ["append", "truncate", "upsert"] {
+                                ui.selectable_value(&mut next.mode, mode.to_string(), mode);
+                            }
+                        });
+                });
+            });
+
+            if let Some(error) = &next.error {
+                ui.add_space(6.0);
+                ui.label(RichText::new(error).size(11.5).color(tokens.error));
+            }
+
+            if let Some(report) = &next.report {
+                ui.add_space(8.0);
+                let exists = report["target_exists"].as_bool().unwrap_or(false);
+                let sampled = report["rows_sampled"].as_u64().unwrap_or(0);
+                design::section(
+                    ui,
+                    tokens,
+                    "Mapping",
+                    Some(&format!(
+                        "{sampled} rows sampled · {} · {}",
+                        report["encoding"].as_str().unwrap_or("utf-8"),
+                        if exists {
+                            "target exists"
+                        } else {
+                            "would create the table"
+                        }
+                    )),
+                );
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("import-columns")
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        if let Some(columns) = report["columns"].as_array() {
+                            for column in columns {
+                                let source =
+                                    column["source"].as_str().unwrap_or_default().to_string();
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(table::clip(&source, 22))
+                                            .monospace()
+                                            .size(12.0)
+                                            .color(tokens.text),
+                                    );
+                                    let inferred = column["inferred"].as_str().unwrap_or("text");
+                                    design::chip(ui, tokens, inferred, tokens.text_faint);
+                                    if column["nullable"].as_bool().unwrap_or(false) {
+                                        design::chip(ui, tokens, "nullable", tokens.text_faint);
+                                    }
+                                    let target =
+                                        next.mapping.entry(source.clone()).or_insert_with(|| {
+                                            column["target"].as_str().unwrap_or(&source).to_string()
+                                        });
+                                    ui.add(
+                                        egui::TextEdit::singleline(target)
+                                            .desired_width(160.0)
+                                            .hint_text("target column"),
+                                    );
+                                    if let Some(sample) =
+                                        column["sample"].as_array().and_then(|s| s.first())
+                                    {
+                                        ui.label(
+                                            RichText::new(table::clip(
+                                                sample.as_str().unwrap_or(""),
+                                                28,
+                                            ))
+                                            .size(11.0)
+                                            .color(tokens.text_faint),
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                    });
+                if let Some(preview) = report["preview"].as_array() {
+                    ui.add_space(8.0);
+                    design::section(ui, tokens, "First rows", None);
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("import-preview")
+                        .max_height(150.0)
+                        .show(ui, |ui| {
+                            for row in preview.iter().take(20) {
+                                let cells: Vec<String> = row
+                                    .as_array()
+                                    .map(|c| {
+                                        c.iter()
+                                            .map(|v| v.as_str().unwrap_or_default().to_string())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                ui.label(
+                                    RichText::new(cells.join("  ·  "))
+                                        .monospace()
+                                        .size(11.5)
+                                        .color(tokens.text_dim),
+                                );
+                            }
+                        });
+                }
+                if let Some(notes) = report["notes"].as_array() {
+                    if !notes.is_empty() {
+                        ui.add_space(6.0);
+                        for note in notes {
+                            ui.label(
+                                RichText::new(format!("· {}", note.as_str().unwrap_or("")))
+                                    .size(11.0)
+                                    .color(tokens.text_faint),
+                            );
+                        }
+                    }
+                }
+            }
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if design::primary_button(ui, tokens, "Dry run", true).clicked() {
+                    run_dry = true;
+                }
+                let ready = next.report.is_some()
+                    && !next.table.trim().is_empty()
+                    && !next.path.trim().is_empty();
+                if design::ghost_button(ui, tokens, "Import", ready).clicked() && ready {
+                    commit = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if design::ghost_button(ui, tokens, "Close", true).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+
+    if run_dry {
+        next.report = None;
+        next.error = None;
+        let conn = next
+            .conn
+            .or(session.active_conn)
+            .and_then(|i| session.conns.get(i).map(|c| c.cfg.id.clone()));
+        if let (Some(conn), false) = (
+            conn,
+            next.path.trim().is_empty() || next.table.trim().is_empty(),
+        ) {
+            let mut params = serde_json::json!({
+                "conn": conn,
+                "path": next.path.trim(),
+                "table": next.table.trim(),
+            });
+            if !next.mode.is_empty() {
+                params["mode"] = serde_json::json!(next.mode);
+            }
+            match session.run("tools.importWizard", params) {
+                Ok(value) => {
+                    next.report = Some(value);
+                    next.mapping.clear();
+                }
+                Err(e) => next.error = Some(e.message().to_string()),
+            }
+        }
+    }
+    if commit {
+        let conn = next
+            .conn
+            .or(session.active_conn)
+            .and_then(|i| session.conns.get(i).map(|c| c.cfg.id.clone()));
+        if let Some(conn) = conn {
+            let lower = next.path.to_ascii_lowercase();
+            let command = if lower.ends_with(".xml") {
+                "tools.importXml"
+            } else if lower.ends_with(".txt") || lower.ends_with(".text") {
+                "tools.textImporter"
+            } else if lower.ends_with(".json") || lower.ends_with(".jsonl") {
+                "tools.importJson"
+            } else if lower.ends_with(".xlsx") {
+                "tools.importExcel"
+            } else {
+                "tools.importCsv"
+            };
+            let mapping = next.mapping_entries();
+            let mut params = serde_json::json!({
+                "conn": conn,
+                "path": next.path.trim(),
+                "table": next.table.trim(),
+                "mode": next.mode,
+            });
+            if !mapping.is_empty() {
+                params["columnMapping"] = serde_json::json!(mapping);
+            }
+            match session.run(command, params) {
+                Ok(value) => {
+                    let inserted = value["inserted"].as_u64().unwrap_or(0);
+                    let failed = value["failed_at_row"].as_u64();
+                    match failed {
+                        Some(row) => session.log(
+                            Level::Error,
+                            format!("import stopped at row {row}; {inserted} rows are committed"),
+                        ),
+                        None => session.log(Level::Success, format!("imported {inserted} rows")),
+                    }
+                    close = true;
+                }
+                Err(e) => next.error = Some(e.message().to_string()),
+            }
+        }
+    }
+    state.import_wizard = if close || !open { None } else { Some(next) };
 }
 
 fn export_dialog(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {

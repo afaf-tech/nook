@@ -1664,6 +1664,23 @@ pub fn transfer(
         .get("truncate_target")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // The mapping editor's rows, held in the tab so it survives a repaint.
+    let mut mapping: Vec<(String, String)> = session.tabs[tab_index]
+        .payload
+        .get("mapping")
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    Some((
+                        r.get("source")?.as_str()?.to_string(),
+                        r.get("target")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let speed: Option<serde_json::Value> = session.tabs[tab_index].payload.get("speed").cloned();
     let mut action: Option<&str> = None;
 
     let toolbar = design::band(ui, tokens, |ui| {
@@ -1746,20 +1763,208 @@ pub fn transfer(
         });
     });
 
+    ui.add_space(4.0);
+    design::card_frame(tokens).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Column mapping")
+                    .size(12.0)
+                    .color(tokens.text_dim),
+            );
+            ui.label(
+                RichText::new("optional · source column in the file, target column in the table")
+                    .size(11.0)
+                    .color(tokens.text_faint),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::ghost_button(ui, tokens, "Time a page", true).clicked() {
+                    action = Some("transfer.speedTest");
+                }
+            });
+        });
+        ui.add_space(4.0);
+        let mut remove: Option<usize> = None;
+        for (i, (source, target)) in mapping.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(source)
+                        .desired_width(180.0)
+                        .hint_text("source"),
+                );
+                ui.label(RichText::new("→").size(11.5).color(tokens.text_faint));
+                ui.add(
+                    egui::TextEdit::singleline(target)
+                        .desired_width(180.0)
+                        .hint_text("target"),
+                );
+                if design::ghost_button(ui, tokens, "×", true).clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            mapping.remove(i);
+        }
+        ui.horizontal(|ui| {
+            if design::ghost_button(ui, tokens, "Add a pair", true).clicked() {
+                mapping.push((String::new(), String::new()));
+            }
+            if !mapping.is_empty() {
+                design::chip(
+                    ui,
+                    tokens,
+                    "a mapping names every column it writes; unmapped columns are left alone",
+                    tokens.text_faint,
+                );
+            }
+        });
+        if let Some(report) = &speed {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} rows/s · read {} ms · write {} ms · suggested batch {}",
+                    report["rows_per_second"].as_f64().unwrap_or(0.0),
+                    report["read_ms"].as_u64().unwrap_or(0),
+                    report["write_ms"].as_u64().unwrap_or(0),
+                    report["suggested_batch"].as_u64().unwrap_or(0),
+                ))
+                .size(11.5)
+                .color(tokens.text_dim),
+            );
+            ui.label(
+                RichText::new(report["note"].as_str().unwrap_or(""))
+                    .size(11.0)
+                    .color(tokens.text_faint),
+            );
+        }
+    });
+
+    // The sync half. A conflict is the only thing this card has to show that the transfer card
+    // cannot: a row the rules refused to settle. It is listed with its reason, because "1 conflict"
+    // without the reason is a number a person cannot act on.
+    let mut sync_action: Option<&str> = None;
+    let sync_report: Option<serde_json::Value> =
+        session.tabs[tab_index].payload.get("sync").cloned();
+    design::card_frame(tokens).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Row sync").size(12.0).color(tokens.text_dim));
+            ui.label(
+                RichText::new(
+                    "two passes · a row both sides changed is reported, never overwritten",
+                )
+                .size(11.0)
+                .color(tokens.text_faint),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if design::primary_button(ui, tokens, "Merge both ways", true).clicked() {
+                    sync_action = Some("sync.bidirectional");
+                }
+                if design::ghost_button(ui, tokens, "Delete extras", true).clicked() {
+                    sync_action = Some("sync.dataDelete");
+                }
+            });
+        });
+        if let Some(report) = &sync_report {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(report["summary"].as_str().unwrap_or(""))
+                    .size(11.5)
+                    .color(tokens.text_dim),
+            );
+            if let Some(conflicts) = report["conflicts"].as_array() {
+                for conflict in conflicts.iter().take(20) {
+                    let key = conflict["key"]
+                        .as_array()
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .flat_map(|p| {
+                                    p.as_object().map(|o| {
+                                        o.iter()
+                                            .map(|(k, v)| {
+                                                format!("{k}={}", v.as_str().unwrap_or(""))
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
+                                })
+                                .flatten()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}",
+                            key,
+                            conflict["reason"].as_str().unwrap_or("")
+                        ))
+                        .size(11.0)
+                        .color(tokens.warn),
+                    );
+                }
+            }
+        }
+    });
+
     let list: Vec<String> = tables
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    let action = action.or(sync_action);
     if let Some(id) = action {
+        // The mapping goes through `transfer.columnMapping` so the editor and the command agree on
+        // the `source=target` form rather than the view inventing its own.
+        let mut column_mapping: Vec<String> = Vec::new();
+        if !mapping.is_empty() {
+            let rows: Vec<serde_json::Value> = mapping
+                .iter()
+                .filter(|(s, t)| !s.trim().is_empty() && !t.trim().is_empty())
+                .map(|(s, t)| serde_json::json!({"source": s.trim(), "target": t.trim()}))
+                .collect();
+            match session.run("transfer.columnMapping", serde_json::json!({"map": rows})) {
+                Ok(value) => {
+                    column_mapping = value["columnMapping"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                }
+                Err(e) => session.log(Level::Error, e.to_string()),
+            }
+        }
         let params = match id {
-            "transfer.data" => serde_json::json!({
-                "from": from, "to": to, "tables": list,
-                "create_tables": create, "truncate_target": truncate,
+            "transfer.data" => {
+                let mut params = serde_json::json!({
+                    "from": from, "to": to, "tables": list,
+                    "create_tables": create, "truncate_target": truncate,
+                });
+                if !column_mapping.is_empty() {
+                    params["columnMapping"] = serde_json::json!(column_mapping);
+                }
+                params
+            }
+            "transfer.speedTest" => serde_json::json!({
+                "from": from, "to": to,
+                "table": list.first().cloned().unwrap_or_default(),
             }),
             "transfer.preview" => serde_json::json!({"from": from, "to": to, "tables": list}),
             "sync.data" => {
                 serde_json::json!({"from": from, "to": to, "dry_run": true, "tables": list})
+            }
+            "sync.bidirectional" => {
+                // Dry by default: the card reports the conflicts first, and a second press with
+                // `dry_run: false` is what writes.
+                serde_json::json!({
+                    "a": from, "b": to, "tables": list,
+                    "dry_run": !session.tabs[tab_index].payload.contains_key("sync"),
+                })
+            }
+            "sync.dataDelete" => {
+                serde_json::json!({"from": from, "to": to, "tables": list})
             }
             "sync.structure" => serde_json::json!({"from": from, "to": to, "apply": true}),
             _ => serde_json::json!({"from": from, "to": to}),
@@ -1776,11 +1981,29 @@ pub fn transfer(
                         format!("transfer: {}", value["summary"].as_str().unwrap_or("done")),
                     );
                 }
+                if id.starts_with("sync.") {
+                    session.tabs[tab_index]
+                        .payload
+                        .insert("sync".into(), value.clone());
+                }
+                if id == "transfer.speedTest" {
+                    // Kept for the card's own line, not just the raw JSON in the output pane.
+                    session.tabs[tab_index]
+                        .payload
+                        .insert("speed".into(), value);
+                }
             }
             Err(e) => session.log(Level::Error, e.to_string()),
         }
     }
 
+    session.tabs[tab_index].payload.insert(
+        "mapping".into(),
+        serde_json::json!(mapping
+            .iter()
+            .map(|(s, t)| serde_json::json!({"source": s, "target": t}))
+            .collect::<Vec<_>>()),
+    );
     session.tabs[tab_index]
         .payload
         .insert("from".into(), serde_json::json!(from));

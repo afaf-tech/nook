@@ -37,7 +37,20 @@ pub fn commands() -> Vec<CommandSpec> {
             .params(r#"{"pattern":"order"}"#)
             .help("The catalog-wide object search: tables and views whose name, columns, schema or connection match."),
         CommandSpec::new("tools.exportQuery", "Export a query result", "Tools", export_query)
-            .params(r#"{"sql":"select * from users","path":"~/exports/users.csv","format":"csv"}"#),
+            .params(r#"{"sql":"select * from users","path":"~/exports/users.csv","format":"csv","stream":false}"#)
+            .help("stream:true pages the statement instead of holding the result; csv and jsonl only."),
+        CommandSpec::new("tools.importWizard", "Import wizard (dry run)", "Tools", import_wizard)
+            .params(r#"{"path":"~/data/users.csv","table":"users"}"#)
+            .help("Reads the file, infers a type per column and returns the first 20 rows as they would land. Writes nothing."),
+        CommandSpec::new("tools.importXml", "Import XML", "Tools", import_xml)
+            .params(r#"{"path":"~/data/users.xml","table":"users","row":"record"}"#)
+            .help("Flat XML: one element per row, one child per column. Nested XML is refused by name."),
+        CommandSpec::new("tools.textImporter", "Import fixed-width text", "Tools", text_importer)
+            .params(r#"{"path":"~/data/codes.txt","table":"codes","widths":[3,12,8],"header":false}"#)
+            .help("A delimiter-less file split on explicit column widths."),
+        CommandSpec::new("export.stream", "Stream a table or query to a file", "Tools", export_stream)
+            .params(r#"{"table":"orders","path":"~/exports/orders.csv","format":"csv","page":5000}"#)
+            .help("Pages the rows out without holding the result: csv or jsonl. json is refused."),
         CommandSpec::new("tools.queryBuilder", "Query builder", "Tools", query_builder)
             .params(r#"{"from":[{"table":"users","alias":"u","columns":["id","email"]}],"where":"u.email like '%@example.com'","order_by":"u.id","limit":100}"#)
             .help("Builds a SELECT from a table/column/join description. Returns the SQL."),
@@ -129,46 +142,10 @@ fn datagen_cmd(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     Ok(out)
 }
 
-/// CSV per RFC 4180, including quoted fields with embedded commas, quotes and newlines.
+/// CSV per RFC 4180. One parser lives in `crate::csv`; this is the whole-file wrapper so callers
+/// holding a `String` keep working.
 pub fn parse_csv(text: &str, delimiter: char) -> Vec<Vec<String>> {
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    let mut row: Vec<String> = Vec::new();
-    let mut field = String::new();
-    let mut in_quotes = false;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if in_quotes {
-            if c == '"' {
-                if chars.peek() == Some(&'"') {
-                    chars.next();
-                    field.push('"');
-                } else {
-                    in_quotes = false;
-                }
-            } else {
-                field.push(c);
-            }
-            continue;
-        }
-        match c {
-            '"' if field.is_empty() => in_quotes = true,
-            c if c == delimiter => {
-                row.push(std::mem::take(&mut field));
-            }
-            '\r' => {}
-            '\n' => {
-                row.push(std::mem::take(&mut field));
-                rows.push(std::mem::take(&mut row));
-            }
-            _ => field.push(c),
-        }
-    }
-    if !field.is_empty() || !row.is_empty() {
-        row.push(field);
-        rows.push(row);
-    }
-    rows.retain(|r| !(r.len() == 1 && r[0].trim().is_empty()));
-    rows
+    crate::csv::parse_csv(text, delimiter)
 }
 
 /// Guess a value's type so an import does not turn every number into text.
@@ -220,141 +197,463 @@ pub(crate) fn parse_mapping(entries: &[String]) -> Result<Option<Vec<(String, St
     Ok(Some(map))
 }
 
-fn target_columns(
+/// How an import treats rows that already exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportMode {
+    /// Plain inserts; a duplicate key fails the batch.
+    Append,
+    /// Empty the table first, then insert.
+    Truncate,
+    /// Insert or update on the key's uniqueness.
+    Upsert,
+}
+
+impl ImportMode {
+    fn parse(text: Option<&str>) -> Result<ImportMode> {
+        match text
+            .unwrap_or("append")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "append" | "insert" => Ok(ImportMode::Append),
+            "truncate" | "replace" => Ok(ImportMode::Truncate),
+            "upsert" | "merge" => Ok(ImportMode::Upsert),
+            other => Err(Error::config(format!(
+                "unknown mode '{other}'; try append, truncate or upsert"
+            ))),
+        }
+    }
+}
+
+/// Everything the row loop needs, resolved once from the catalog and the parameters.
+struct ImportPlan {
+    target: String,
+    columns: Vec<String>,
+    types: Vec<Option<String>>,
+    dialect: Dialect,
+    mode: ImportMode,
+    key: Vec<String>,
+    batch: usize,
+    mapping: Option<Vec<(String, String)>>,
+    max_rows: usize,
+    /// Column order of the file, once the header is known.
+    file_columns: Vec<String>,
+    created_table: bool,
+}
+
+/// The result of an import, including a partial one.
+struct ImportOutcome {
+    inserted: usize,
+    /// Rows the upsert replaced rather than added, when the driver reports it.
+    updated: usize,
+    batches: usize,
+    stopped_at: Option<usize>,
+    stopped_because: Option<String>,
+}
+
+/// Turn a header row and a mapping into the plan's column list, and validate it.
+fn plan_columns(
     session: &Session,
     index: usize,
     reference: &TableRef,
-    fallback: &[String],
-) -> Vec<String> {
-    session
+    file_columns: &[String],
+    mapping: Option<&Vec<(String, String)>>,
+    key: &[String],
+) -> Result<(Vec<String>, Vec<Option<String>>)> {
+    let table = session
+        .conns
+        .get(index)
+        .and_then(|c| c.catalog.as_ref())
+        .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table));
+    let (targets, types) = if let Some(map) = mapping {
+        let table = table.ok_or_else(|| {
+            Error::config(format!(
+                "columnMapping needs an existing table; {} was not found in the catalog",
+                reference.key()
+            ))
+        })?;
+        let mut targets = Vec::with_capacity(map.len());
+        let mut types = Vec::with_capacity(map.len());
+        for (source, target) in map {
+            if !file_columns.iter().any(|c| c == source) {
+                return Err(Error::config(format!(
+                    "the file has no column '{source}'; it has: {}",
+                    file_columns.join(", ")
+                )));
+            }
+            let column = table.column(target).ok_or_else(|| {
+                Error::config(format!(
+                    "the table {} has no column '{target}'",
+                    reference.key()
+                ))
+            })?;
+            targets.push(target.clone());
+            types.push(Some(column.type_name.clone()));
+        }
+        (targets, types)
+    } else if let Some(table) = table {
+        // Against an existing table the catalog decides which columns exist. A file column the
+        // table does not have is a note, not a failure: extra columns are how people hand in a
+        // dump with more fields than the target wants.
+        let targets: Vec<String> = file_columns
+            .iter()
+            .filter(|c| table.column(c).is_some())
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            return Err(Error::config(format!(
+                "none of the file's columns ({}) exist in {}; pass columnMapping",
+                file_columns.join(", "),
+                reference.key()
+            )));
+        }
+        let types = targets
+            .iter()
+            .map(|name| table.column(name).map(|c| c.type_name.clone()))
+            .collect();
+        (targets, types)
+    } else {
+        (file_columns.to_vec(), vec![None; file_columns.len()])
+    };
+    if !key.is_empty() {
+        for k in key {
+            if !targets.iter().any(|t| t == k) {
+                return Err(Error::config(format!(
+                    "the key column '{k}' is not part of the import; it has: {}",
+                    targets.join(", ")
+                )));
+            }
+        }
+    }
+    Ok((targets, types))
+}
+
+/// Refuse an upsert whose key cannot decide a collision.
+///
+/// A key that is not a primary key or a unique index makes the database accept the statement and
+/// then silently insert a duplicate on the next run, which is the exact failure `mode: upsert` is
+/// meant to prevent. Checking the catalog is cheap; discovering the duplicate at row 900,000 is not.
+fn check_upsert_key(
+    session: &Session,
+    index: usize,
+    reference: &TableRef,
+    key: &[String],
+) -> Result<()> {
+    if key.is_empty() {
+        return Err(Error::config(
+            "mode: upsert needs \"key\": the column (or columns) whose uniqueness decides a collision",
+        ));
+    }
+    let table = session
         .conns
         .get(index)
         .and_then(|c| c.catalog.as_ref())
         .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
-        .map(|t| t.column_names())
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| fallback.to_vec())
+        .ok_or_else(|| {
+            Error::config(format!(
+                "mode: upsert needs an existing table; {} is not in the catalog yet",
+                reference.key()
+            ))
+        })?;
+    let pk = table.primary_key();
+    if pk == key {
+        return Ok(());
+    }
+    let unique = table.indexes.iter().any(|i| i.unique && i.columns == key);
+    if unique {
+        return Ok(());
+    }
+    Err(Error::config(format!(
+        "the key ({}) is not unique on {}: its primary key is ({}); an upsert on it would insert \
+         duplicates. Add a unique index or name the primary key",
+        key.join(", "),
+        reference.key(),
+        if pk.is_empty() {
+            "none".to_string()
+        } else {
+            pk.join(", ")
+        }
+    )))
 }
 
-fn load_rows(
+/// Run an import over a stream of rows.
+///
+/// The stream is pulled one row at a time and committed every `batch` rows. Peak memory is one
+/// batch, not the file, and a failure costs the current batch rather than every row before it.
+fn import_stream<I>(
     session: &mut Session,
-    p: &Params,
+    index: usize,
     reference: &TableRef,
-    rows: Vec<Vec<String>>,
-    header: bool,
-    create_table: bool,
-) -> Result<serde_json::Value> {
-    let index = session.resolve_conn(p)?;
-    if rows.is_empty() {
-        return Err(Error::config("the file has no rows"));
+    plan: ImportPlan,
+    rows: I,
+) -> Result<serde_json::Value>
+where
+    I: Iterator<Item = Result<Vec<String>>>,
+{
+    let ImportPlan {
+        target,
+        columns,
+        types,
+        dialect,
+        mode,
+        key,
+        batch,
+        mapping,
+        max_rows,
+        file_columns,
+        created_table,
+    } = plan;
+    // Where each target column lives in the file's row.
+    let source_index: Vec<usize> = columns
+        .iter()
+        .map(|target| {
+            let source = mapping
+                .as_ref()
+                .and_then(|m| m.iter().find(|(_, t)| t == target).map(|(s, _)| s.clone()))
+                .unwrap_or_else(|| target.clone());
+            file_columns.iter().position(|c| *c == source).unwrap_or(0)
+        })
+        .collect();
+
+    if mode == ImportMode::Truncate {
+        // Only after the header parsed: a truncate that runs before the file is validated is how a
+        // typo in the path eats a table.
+        let sql = ddl::truncate_table(reference.schema.as_deref(), &reference.table, dialect);
+        session.driver_for(index)?.run(&sql, 0)?;
     }
-    let (columns, data): (Vec<String>, &[Vec<String>]) = if header {
-        (rows[0].clone(), &rows[1..])
-    } else {
-        (
-            (0..rows[0].len())
-                .map(|i| format!("column_{}", i + 1))
-                .collect(),
-            &rows[..],
-        )
+
+    let mut outcome = ImportOutcome {
+        inserted: 0,
+        updated: 0,
+        batches: 0,
+        stopped_at: None,
+        stopped_because: None,
     };
+    let mut pending: Vec<String> = Vec::with_capacity(batch);
+    let mut seen = 0usize;
+    // An upsert cannot know per row whether it inserted or updated from the statement alone, so
+    // the count comes from the table itself: a delta of the rows before and after is the only
+    // number that cannot be wrong. The other modes count statements, which is exact for them.
+    let counted_before = if mode == ImportMode::Upsert {
+        count_rows(
+            session,
+            index,
+            reference.schema.as_deref(),
+            &reference.table,
+        )?
+    } else {
+        0
+    };
+
+    for row in rows {
+        if seen >= max_rows {
+            outcome.stopped_at = Some(seen + 1);
+            outcome.stopped_because = Some(format!(
+                "stopped at the max_rows limit of {max_rows}; pass a larger max_rows to take the rest"
+            ));
+            break;
+        }
+        let row = row?;
+        seen += 1;
+        let values: Vec<Value> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let raw = row.get(source_index[i]).map(String::as_str).unwrap_or("");
+                infer_value(raw, types.get(i).and_then(|t| t.as_deref()))
+            })
+            .collect();
+        let sql = match mode {
+            ImportMode::Upsert => ddl::upsert_statement(
+                reference.schema.as_deref(),
+                &reference.table,
+                &columns,
+                &key,
+                &values,
+                dialect,
+            ),
+            _ => {
+                let column_list = columns
+                    .iter()
+                    .map(|c| quote_ident(c, dialect))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let literals = values
+                    .iter()
+                    .map(|v| sql_literal(v, dialect))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("INSERT INTO {target} ({column_list}) VALUES ({literals});")
+            }
+        };
+        pending.push(sql);
+        if pending.len() >= batch {
+            match run_batch(session, index, &pending) {
+                Ok(()) => {
+                    outcome.inserted += pending.len();
+                    outcome.batches += 1;
+                    pending.clear();
+                }
+                Err(e) => {
+                    outcome.stopped_at = Some(seen);
+                    outcome.stopped_because = Some(e.message().to_string());
+                    pending.clear();
+                    break;
+                }
+            }
+        }
+    }
+    if outcome.stopped_at.is_none() && !pending.is_empty() {
+        match run_batch(session, index, &pending) {
+            Ok(()) => {
+                outcome.inserted += pending.len();
+                outcome.batches += 1;
+            }
+            Err(e) => {
+                outcome.stopped_at = Some(seen);
+                outcome.stopped_because = Some(e.message().to_string());
+            }
+        }
+    }
+
+    if mode == ImportMode::Upsert {
+        let after = count_rows(
+            session,
+            index,
+            reference.schema.as_deref(),
+            &reference.table,
+        )?;
+        // `inserted` is every statement that ran; the table only grew by the difference. Reporting
+        // both is what makes "200000 inserted" on a table that did not grow impossible.
+        outcome.updated = outcome
+            .inserted
+            .saturating_sub(after.saturating_sub(counted_before));
+        outcome.inserted = after.saturating_sub(counted_before);
+    }
+    let _ = crate::cmd::refresh_catalog(session, index);
+    let committed = outcome.inserted;
+    if let Some(row) = outcome.stopped_at {
+        // "import failed" after 800,000 committed rows must not read like nothing happened.
+        session.log(
+            Level::Error,
+            format!(
+                "import stopped at row {row}: {}. {committed} rows before it are committed",
+                outcome
+                    .stopped_because
+                    .as_deref()
+                    .unwrap_or("the statement failed")
+            ),
+        );
+    } else {
+        session.log(
+            Level::Success,
+            format!("imported {committed} rows into {}", reference.key()),
+        );
+    }
+    Ok(json!({
+        "table": reference.key(),
+        "columns": columns,
+        "inserted": outcome.inserted,
+        "updated": outcome.updated,
+        "batches": outcome.batches,
+        "batch": batch,
+        "mode": match mode {
+            ImportMode::Append => "append",
+            ImportMode::Truncate => "truncate",
+            ImportMode::Upsert => "upsert",
+        },
+        "key": key,
+        "created_table": created_table,
+        "dialect": dialect_name(dialect),
+        "failed_at_row": outcome.stopped_at,
+        "failed_because": outcome.stopped_because,
+        "notes": if outcome.stopped_at.is_some() {
+            vec![format!(
+                "the import stopped early; {committed} rows were committed before it and stay committed"
+            )]
+        } else {
+            Vec::<String>::new()
+        },
+    }))
+}
+
+/// One transaction per batch: the lock is held for `batch` statements, not for the whole file.
+/// `SELECT COUNT(*)` on a table, through the same connection the import writes to.
+fn count_rows(
+    session: &mut Session,
+    index: usize,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<usize> {
+    let dialect = session.driver_for(index)?.dialect();
+    let target = match schema {
+        Some(s) => format!(
+            "{}.{}",
+            quote_ident(s, dialect),
+            quote_ident(table, dialect)
+        ),
+        None => quote_ident(table, dialect),
+    };
+    let rs = session
+        .driver_for(index)?
+        .run(&format!("SELECT COUNT(*) AS n FROM {target}"), 0)?;
+    let n = rs
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.display().parse::<usize>().ok())
+        .unwrap_or(0);
+    Ok(n)
+}
+
+fn run_batch(session: &mut Session, index: usize, statements: &[String]) -> Result<()> {
+    session.driver_for(index)?.begin()?;
+    for sql in statements {
+        if let Err(e) = session.driver_for(index)?.run(sql, 0) {
+            let _ = session.driver_for(index).and_then(|d| d.rollback());
+            return Err(e);
+        }
+    }
+    session.driver_for(index)?.commit()
+}
+
+/// Build the plan for a stream whose header has already been read.
+#[allow(clippy::too_many_arguments)]
+fn prepare_import(
+    session: &mut Session,
+    index: usize,
+    reference: &TableRef,
+    file_columns: Vec<String>,
+    p: &Params,
+    create_table: bool,
+) -> Result<ImportPlan> {
+    let mode = ImportMode::parse(p.str_opt("mode").as_deref())?;
+    let key = p.list("key");
+    let mapping = parse_mapping(&p.list("columnMapping"))?;
+    let batch = p.int_opt("batch", 2_000).clamp(1, 100_000) as usize;
+    // An import is not a grid page. `settings.max_rows` caps what the grid paints; inheriting it
+    // here would mean no file could ever import more than a screenful, which is the silent
+    // truncation this phase removes. The import's own ceiling is explicit and can be raised.
+    let max_rows = p.int_opt("max_rows", 5_000_000).clamp(1, 100_000_000) as usize;
     let dialect = session
         .conns
         .get(index)
         .and_then(|c| c.driver.as_ref())
         .map(|d| d.dialect())
         .ok_or_else(|| Error::config("the connection is not open"))?;
-    let max = session
-        .settings
-        .max_rows
-        .min(p.int_opt("max_rows", 500_000).max(1) as usize);
-    let data: Vec<&Vec<String>> = data.iter().take(max).collect();
 
-    let mapping = parse_mapping(&p.list("columnMapping"))?;
-    // When a mapping is present it speaks for itself: every target must be a real table column,
-    // every source a file column. The count-based alignment gate below no longer applies, and a
-    // partial mapping must not fall back to the file's header names or create a table from them.
-    let reordered: Vec<Vec<String>>;
-    let (target_columns, data): (Vec<String>, Vec<&Vec<String>>) = if let Some(map) = &mapping {
-        let table = session
-            .conns
-            .get(index)
-            .and_then(|c| c.catalog.as_ref())
-            .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
-            .ok_or_else(|| {
-                Error::config(format!(
-                    "columnMapping needs an existing table; {} was not found in the catalog",
-                    reference.key()
-                ))
-            })?;
-        let mut targets = Vec::with_capacity(map.len());
-        let mut order = Vec::with_capacity(map.len());
-        for (source, target) in map {
-            if table.column(target).is_none() {
-                return Err(Error::config(format!(
-                    "the table {} has no column '{target}'",
-                    reference.key()
-                )));
-            }
-            let position = columns
-                .iter()
-                .position(|c| c == source)
-                .ok_or_else(|| Error::config(format!("the file has no column '{source}'")))?;
-            targets.push(target.clone());
-            order.push(position);
-        }
-        // Reorder every row into the mapped column order once, so the insert loop keeps its
-        // positional walk.
-        reordered = data
-            .iter()
-            .map(|row| {
-                order
-                    .iter()
-                    .map(|i| row.get(*i).cloned().unwrap_or_default())
-                    .collect::<Vec<String>>()
-            })
-            .collect();
-        (targets, reordered.iter().collect())
-    } else {
-        let existing = target_columns(session, index, reference, &columns);
-        let use_existing = existing.len() == columns.len()
-            && !session
-                .conns
-                .get(index)
-                .and_then(|c| c.catalog.as_ref())
-                .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
-                .is_none();
-        let targets = if use_existing {
-            existing
-        } else {
-            columns.clone()
-        };
-        (targets, data)
-    };
-    let types: Vec<Option<String>> = session
+    let exists = session
         .conns
         .get(index)
         .and_then(|c| c.catalog.as_ref())
         .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
-        .map(|t| {
-            target_columns
-                .iter()
-                .map(|name| t.column(name).map(|c| c.type_name.clone()))
-                .collect()
-        })
-        .unwrap_or_else(|| vec![None; target_columns.len()]);
+        .is_some();
 
     let mut created = false;
-    if create_table
-        && session
-            .conns
-            .get(index)
-            .and_then(|c| c.catalog.as_ref())
-            .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
-            .is_none()
-    {
+    if create_table && !exists {
         let mut table = nook_model::Table::new(reference.schema.clone(), reference.table.clone());
-        for name in &target_columns {
+        for name in &file_columns {
             table
                 .columns
                 .push(nook_model::Column::new(name.clone(), "TEXT"));
@@ -364,77 +663,105 @@ fn load_rows(
         let _ = crate::cmd::refresh_catalog(session, index);
     }
 
-    let target = quote_qualified(reference.schema.as_deref(), &reference.table, dialect);
-    let column_list = target_columns
-        .iter()
-        .map(|c| quote_ident(c, dialect))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut inserted = 0usize;
-    session.driver_for(index)?.begin()?;
-    for row in &data {
-        let values = (0..target_columns.len())
-            .map(|i| {
-                let raw = row.get(i).map(String::as_str).unwrap_or("");
-                let value = infer_value(raw, types.get(i).and_then(|t| t.as_deref()));
-                sql_literal(&value, dialect)
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!("INSERT INTO {target} ({column_list}) VALUES ({values})");
-        if let Err(e) = run_sql(session, index, &sql, Some(1)) {
-            let _ = session.driver_for(index).and_then(|d| d.rollback());
-            session.log(
-                Level::Error,
-                format!("import failed at row {inserted}; rolled back"),
-            );
-            return Err(e);
-        }
-        inserted += 1;
+    if mode == ImportMode::Upsert {
+        check_upsert_key(session, index, reference, &key)?;
     }
-    session.driver_for(index)?.commit()?;
-    let _ = crate::cmd::refresh_catalog(session, index);
-    session.log(
-        Level::Success,
-        format!("imported {inserted} rows into {}", reference.key()),
-    );
-    Ok(json!({
-        "table": reference.key(),
-        "columns": target_columns,
-        "inserted": inserted,
-        "skipped": rows.len().saturating_sub(data.len() + usize::from(header)),
-        "created_table": created,
-        "dialect": dialect_name(dialect),
-    }))
+    let (columns, types) = plan_columns(
+        session,
+        index,
+        reference,
+        &file_columns,
+        mapping.as_ref(),
+        &key,
+    )?;
+    let target = quote_qualified(reference.schema.as_deref(), &reference.table, dialect);
+    Ok(ImportPlan {
+        target,
+        columns,
+        types,
+        dialect,
+        mode,
+        key,
+        batch,
+        mapping,
+        max_rows,
+        file_columns,
+        created_table: created,
+    })
 }
 
 fn import_csv(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
     let delimiter = p
         .str_opt("delimiter")
         .and_then(|d| d.chars().next())
         .unwrap_or(',');
-    let rows = parse_csv(&text, delimiter);
+    let latin1 = p
+        .str_opt("encoding")
+        .map(|e| e.eq_ignore_ascii_case("latin1") || e.eq_ignore_ascii_case("latin-1"))
+        .unwrap_or(false);
+    let index = session.resolve_conn(p)?;
     let reference = TableRef::parse(&p.str_arg("table")?);
     let header = p.bool_opt("header", true);
     let create_table = p.bool_opt("create_table", true);
-    let mut out = load_rows(session, p, &reference, rows, header, create_table)?;
+
+    // The reader is opened here, not after the plan: `truncate` must run only once the header has
+    // parsed, and the header is the first thing the reader yields.
+    let reader = crate::csv::open(&path, latin1)?;
+    let mut rows = crate::csv::rows(reader, delimiter);
+    let first = match rows.next() {
+        Some(Ok(row)) => row,
+        Some(Err(e)) => return Err(e),
+        None => return Err(Error::config(format!("{} has no rows", path.display()))),
+    };
+    // Lazy on purpose: collecting here would put the whole file back in memory, which is the
+    // defect this path exists to remove. The header is consumed, the rest is pulled by the loop.
+    let (file_columns, rest): (Vec<String>, RowIter) = if header {
+        (first, Box::new(rows))
+    } else {
+        (
+            (0..first.len())
+                .map(|i| format!("column_{}", i + 1))
+                .collect(),
+            Box::new(std::iter::once(Ok(first)).chain(rows)),
+        )
+    };
+    let plan = prepare_import(session, index, &reference, file_columns, p, create_table)?;
+    let mut out = import_stream(session, index, &reference, plan, rest)?;
     out["path"] = json!(path.to_string_lossy());
     out["format"] = json!("csv");
+    out["encoding"] = json!(if latin1 { "latin1" } else { "utf-8" });
     Ok(out)
 }
 
 fn import_excel(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
     let rows = nook_drivers::xlsx::read_rows(&path)?;
+    let index = session.resolve_conn(p)?;
     let reference = TableRef::parse(&p.str_arg("table")?);
     let header = p.bool_opt("header", true);
     let create_table = p.bool_opt("create_table", true);
-    let mut out = load_rows(session, p, &reference, rows, header, create_table)?;
+    if rows.is_empty() {
+        return Err(Error::config(format!("{} has no rows", path.display())));
+    }
+    let (file_columns, data): (Vec<String>, Vec<Vec<String>>) = if header {
+        (rows[0].clone(), rows[1..].to_vec())
+    } else {
+        (
+            (0..rows[0].len())
+                .map(|i| format!("column_{}", i + 1))
+                .collect(),
+            rows.clone(),
+        )
+    };
+    let plan = prepare_import(session, index, &reference, file_columns, p, create_table)?;
+    let mut out = import_stream(session, index, &reference, plan, data.into_iter().map(Ok))?;
     out["path"] = json!(path.to_string_lossy());
     out["format"] = json!("xlsx");
+    out["notes"] = json!([
+        "an .xlsx is read whole: it is a zip of XML, and streaming it needs a reader crate. \
+         The max_rows limit still applies"
+    ]);
     Ok(out)
 }
 
@@ -467,58 +794,188 @@ fn export_excel(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
     }))
 }
 
+/// JSON, two shapes: `.jsonl` streams a line at a time, `.json` is one array read whole.
+///
+/// A JSON array cannot be streamed without a streaming parser, and `serde_json` is not one. Saying
+/// so in `notes` is better than pretending: the file the wizard points people at for big data is
+/// `.jsonl`.
 fn import_json(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
-    let text = std::fs::read_to_string(&path)
+    let index = session.resolve_conn(p)?;
+    let reference = TableRef::parse(&p.str_arg("table")?);
+    let create_table = p.bool_opt("create_table", true);
+    let jsonl = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("jsonl") || e.eq_ignore_ascii_case("ndjson"))
+        .unwrap_or(false)
+        || p.bool_opt("jsonl", false);
+
+    let file = std::fs::File::open(&path)
         .map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| Error::config(format!("{}: {e}", path.display())))?;
-    let items = match value {
-        serde_json::Value::Array(items) => items,
-        serde_json::Value::Object(map) => {
-            // Also accept {"rows": [...]} and a single object.
-            match map.get("rows") {
-                Some(serde_json::Value::Array(items)) => items.clone(),
-                _ => vec![serde_json::Value::Object(map)],
+    let mut reader = std::io::BufReader::new(file);
+    let mut first_line = String::new();
+    if jsonl {
+        use std::io::BufRead;
+        loop {
+            first_line.clear();
+            let n = reader
+                .read_line(&mut first_line)
+                .map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
+            if n == 0 {
+                return Err(Error::config(format!("{} has no rows", path.display())));
+            }
+            if !first_line.trim().is_empty() {
+                break;
             }
         }
-        _ => return Err(Error::config("the JSON root must be an array or object")),
-    };
-    let mut columns: Vec<String> = Vec::new();
-    for item in &items {
-        if let serde_json::Value::Object(map) = item {
-            for key in map.keys() {
-                if !columns.contains(key) {
-                    columns.push(key.clone());
+        let first: serde_json::Value = serde_json::from_str(first_line.trim())
+            .map_err(|e| Error::config(format!("{}: {e}", path.display())))?;
+        let columns = object_keys(&first)
+            .ok_or_else(|| Error::config("every JSON line must be an object with named fields"))?;
+        let plan = prepare_import(session, index, &reference, columns.clone(), p, create_table)?;
+        // The first line taught us the columns; it is still a row.
+        let first_row = row_from(&first, &columns);
+        let rest = JsonLines {
+            reader,
+            columns: columns.clone(),
+            path: path.clone(),
+            line: 1,
+            pending: Some(first_row),
+        };
+        let mut out = import_stream(session, index, &reference, plan, rest)?;
+        out["path"] = json!(path.to_string_lossy());
+        out["format"] = json!("jsonl");
+        Ok(out)
+    } else {
+        use std::io::Read;
+        let mut text = String::new();
+        reader
+            .read_to_string(&mut text)
+            .map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| Error::config(format!("{}: {e}", path.display())))?;
+        let items = match value {
+            serde_json::Value::Array(items) => items,
+            serde_json::Value::Object(map) => match map.get("rows") {
+                Some(serde_json::Value::Array(items)) => items.clone(),
+                _ => vec![serde_json::Value::Object(map)],
+            },
+            _ => return Err(Error::config("the JSON root must be an array or object")),
+        };
+        let mut columns: Vec<String> = Vec::new();
+        for item in &items {
+            if let Some(keys) = object_keys(item) {
+                for key in keys {
+                    if !columns.contains(&key) {
+                        columns.push(key);
+                    }
                 }
             }
         }
-    }
-    if columns.is_empty() {
-        return Err(Error::config("the JSON has no object keys to import"));
-    }
-    let mut rows = vec![columns.clone()];
-    for item in &items {
-        let map = item.as_object().ok_or_else(|| {
-            Error::config("every array entry must be an object with named fields")
-        })?;
-        rows.push(
-            columns
-                .iter()
-                .map(|c| match map.get(c) {
-                    Some(serde_json::Value::String(s)) => s.clone(),
-                    Some(serde_json::Value::Null) | None => String::new(),
-                    Some(other) => other.to_string(),
+        if columns.is_empty() {
+            return Err(Error::config("the JSON has no object keys to import"));
+        }
+        let file_columns = columns.clone();
+        let rows = items.iter().map(move |item| {
+            object_keys(item)
+                .map(|_| {
+                    file_columns
+                        .iter()
+                        .map(|c| match item.get(c) {
+                            Some(serde_json::Value::String(s)) => s.clone(),
+                            Some(serde_json::Value::Null) | None => String::new(),
+                            Some(other) => other.to_string(),
+                        })
+                        .collect::<Vec<String>>()
                 })
-                .collect(),
-        );
+                .ok_or_else(|| {
+                    Error::config("every array entry must be an object with named fields")
+                })
+        });
+        let plan = prepare_import(session, index, &reference, columns, p, create_table)?;
+        let mut out = import_stream(session, index, &reference, plan, rows)?;
+        out["path"] = json!(path.to_string_lossy());
+        out["format"] = json!("json");
+        out["notes"] = json!([
+            "a .json array is read whole; name the file .jsonl to stream it a line at a time"
+        ]);
+        Ok(out)
     }
-    let reference = TableRef::parse(&p.str_arg("table")?);
-    let create_table = p.bool_opt("create_table", true);
-    let mut out = load_rows(session, p, &reference, rows, true, create_table)?;
-    out["path"] = json!(path.to_string_lossy());
-    out["format"] = json!("json");
-    Ok(out)
+}
+
+fn object_keys(value: &serde_json::Value) -> Option<Vec<String>> {
+    value
+        .as_object()
+        .map(|map| map.keys().cloned().collect::<Vec<_>>())
+}
+
+/// `.jsonl`: one object per line, decoded as it is read.
+/// Rows pulled from a file one at a time, so a 500 MB import never sits in memory.
+type RowIter = Box<dyn Iterator<Item = Result<Vec<String>>>>;
+
+struct JsonLines {
+    reader: std::io::BufReader<std::fs::File>,
+    columns: Vec<String>,
+    path: std::path::PathBuf,
+    line: usize,
+    /// The line already consumed to learn the column names.
+    pending: Option<Vec<String>>,
+}
+
+/// One JSON object as a row in `columns` order.
+fn row_from(value: &serde_json::Value, columns: &[String]) -> Vec<String> {
+    let map = value.as_object();
+    columns
+        .iter()
+        .map(|c| match map.and_then(|m| m.get(c)) {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        })
+        .collect()
+}
+
+impl Iterator for JsonLines {
+    type Item = Result<Vec<String>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::io::BufRead;
+        if let Some(row) = self.pending.take() {
+            return Some(Ok(row));
+        }
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => return None,
+                Ok(_) => {}
+                Err(e) => {
+                    return Some(Err(Error::io(format!("read {}: {e}", self.path.display()))))
+                }
+            }
+            self.line += 1;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = match serde_json::from_str(line.trim()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(Error::config(format!(
+                        "{} line {}: {e}",
+                        self.path.display(),
+                        self.line
+                    ))))
+                }
+            };
+            if value.as_object().is_none() {
+                return Some(Err(Error::config(format!(
+                    "{} line {}: every line must be an object",
+                    self.path.display(),
+                    self.line
+                ))));
+            }
+            return Some(Ok(row_from(&value, &self.columns)));
+        }
+    }
 }
 
 fn import_sql(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
@@ -546,7 +1003,510 @@ fn import_sql(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     }))
 }
 
+/// The dry run: the same reader, the same inference, no write transaction.
+///
+/// This exists so a person can see the mapping and the first rows before committing a 2 GB import
+/// to the wrong table. It never opens a write path — the only database work is a catalog read.
+fn import_wizard(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
+    let reference = TableRef::parse(&p.str_arg("table")?);
+    let index = session.resolve_conn(p)?;
+    let sample_limit = p.int_opt("sample", 500).clamp(1, 50_000) as usize;
+    let preview_rows = p.int_opt("preview", 20).clamp(1, 200) as usize;
+    let delimiter = p
+        .str_opt("delimiter")
+        .and_then(|d| d.chars().next())
+        .unwrap_or(',');
+    let header = p.bool_opt("header", true);
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let (file_columns, samples, preview, encoding, notes) = match extension.as_str() {
+        "xml" => {
+            let file = std::fs::File::open(&path)
+                .map_err(|e| Error::io(format!("open {}: {e}", path.display())))?;
+            let (columns, rows) =
+                crate::xml::rows(std::io::BufReader::new(file), p.str_opt("row").as_deref())?;
+            let mut samples = Vec::new();
+            let mut preview = Vec::new();
+            for (i, row) in rows.into_iter().enumerate() {
+                if i >= sample_limit + preview_rows {
+                    break;
+                }
+                let row = row?;
+                if i < preview_rows {
+                    preview.push(row.clone());
+                }
+                samples.push(row);
+            }
+            (
+                columns,
+                samples,
+                preview,
+                "utf-8".to_string(),
+                vec!["flat XML only: a nested element is refused by name".to_string()],
+            )
+        }
+        "txt" | "text" | "fixed" => {
+            let widths: Vec<usize> = p
+                .get("widths")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as usize))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if widths.is_empty() {
+                return Err(Error::config(
+                    "a fixed-width file needs \"widths\": [3, 12, 8]",
+                ));
+            }
+            let rows = fixed_width_rows(&path, &widths, header, sample_limit + preview_rows)?;
+            let columns: Vec<String> = if header {
+                rows.first().cloned().unwrap_or_default()
+            } else {
+                (0..widths.len())
+                    .map(|i| format!("column_{}", i + 1))
+                    .collect()
+            };
+            let data: Vec<Vec<String>> = if header {
+                rows.into_iter().skip(1).collect()
+            } else {
+                rows
+            };
+            let preview = data.iter().take(preview_rows).cloned().collect();
+            (
+                columns,
+                data,
+                preview,
+                "utf-8".to_string(),
+                vec![format!(
+                    "split on the given widths: {}",
+                    widths
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )],
+            )
+        }
+        _ => {
+            let latin1 = p
+                .str_opt("encoding")
+                .map(|e| e.eq_ignore_ascii_case("latin1") || e.eq_ignore_ascii_case("latin-1"))
+                .unwrap_or(false);
+            let reader = crate::csv::open(&path, latin1)?;
+            let mut rows = crate::csv::rows(reader, delimiter);
+            let first = match rows.next() {
+                Some(Ok(row)) => row,
+                Some(Err(e)) => return Err(e),
+                None => return Err(Error::config(format!("{} has no rows", path.display()))),
+            };
+            let columns: Vec<String> = if header {
+                first.clone()
+            } else {
+                (0..first.len())
+                    .map(|i| format!("column_{}", i + 1))
+                    .collect()
+            };
+            let mut samples: Vec<Vec<String>> = Vec::new();
+            if !header {
+                samples.push(first);
+            }
+            let mut preview = Vec::new();
+            for row in rows.take(sample_limit + preview_rows) {
+                let row = row?;
+                if samples.len() < preview_rows {
+                    preview.push(row.clone());
+                }
+                samples.push(row);
+            }
+            let notes = vec![
+                format!("delimiter: {:?}", delimiter),
+                format!("header: {header}"),
+            ];
+            (
+                columns,
+                samples,
+                preview,
+                if latin1 { "latin1" } else { "utf-8" }.to_string(),
+                notes,
+            )
+        }
+    };
+
+    if file_columns.is_empty() {
+        return Err(Error::config(format!(
+            "{} has no columns to map",
+            path.display()
+        )));
+    }
+
+    // What the target already has decides whether a mismatch is a note or a decision.
+    let table = session
+        .conns
+        .get(index)
+        .and_then(|c| c.catalog.as_ref())
+        .and_then(|cat| cat.find_table(reference.schema.as_deref(), &reference.table))
+        .cloned();
+    let mut columns = crate::infer::report(&file_columns, &samples);
+    let mut notes = notes;
+    if let Some(table) = &table {
+        for column in columns.iter_mut() {
+            let name = column["source"].as_str().unwrap_or_default().to_string();
+            match table.column(&name) {
+                Some(existing) => {
+                    column["target"] = json!(name);
+                    column["target_type"] = json!(existing.type_name);
+                    let inferred = column["inferred"].as_str().unwrap_or("text");
+                    if !type_fits(inferred, &existing.type_name) {
+                        notes.push(format!(
+                            "column '{name}' infers as {inferred} but the table holds {}; the \
+                             import coerces per the table's type",
+                            existing.type_name
+                        ));
+                    }
+                }
+                None => {
+                    column["target"] = serde_json::Value::Null;
+                    notes.push(format!(
+                        "column '{name}' is not in {}; it will be skipped unless you map it",
+                        reference.key()
+                    ));
+                }
+            }
+        }
+    } else {
+        notes.push(format!(
+            "{} does not exist yet; the import would create it with the inferred types",
+            reference.key()
+        ));
+    }
+    let always_empty: Vec<&str> = columns
+        .iter()
+        .filter(|c| c["always_empty"].as_bool().unwrap_or(false))
+        .filter_map(|c| c["source"].as_str())
+        .collect();
+    if !always_empty.is_empty() {
+        notes.push(format!(
+            "empty in every sampled row: {}",
+            always_empty.join(", ")
+        ));
+    }
+
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "table": reference.key(),
+        "delimiter": if extension.is_empty() || extension == "csv" { json!(delimiter.to_string()) } else { serde_json::Value::Null },
+        "encoding": encoding,
+        "header": header,
+        "rows_sampled": samples.len(),
+        "columns": columns,
+        "target_exists": table.is_some(),
+        "would_truncate": false,
+        "would_create_table": table.is_none(),
+        "preview": preview,
+        "notes": notes,
+        "writes": 0,
+    }))
+}
+
+/// Whether an inferred type is compatible with the table's declared type, for the wizard's note.
+fn type_fits(inferred: &str, declared: &str) -> bool {
+    let declared = declared.to_ascii_lowercase();
+    match inferred {
+        "integer" => declared.contains("int"),
+        "float" => {
+            declared.contains("int")
+                || declared.contains("real")
+                || declared.contains("float")
+                || declared.contains("double")
+                || declared.contains("numeric")
+                || declared.contains("decimal")
+        }
+        "boolean" => declared.contains("bool"),
+        "date" | "timestamp" => {
+            declared.contains("date")
+                || declared.contains("time")
+                || declared.contains("char")
+                || declared.contains("text")
+        }
+        _ => true,
+    }
+}
+
+/// Rows of a fixed-width file, split on `widths`. Short lines are padded rather than refused: a
+/// trailing blank column is common, and a refused import over it helps nobody.
+fn fixed_width_rows(
+    path: &std::path::Path,
+    widths: &[usize],
+    _header: bool,
+    limit: usize,
+) -> Result<Vec<Vec<String>>> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
+        .map_err(|e| Error::io(format!("open {}: {e}", path.display())))?;
+    let reader = std::io::BufReader::new(file);
+    let mut out = Vec::new();
+    for line in reader.lines().take(limit) {
+        let line = line.map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
+        // Chars, not bytes: a width is a count of characters, and a fixed-width file with a
+        // non-ASCII name would otherwise split mid-codepoint.
+        let chars: Vec<char> = line.chars().collect();
+        let mut at = 0usize;
+        let mut row = Vec::with_capacity(widths.len());
+        for width in widths {
+            let end = (at + width).min(chars.len());
+            row.push(chars[at..end].iter().collect::<String>().trim().to_string());
+            at = end;
+        }
+        if row.iter().all(|c| c.is_empty()) {
+            continue;
+        }
+        out.push(row);
+    }
+    Ok(out)
+}
+
+fn import_xml(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
+    let index = session.resolve_conn(p)?;
+    let reference = TableRef::parse(&p.str_arg("table")?);
+    let create_table = p.bool_opt("create_table", true);
+    let file = std::fs::File::open(&path)
+        .map_err(|e| Error::io(format!("open {}: {e}", path.display())))?;
+    let (file_columns, rows) =
+        crate::xml::rows(std::io::BufReader::new(file), p.str_opt("row").as_deref())?;
+    let plan = prepare_import(session, index, &reference, file_columns, p, create_table)?;
+    let mut out = import_stream(session, index, &reference, plan, rows.into_iter())?;
+    out["path"] = json!(path.to_string_lossy());
+    out["format"] = json!("xml");
+    Ok(out)
+}
+
+fn text_importer(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
+    let index = session.resolve_conn(p)?;
+    let reference = TableRef::parse(&p.str_arg("table")?);
+    let create_table = p.bool_opt("create_table", true);
+    let header = p.bool_opt("header", false);
+    let widths: Vec<usize> = p
+        .get("widths")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect()
+        })
+        .unwrap_or_default();
+    if widths.is_empty() {
+        return Err(Error::config(
+            "pass \"widths\": [3, 12, 8] — the character count of each column",
+        ));
+    }
+    let max = p.int_opt("max_rows", 5_000_000).clamp(1, 100_000_000) as usize;
+    let all = fixed_width_rows(&path, &widths, header, max.saturating_add(1))?;
+    if all.is_empty() {
+        return Err(Error::config(format!("{} has no rows", path.display())));
+    }
+    let (file_columns, data) = if header {
+        (all[0].clone(), all[1..].to_vec())
+    } else {
+        (
+            (0..widths.len())
+                .map(|i| format!("column_{}", i + 1))
+                .collect(),
+            all,
+        )
+    };
+    let plan = prepare_import(session, index, &reference, file_columns, p, create_table)?;
+    let mut out = import_stream(session, index, &reference, plan, data.into_iter().map(Ok))?;
+    out["path"] = json!(path.to_string_lossy());
+    out["format"] = json!("fixed-width");
+    out["widths"] = json!(widths);
+    Ok(out)
+}
+
+/// Page a table or a statement to a file without holding the result.
+///
+/// `csv` and `jsonl` stream. `json` is refused with the reason: an array needs a closing bracket,
+/// and producing one incrementally means either seeking back or holding every row.
+fn export_stream(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    use std::io::Write;
+    let index = session.resolve_conn(p)?;
+    let format = p.str_opt("format").unwrap_or_else(|| "csv".into());
+    if format == "json" {
+        return Err(Error::config(
+            "json cannot be streamed: an array needs its closing bracket, which means holding every \
+             row. Use \"format\": \"jsonl\" (one object per line) or drop stream:true",
+        ));
+    }
+    if !matches!(format.as_str(), "csv" | "jsonl" | "ndjson") {
+        return Err(Error::config(format!(
+            "unknown stream format '{format}'; try csv or jsonl"
+        )));
+    }
+    let page = p.int_opt("page", 5_000).clamp(1, 100_000) as usize;
+    let max = p.int_opt("max_rows", 0).clamp(0, 1_000_000_000) as usize;
+    let table = p.str_opt("table");
+    let sql = p.str_opt("sql");
+    if table.is_none() && sql.is_none() {
+        return Err(Error::config("pass \"table\" or \"sql\""));
+    }
+    let mut notes: Vec<String> = Vec::new();
+    let (schema, name) = match &table {
+        Some(spec) => {
+            let reference = TableRef::parse(spec);
+            (reference.schema.clone(), reference.table.clone())
+        }
+        None => {
+            let sql = sql.clone().unwrap_or_default();
+            if sql.to_ascii_uppercase().contains(" LIMIT ") {
+                notes.push(
+                    "the statement has its own LIMIT; it is wrapped as a subquery and paged, so the \
+                     LIMIT applies to the wrapped result, not to each page"
+                        .to_string(),
+                );
+            }
+            (None, format!("({sql}) AS nook_stream"))
+        }
+    };
+    let path = crate::cmd::grid::expand(
+        &p.str_opt("path").unwrap_or_else(|| {
+            format!(
+                "exports/stream-{}.{}",
+                crate::jobs::now(),
+                if format == "csv" { "csv" } else { "jsonl" }
+            )
+        }),
+        &session.home,
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::io(format!("create {}: {e}", parent.display())))?;
+    }
+    let file = std::fs::File::create(&path)
+        .map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
+    let mut writer = std::io::BufWriter::with_capacity(256 * 1024, file);
+
+    let mut offset = 0usize;
+    let mut total = 0usize;
+    let mut pages = 0usize;
+    let mut columns: Vec<String> = Vec::new();
+    loop {
+        let limit = if max == 0 {
+            page
+        } else {
+            page.min(max.saturating_sub(total))
+        };
+        if limit == 0 {
+            break;
+        }
+        let rs = {
+            let driver = session.driver_for(index)?;
+            if table.is_some() {
+                driver.fetch_table(schema.as_deref(), &name, limit, offset, None, None)?
+            } else {
+                // Wrapping the statement is the only way to page it without rewriting it. A
+                // statement that cannot be wrapped (a DDL, a procedure call) fails here with the
+                // server's own message, which is the honest outcome.
+                let sql = format!("SELECT * FROM {name} LIMIT {limit} OFFSET {offset}");
+                driver.run(&sql, limit)?
+            }
+        };
+        if rs.columns.is_empty() || rs.rows.is_empty() {
+            // An empty page is the end. Testing `rows < limit` alone costs one extra round trip
+            // and makes `pages` report one more than it wrote.
+            break;
+        }
+        if columns.is_empty() {
+            columns = rs.columns.clone();
+            if format == "csv" {
+                let header = columns
+                    .iter()
+                    .map(|c| csv_cell(c))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                writeln!(writer, "{header}")
+                    .map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
+            }
+        }
+        let rows = rs.rows.len();
+        for row in &rs.rows {
+            if format == "csv" {
+                let cells = (0..columns.len())
+                    .map(|i| csv_cell(&row.get(i).cloned().unwrap_or(Value::Null).as_text()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                writeln!(writer, "{cells}")
+                    .map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
+            } else {
+                let mut object = serde_json::Map::new();
+                for (i, column) in columns.iter().enumerate() {
+                    object.insert(
+                        column.clone(),
+                        row.get(i).cloned().unwrap_or(Value::Null).to_json(),
+                    );
+                }
+                let line = serde_json::to_string(&serde_json::Value::Object(object))
+                    .map_err(|e| Error::internal(format!("json: {e}")))?;
+                writeln!(writer, "{line}")
+                    .map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
+            }
+        }
+        // Flush per page: a crash mid-export leaves whole pages, and memory stays at one page.
+        writer
+            .flush()
+            .map_err(|e| Error::io(format!("flush {}: {e}", path.display())))?;
+        total += rows;
+        pages += 1;
+        offset += limit;
+        if rows < limit {
+            break;
+        }
+    }
+    drop(writer);
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    session.log(
+        Level::Success,
+        format!("streamed {total} rows to {}", path.display()),
+    );
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "rows": total,
+        "pages": pages,
+        "page": page,
+        "bytes": bytes,
+        "format": if format == "csv" { "csv" } else { "jsonl" },
+        "columns": columns,
+        "notes": notes,
+    }))
+}
+
+/// A CSV cell, quoted only when it has to be.
+fn csv_cell(text: &str) -> String {
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_string()
+    }
+}
+
 fn export_query(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    if p.bool_opt("stream", false) {
+        // The streaming path lives in export.stream so there is one page loop, not two.
+        let sql = p
+            .str_opt("sql")
+            .ok_or_else(|| Error::config("pass \"sql\""))?;
+        let mut params = p.raw().clone();
+        params.insert("sql".into(), json!(sql));
+        params.remove("table");
+        let streamed = export_stream(session, &Params(params))?;
+        return Ok(streamed);
+    }
     let index = session.resolve_conn(p)?;
     let sql = p
         .str_opt("sql")

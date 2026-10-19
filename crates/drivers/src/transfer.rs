@@ -581,6 +581,289 @@ pub fn sync_statements(
     out
 }
 
+/// What to do when a column differs on both sides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnConflict {
+    /// The source's value wins. Today's behaviour, and the default.
+    Source,
+    /// The target's value wins: the update is dropped for that column.
+    Target,
+    /// The row with the later timestamp wins, read from `by`.
+    Newer,
+    /// Neither side is written; the column is reported as an unresolved conflict.
+    Skip,
+}
+
+impl OnConflict {
+    pub fn parse(text: &str) -> Result<OnConflict> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "source" | "src" => Ok(OnConflict::Source),
+            "target" | "dst" => Ok(OnConflict::Target),
+            "newer" | "latest" => Ok(OnConflict::Newer),
+            "skip" | "manual" => Ok(OnConflict::Skip),
+            other => Err(Error::config(format!(
+                "unknown on_conflict '{other}'; try source, target, newer or skip"
+            ))),
+        }
+    }
+}
+
+/// A per-column rule, from `sync.conflictRules`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConflictRule {
+    pub column: String,
+    pub on_conflict: OnConflict,
+    /// The timestamp column `Newer` compares.
+    pub by: Option<String>,
+}
+
+/// One column both sides disagree about, left for a person.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conflict {
+    pub key: Vec<(String, Value)>,
+    pub column: String,
+    pub source: Value,
+    pub target: Value,
+    pub reason: String,
+}
+
+/// The outcome of applying rules to a change list.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Resolved {
+    pub changes: Vec<RowChange>,
+    pub conflicts: Vec<Conflict>,
+    /// Rows the rules dropped entirely, counted by reason.
+    pub dropped: Vec<(String, String)>,
+}
+
+/// Apply per-column rules to what `compare_rows` produced.
+///
+/// With only two sides there is no base version, so "both changed" cannot be proven — the rules
+/// decide a difference, not a three-way merge. `Newer` compares the `by` column in the source's
+/// value against the target's; when either side has no timestamp the column is a conflict, because
+/// picking a side on missing evidence is how a sync silently loses a write.
+pub fn resolve(changes: &[RowChange], rules: &[ConflictRule]) -> Resolved {
+    let mut out = Resolved::default();
+    for change in changes {
+        if change.kind != RowChangeKind::Update || rules.is_empty() {
+            out.changes.push(change.clone());
+            continue;
+        }
+        let mut kept_values = Vec::new();
+        let mut kept_was = Vec::new();
+        let mut conflicted = false;
+        for (column, want) in &change.values {
+            let have = change
+                .was
+                .iter()
+                .find(|(c, _)| c == column)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(Value::Null);
+            let rule = rules.iter().find(|r| &r.column == column);
+            match rule.map(|r| (r.on_conflict, r.by.as_deref())) {
+                None | Some((OnConflict::Source, _)) => {
+                    kept_values.push((column.clone(), want.clone()));
+                    kept_was.push((column.clone(), have));
+                }
+                Some((OnConflict::Target, _)) => {
+                    out.dropped.push((
+                        column.clone(),
+                        "the target's value wins by rule".to_string(),
+                    ));
+                }
+                Some((OnConflict::Skip, _)) => {
+                    out.conflicts.push(Conflict {
+                        key: change.key.clone(),
+                        column: column.clone(),
+                        source: want.clone(),
+                        target: have.clone(),
+                        reason: "on_conflict: skip leaves the column for a person".to_string(),
+                    });
+                    conflicted = true;
+                }
+                Some((OnConflict::Newer, by)) => {
+                    let Some(by) = by else {
+                        out.conflicts.push(Conflict {
+                            key: change.key.clone(),
+                            column: column.clone(),
+                            source: want.clone(),
+                            target: have.clone(),
+                            reason: "on_conflict: newer needs \"by\": a timestamp column"
+                                .to_string(),
+                        });
+                        conflicted = true;
+                        continue;
+                    };
+                    // The diff carries both stamps: `values` is the source's changed columns,
+                    // `was` the target's previous ones. A column that did not change is the same
+                    // on both sides, so `was` speaks for it too.
+                    let source_stamp = change
+                        .values
+                        .iter()
+                        .find(|(c, _)| c == by)
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| {
+                            change
+                                .was
+                                .iter()
+                                .find(|(c, _)| c == by)
+                                .map(|(_, v)| v.clone())
+                        });
+                    let target_stamp = change
+                        .was
+                        .iter()
+                        .find(|(c, _)| c == by)
+                        .map(|(_, v)| v.clone());
+                    match (source_stamp, target_stamp) {
+                        (Some(src), Some(dst)) => {
+                            if newer(&src, &dst) {
+                                kept_values.push((column.clone(), want.clone()));
+                                kept_was.push((column.clone(), have));
+                            } else {
+                                out.dropped.push((
+                                    column.clone(),
+                                    format!("the target's {by} is later; its value wins"),
+                                ));
+                            }
+                        }
+                        _ => {
+                            out.conflicts.push(Conflict {
+                                key: change.key.clone(),
+                                column: column.clone(),
+                                source: want.clone(),
+                                target: have.clone(),
+                                reason: format!(
+                                    "on_conflict: newer cannot decide: one side has no '{by}' value"
+                                ),
+                            });
+                            conflicted = true;
+                        }
+                    }
+                }
+            }
+        }
+        if conflicted {
+            // A row with an undecided column is not written at all: writing the decided columns
+            // and leaving the rest would look like a completed sync.
+            continue;
+        }
+        if !kept_values.is_empty() {
+            out.changes.push(RowChange {
+                kind: change.kind,
+                key: change.key.clone(),
+                values: kept_values,
+                was: kept_was,
+            });
+        }
+    }
+    out
+}
+
+/// One timed page against the destination, to size `batch` for `transfer.data`.
+///
+/// It reads `rows` from the source and writes them to a scratch table inside a transaction that is
+/// rolled back, so the destination's row count is unchanged. A dry run that leaves data behind is
+/// not a dry run.
+pub fn speed_probe(
+    src: &mut dyn Driver,
+    dst: &mut dyn Driver,
+    schema: Option<&str>,
+    table: &str,
+    rows: usize,
+) -> Result<SpeedReport> {
+    let started = Instant::now();
+    let rs = src.fetch_table(schema, table, rows.max(1), 0, None, None)?;
+    let read_ms = started.elapsed().as_millis();
+    let read = rs.rows.len();
+    if read == 0 {
+        return Ok(SpeedReport {
+            rows: 0,
+            read_ms,
+            write_ms: 0,
+            rows_per_second: 0.0,
+            suggested_batch: rows.max(1),
+            note: "the source table is empty; the batch size is unchanged".to_string(),
+        });
+    }
+    let dialect = dst.dialect();
+    let scratch = format!("nook_speed_{}", std::process::id());
+    let write_started = Instant::now();
+    dst.begin()?;
+    let outcome = (|| -> Result<()> {
+        let columns: Vec<String> = rs
+            .columns
+            .iter()
+            .map(|c| format!("{} TEXT", nook_core::quote_ident(c, dialect)))
+            .collect();
+        dst.run(
+            &format!(
+                "CREATE TABLE {} ({})",
+                nook_core::quote_ident(&scratch, dialect),
+                columns.join(", ")
+            ),
+            0,
+        )?;
+        for row in &rs.rows {
+            let values = row
+                .iter()
+                .map(|v| sql_literal(v, dialect))
+                .collect::<Vec<_>>()
+                .join(", ");
+            dst.run(
+                &format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    nook_core::quote_ident(&scratch, dialect),
+                    rs.columns
+                        .iter()
+                        .map(|c| nook_core::quote_ident(c, dialect))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    values
+                ),
+                0,
+            )?;
+        }
+        Ok(())
+    })();
+    // Roll back whatever happened: the probe must not leave a table behind.
+    let _ = dst.rollback();
+    outcome?;
+    let write_ms = write_started.elapsed().as_millis();
+    let total_ms = (read_ms + write_ms).max(1);
+    let rate = read as f64 * 1000.0 / total_ms as f64;
+    Ok(SpeedReport {
+        rows: read,
+        read_ms,
+        write_ms,
+        rows_per_second: rate,
+        suggested_batch: read,
+        note: format!(
+            "{read} rows read and written in {total_ms} ms ({rate:.0} rows/s); the scratch table was \
+             rolled back"
+        ),
+    })
+}
+
+/// Whether `a` is later than `b`. Numeric stamps compare as numbers; anything else compares as
+/// text, which is correct for ISO-8601 in one consistent format and is the only answer available
+/// for a database-specific timestamp rendering.
+fn newer(a: &Value, b: &Value) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) => x > y,
+        _ => a.as_text() > b.as_text(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeedReport {
+    pub rows: usize,
+    pub read_ms: u128,
+    pub write_ms: u128,
+    pub rows_per_second: f64,
+    pub suggested_batch: usize,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SyncReport {
     pub changes: Vec<(String, RowChangeKind)>,
@@ -624,6 +907,289 @@ impl SyncReport {
             }
         )
     }
+}
+
+/// A table's row diff, before any statement is written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableDiff {
+    pub table: String,
+    pub schema: Option<String>,
+    pub primary_key: Vec<String>,
+    pub changes: Vec<RowChange>,
+    /// Why the table was skipped, when it was.
+    pub skipped: Option<String>,
+}
+
+/// Compare every selected table, without writing anything.
+///
+/// `bidirectional` needs both directions' diffs in hand before it can decide which rows conflict,
+/// so the comparison is its own step rather than a loop inside the applier.
+pub fn plan_rows(
+    src: &mut dyn Driver,
+    dst: &mut dyn Driver,
+    src_catalog: &Catalog,
+    tables: &[String],
+    dst_schema: Option<&str>,
+    max_rows: usize,
+) -> Result<Vec<TableDiff>> {
+    let selected: Vec<Table> = src_catalog
+        .schemas
+        .iter()
+        .flat_map(|s| s.tables.iter())
+        .filter(|t| t.kind == nook_model::TableKind::Table)
+        .filter(|t| {
+            tables.is_empty()
+                || tables.iter().any(|w| w == "*")
+                || tables.iter().any(|w| w == &t.name || w == &t.key())
+        })
+        .cloned()
+        .collect();
+    let dst_catalog = dst.catalog()?;
+    let mut out = Vec::new();
+    for table in &selected {
+        let pk = table.primary_key();
+        let skipped = |reason: String| TableDiff {
+            table: table.key(),
+            schema: table.schema.clone(),
+            primary_key: pk.clone(),
+            changes: Vec::new(),
+            skipped: Some(reason),
+        };
+        if pk.is_empty() {
+            out.push(skipped("no primary key".to_string()));
+            continue;
+        }
+        let Some(dst_table) = dst_catalog.find_table(dst_schema, &table.name) else {
+            out.push(skipped("missing in the target".to_string()));
+            continue;
+        };
+        let dst_pk = dst_table.primary_key();
+        if dst_pk != pk {
+            out.push(skipped(format!(
+                "primary key differs ({} vs {})",
+                pk.join(", "),
+                dst_pk.join(", ")
+            )));
+            continue;
+        }
+        let src_rows = src.fetch_table(
+            table.schema.as_deref(),
+            &table.name,
+            max_rows,
+            0,
+            None,
+            None,
+        )?;
+        let dst_rows = dst.fetch_table(dst_schema, &table.name, max_rows, 0, None, None)?;
+        // A diff over a truncated read is not a diff. The rows past the ceiling are invisible, so
+        // every source row beyond it would look like a delete; refusing the table is the only
+        // answer that cannot lose data.
+        if src_rows.truncated
+            || dst_rows.truncated
+            || src_rows.row_count() >= max_rows
+            || dst_rows.row_count() >= max_rows
+        {
+            out.push(skipped(format!(
+                "the row diff is capped at {max_rows} rows and this table reaches it; raise the \
+                 limit or sync it in key ranges"
+            )));
+            continue;
+        }
+        let changes = compare_rows(&src_rows, &dst_rows, &pk)?;
+        out.push(TableDiff {
+            table: table.key(),
+            schema: table.schema.clone(),
+            primary_key: pk,
+            changes,
+            skipped: None,
+        });
+    }
+    Ok(out)
+}
+
+/// The key of a change as one string, for matching the two directions of a bidirectional sync.
+pub fn change_key(change: &RowChange) -> String {
+    change
+        .key
+        .iter()
+        .map(|(c, v)| format!("{c}={}", v.display()))
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
+}
+
+/// What a bidirectional sync found and did.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BiReport {
+    /// Rows only the first side has, written to the second.
+    pub a_to_b: usize,
+    /// Rows only the second side has, written to the first.
+    pub b_to_a: usize,
+    /// Rows both sides changed, which no rule can settle without a base version.
+    pub conflicts: Vec<Conflict>,
+    pub applied: u64,
+    pub dry_run: bool,
+    pub elapsed_ms: u128,
+}
+
+impl BiReport {
+    pub fn summary(&self) -> String {
+        format!(
+            "{} a→b, {} b→a, {} conflicts{}",
+            self.a_to_b,
+            self.b_to_a,
+            self.conflicts.len(),
+            if self.dry_run {
+                " (dry run)".to_string()
+            } else {
+                format!(", {} applied", self.applied)
+            }
+        )
+    }
+}
+
+/// Two passes, never a silent last-writer-wins.
+///
+/// A row changed on both sides is a conflict: without a common ancestor, "which write is newer" has
+/// no answer that the data can defend. Those rows are reported and skipped; every other row moves in
+/// the direction that needs it. `rules` can settle a conflict per column, and a rule that decides
+/// nothing leaves the row a conflict.
+pub struct BiPlan<'a> {
+    pub tables: &'a [String],
+    pub rules: &'a [ConflictRule],
+    pub batch: usize,
+    pub dry_run: bool,
+}
+
+pub fn bidirectional(
+    a: &mut dyn Driver,
+    b: &mut dyn Driver,
+    a_catalog: &Catalog,
+    b_catalog: &Catalog,
+    plan: &BiPlan<'_>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<BiReport> {
+    let BiPlan {
+        tables,
+        rules,
+        batch,
+        dry_run,
+    } = *plan;
+    let started = Instant::now();
+    let mut report = BiReport {
+        dry_run,
+        ..BiReport::default()
+    };
+    let forward = plan_rows(a, b, a_catalog, tables, None, crate::MAX_ROWS)?;
+    let backward = plan_rows(b, a, b_catalog, tables, None, crate::MAX_ROWS)?;
+    let dialect_a = a.dialect();
+    let dialect_b = b.dialect();
+
+    for (i, fwd) in forward.iter().enumerate() {
+        let back = backward.iter().find(|t| t.table == fwd.table);
+        let empty: Vec<RowChange> = Vec::new();
+        let back_changes = back.map(|t| &t.changes).unwrap_or(&empty);
+        // A key touched in both directions is where a merge would need a base version.
+        let back_keys: Vec<String> = back_changes.iter().map(change_key).collect();
+        let mut conflicts: Vec<Conflict> = Vec::new();
+        let mut a_to_b: Vec<RowChange> = Vec::new();
+        for change in &fwd.changes {
+            if back_keys.contains(&change_key(change)) {
+                let opposite = back_changes
+                    .iter()
+                    .find(|c| change_key(c) == change_key(change))
+                    .map(|c| c.kind);
+                // A row deleted on one side and inserted on the other is the same asymmetry seen
+                // twice: without a base version, "it was deleted from a" and "it was added to b"
+                // are the same evidence. Naming which two readings collide is the honest report.
+                let reason = match (change.kind, opposite) {
+                    (RowChangeKind::Delete, Some(RowChangeKind::Insert))
+                    | (RowChangeKind::Insert, Some(RowChangeKind::Delete)) => {
+                        "the row is on one side only: either it was deleted there or added here, \
+                         and two sides cannot tell which"
+                            .to_string()
+                    }
+                    _ => "the row changed on both sides; without a common ancestor no rule can \
+                          choose, so it is left alone"
+                        .to_string(),
+                };
+                conflicts.push(Conflict {
+                    key: change.key.clone(),
+                    column: "*".to_string(),
+                    source: Value::text(change.kind.label()),
+                    target: Value::text(opposite.map(RowChangeKind::label).unwrap_or("none")),
+                    reason,
+                });
+                continue;
+            }
+            a_to_b.push(change.clone());
+        }
+        let resolved = resolve(&a_to_b, rules);
+        conflicts.extend(resolved.conflicts.clone());
+        report.a_to_b += resolved.changes.len();
+        report.conflicts.extend(conflicts.clone());
+
+        // The reverse direction, minus the rows already claimed as conflicts.
+        let conflict_keys: Vec<String> = conflicts.iter().map(|c| change_key_of(&c.key)).collect();
+        let mut b_to_a: Vec<RowChange> = Vec::new();
+        for change in back_changes {
+            if conflict_keys.contains(&change_key(change)) {
+                continue;
+            }
+            if forward
+                .get(i)
+                .map(|t| {
+                    t.changes
+                        .iter()
+                        .any(|c| change_key(c) == change_key(change))
+                })
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            b_to_a.push(change.clone());
+        }
+        let resolved_back = resolve(&b_to_a, rules);
+        report.conflicts.extend(resolved_back.conflicts.clone());
+        report.b_to_a += resolved_back.changes.len();
+
+        progress(&format!(
+            "{}: {} a→b, {} b→a, {} conflicts",
+            fwd.table,
+            resolved.changes.len(),
+            resolved_back.changes.len(),
+            conflicts.len() + resolved_back.conflicts.len()
+        ));
+        if dry_run {
+            continue;
+        }
+        let to_b = sync_statements(&resolved.changes, None, &fwd.table, dialect_b);
+        for chunk in to_b.chunks(batch.max(1)) {
+            b.begin()?;
+            for stmt in chunk {
+                b.run(stmt, 0)?;
+                report.applied += 1;
+            }
+            b.commit()?;
+        }
+        let to_a = sync_statements(&resolved_back.changes, None, &fwd.table, dialect_a);
+        for chunk in to_a.chunks(batch.max(1)) {
+            a.begin()?;
+            for stmt in chunk {
+                a.run(stmt, 0)?;
+                report.applied += 1;
+            }
+            a.commit()?;
+        }
+    }
+    report.elapsed_ms = started.elapsed().as_millis();
+    Ok(report)
+}
+
+fn change_key_of(key: &[(String, Value)]) -> String {
+    key.iter()
+        .map(|(c, v)| format!("{c}={}", v.display()))
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
 }
 
 /// Compare and (unless `dry_run`) apply the differences for the named tables.
@@ -785,11 +1351,16 @@ pub fn dump_script(
         }
         let mut offset = 0usize;
         let mut total = 0usize;
+        let mut cut = false;
         loop {
+            // Fetch only what the ceiling still allows: a page that overshoots would put more
+            // rows in the dump than the caller asked for, and the warning would name the wrong
+            // number.
+            let want = PAGE_ROWS.min(max_rows.saturating_sub(total).max(1));
             let page = driver.fetch_table(
                 table.schema.as_deref(),
                 &table.name,
-                PAGE_ROWS,
+                want,
                 offset,
                 None,
                 None,
@@ -801,9 +1372,22 @@ pub fn dump_script(
             out.push_str(&page.to_sql_inserts(table.schema.as_deref(), &table.name, dialect));
             total += fetched;
             offset += fetched;
-            if fetched < PAGE_ROWS || total >= max_rows {
+            if fetched < want {
                 break;
             }
+            if total >= max_rows {
+                // A dump that stops at a ceiling without saying so is a restore that loses rows.
+                // The marker goes in the script itself, where the person restoring will see it.
+                cut = true;
+                break;
+            }
+        }
+        if cut {
+            out.push_str(&format!(
+                "-- WARNING: {} truncated at {total} rows by max_rows; the dump is INCOMPLETE
+",
+                table.key()
+            ));
         }
         out.push('\n');
     }
@@ -1006,6 +1590,28 @@ mod tests {
             let _ = fresh.run(&stmt, 10).expect("replay");
         }
         assert_eq!(fresh.count_rows(None, "a").expect("count"), 1);
+    }
+
+    #[test]
+    fn a_dump_that_hits_the_row_ceiling_stops_exactly_there_and_says_so() {
+        let mut db = Sqlite::memory().expect("db");
+        let mut sql = String::from("CREATE TABLE a (id INTEGER PRIMARY KEY);");
+        for i in 0..2500 {
+            sql.push_str(&format!("INSERT INTO a VALUES ({i});"));
+        }
+        db.run_script(&sql, 10_000).expect("setup");
+        let catalog = db.catalog().expect("catalog");
+        // 1000 is not a multiple of the page size: the dump must stop at 1000, not at the end of
+        // the page that crossed it, and it must say the file is incomplete.
+        let script = dump_script(&mut db, &catalog, &[], false, 1000, &mut |_| {}).expect("dump");
+        assert_eq!(script.matches("INSERT INTO").count(), 1000);
+        assert!(
+            script.contains("WARNING: a truncated at 1000 rows"),
+            "a dump that stopped early must say so in the file: {script}"
+        );
+        let complete = dump_script(&mut db, &catalog, &[], false, 5000, &mut |_| {}).expect("dump");
+        assert_eq!(complete.matches("INSERT INTO").count(), 2500);
+        assert!(!complete.contains("WARNING"));
     }
 
     #[test]
