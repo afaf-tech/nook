@@ -459,6 +459,14 @@ fn menu_button(
 const PREVIEW_ROWS: usize = 50;
 
 /// Everything the UI itself remembers between frames.
+/// One partition as the tree paints it.
+#[derive(Debug, Clone)]
+pub struct PartitionRow {
+    pub name: String,
+    pub bound: Option<String>,
+    pub rows: Option<i64>,
+}
+
 pub struct UiState {
     /// Inline-editor state, one entry per tab (data grid and query results).
     pub tables: std::collections::BTreeMap<usize, TableState>,
@@ -466,6 +474,8 @@ pub struct UiState {
     /// Sidebar search text and the expanded connection/schema keys.
     pub tree_filter: String,
     pub tree_expanded: std::collections::BTreeSet<String>,
+    /// Partitions read on demand, keyed `conn|schema.table`. The tree never queries on its own.
+    pub partitions: std::collections::HashMap<String, Vec<PartitionRow>>,
     pub connection_open: bool,
     pub connection_editing: Option<usize>,
     pub connection_form: ConnectionForm,
@@ -495,6 +505,9 @@ pub struct UiState {
     /// mode from the field itself.
     pub palette_objects: bool,
     pub diagram_offset: egui::Vec2,
+    /// The box a drag is moving, and where it has been moved to this frame. Persisted on release.
+    pub diagram_drag: Option<String>,
+    pub diagram_moved: std::collections::HashMap<String, egui::Vec2>,
     pub diagram_zoom: f32,
     pub monitor_filter: String,
     pub active_tab_override: Option<usize>,
@@ -647,6 +660,7 @@ impl Default for UiState {
             filter_edit: String::new(),
             tree_filter: String::new(),
             tree_expanded: std::collections::BTreeSet::new(),
+            partitions: std::collections::HashMap::new(),
             connection_open: false,
             connection_editing: None,
             connection_form: ConnectionForm::default(),
@@ -669,6 +683,8 @@ impl Default for UiState {
             palette_query: String::new(),
             palette_objects: false,
             diagram_offset: egui::vec2(0.0, 0.0),
+            diagram_drag: None,
+            diagram_moved: std::collections::HashMap::new(),
             diagram_zoom: 1.0,
             monitor_filter: String::new(),
             active_tab_override: None,
@@ -2356,6 +2372,38 @@ impl NookApp {
                     .run("conn.refresh", serde_json::json!({"conn": id}))
                 {
                     self.session.log(Level::Error, e.to_string());
+                }
+            }
+            TreeAction::LoadPartitions(index, reference) => {
+                let id = self.session.conns[index].cfg.id.clone();
+                let key = format!("{}|{}", id, reference.key());
+                match self.session.run(
+                    "schema.partitions",
+                    serde_json::json!({"conn": id, "table": reference.key()}),
+                ) {
+                    Ok(value) => {
+                        let rows: Vec<PartitionRow> = value["partitions"]
+                            .as_array()
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .map(|p| PartitionRow {
+                                        name: p["name"].as_str().unwrap_or_default().to_string(),
+                                        bound: p["bound"].as_str().map(str::to_string),
+                                        rows: p["rows"].as_i64(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if rows.is_empty() {
+                            let note = value["note"].as_str().unwrap_or("no partitions");
+                            self.session.log(Level::Info, note.to_string());
+                        } else {
+                            self.state.partitions.insert(key.clone(), rows);
+                            self.state.tree_expanded.insert(key);
+                        }
+                    }
+                    Err(e) => self.session.log(Level::Error, e.to_string()),
                 }
             }
             TreeAction::SelectTable(index, reference) => {

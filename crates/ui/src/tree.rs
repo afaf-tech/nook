@@ -140,6 +140,8 @@ pub enum TreeAction {
     NewQuery(usize),
     Monitor(usize),
     Users(usize),
+    /// Read a table's partitions and paint them as children of its row.
+    LoadPartitions(usize, TableRef),
 }
 
 /// The tree's title band, from the design's `.reg-tree .panehead`.
@@ -685,7 +687,50 @@ pub fn show(
                                             state.open_export(index, reference.clone());
                                             ui.close();
                                         }
+                                        ui.separator();
+                                        if ui.button("Partitions…").clicked() {
+                                            action = TreeAction::LoadPartitions(
+                                                index,
+                                                reference.clone(),
+                                            );
+                                            ui.close();
+                                        }
                                     });
+
+                                // Partitions hang under their parent: a partitioned table is one
+                                // object, and the pieces it is made of are children of it, not
+                                // siblings. The rows appear only once they have been asked for,
+                                // which keeps the tree quiet on the usual schema.
+                                let partition_key = format!("{}|{}", conn.cfg.id, reference.key());
+                                if state.tree_expanded.contains(&partition_key) {
+                                    for partition in
+                                        state.partitions.get(&partition_key).into_iter().flatten()
+                                    {
+                                        let (row, _) = ui.allocate_exact_size(
+                                            Vec2::new(ui.available_width(), design::TREE_H),
+                                            Sense::hover(),
+                                        );
+                                        ui.painter().text(
+                                            egui::pos2(
+                                                row.left() + design::INDENT_STEP + 48.0,
+                                                row.center().y,
+                                            ),
+                                            Align2::LEFT_CENTER,
+                                            format!("└ {}", partition.name),
+                                            tokens.mono(design::T_XS + 1.0),
+                                            tokens.text_dim,
+                                        );
+                                        if let Some(bound) = &partition.bound {
+                                            ui.painter().text(
+                                                egui::pos2(row.right() - 12.0, row.center().y),
+                                                Align2::RIGHT_CENTER,
+                                                crate::table::clip(bound, 28),
+                                                tokens.font(design::T_XS),
+                                                tokens.text_faint,
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

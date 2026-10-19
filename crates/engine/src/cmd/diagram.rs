@@ -17,6 +17,33 @@ pub fn commands() -> Vec<CommandSpec> {
             export_svg,
         )
         .params(r#"{"path":"~/diagrams/schema.svg","schema":"public"}"#),
+        CommandSpec::new(
+            "diagram.reverseEngineer",
+            "Catalog to model",
+            "Modeler",
+            reverse_engineer,
+        )
+        .params(r#"{"schema":"public"}"#)
+        .help("The live catalog as a model document: tables, keys and box positions."),
+        CommandSpec::new(
+            "diagram.forwardEngineer",
+            "Model to DDL",
+            "Modeler",
+            forward_engineer,
+        )
+        .params(r#"{"model":{"version":1,"conn":"local","tables":[]}}"#)
+        .help("A model document to DDL, ordered by dependency; a cycle's keys are added afterwards."),
+        CommandSpec::new(
+            "diagram.manualLayout",
+            "Save box positions",
+            "Modeler",
+            manual_layout,
+        )
+        .params(r#"{"positions":{"public.users":[40,80]},"reset":false}"#)
+        .help("Stores box positions per connection and schema, so a drag survives a reopen."),
+        CommandSpec::new("diagram.modelFile", "Model file", "Modeler", model_file)
+            .params(r#"{"path":"~/models/shop.json","action":"save"}"#)
+            .help("save/load the model document, positions included, as JSON."),
         CommandSpec::new("diagram.tableCard", "Table card", "Modeler", table_card)
             .params(r#"{"table":"public.users"}"#)
             .help("One table's columns, keys and relationships, for the diagram's side panel."),
@@ -204,6 +231,210 @@ fn escape(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// The store key a layout's overrides live under. One key per connection *and* schema, because the
+/// same table name means different pictures in two schemas.
+fn layout_key(conn: &str, schema: Option<&str>) -> String {
+    format!("diagram.layout.{conn}.{}", schema.unwrap_or("*"))
+}
+
+fn reverse_engineer(session: &mut crate::Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    let schema = p.str_opt("schema");
+    let conn = session
+        .conns
+        .get(index)
+        .map(|c| c.cfg.id.clone())
+        .unwrap_or_default();
+    let doc = {
+        let catalog = session.catalog_of(index)?;
+        nook_model::DiagramDocument::from_catalog(&conn, catalog, schema.as_deref())
+    };
+    // The saved overrides are applied on the way out: reverse engineering answers "what is on screen",
+    // and what is on screen includes where the person put the boxes.
+    let mut doc = doc;
+    if let Some(saved) = crate::store::load_ui_state(&layout_key(&conn, schema.as_deref()))? {
+        if let Ok(overrides) = serde_json::from_str::<std::collections::BTreeMap<String, [f32; 2]>>(&saved)
+        {
+            for (key, [x, y]) in overrides {
+                doc.place(&key, x, y);
+            }
+        }
+    }
+    Ok(json!({
+        "version": doc.version,
+        "conn": doc.conn,
+        "schema": doc.schema,
+        "boxes": doc.boxes.iter().map(|(k, [x, y])| json!({"key": k, "x": x, "y": y}))
+            .collect::<Vec<_>>(),
+        "tables": doc.tables.iter().map(|t| json!({
+            "key": t.key(), "name": t.name, "columns": t.columns.len(),
+            "primary_key": t.primary_key(),
+        })).collect::<Vec<_>>(),
+        "model": doc,
+    }))
+}
+
+fn forward_engineer(session: &mut crate::Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let raw = p
+        .get("model")
+        .cloned()
+        .ok_or_else(|| Error::config("pass \"model\" — a diagram.modelFile document"))?;
+    let doc: nook_model::DiagramDocument = serde_json::from_value(raw)
+        .map_err(|e| Error::config(format!("that is not a model document: {e}")))?;
+    if doc.tables.is_empty() {
+        return Err(Error::config("the model has no tables to engineer"));
+    }
+    let index = session.resolve_conn(p)?;
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .ok_or_else(|| Error::config("the connection is not open"))?;
+    let statements = nook_model::forward_engineer(&doc, dialect)?;
+    let script = statements.join("\n");
+    let out = p.str_opt("path");
+    match out {
+        Some(path) => {
+            let path = crate::cmd::grid::expand(&path, &session.home);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| Error::io(format!("create {}: {e}", parent.display())))?;
+            }
+            std::fs::write(&path, &script)
+                .map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
+            Ok(json!({
+                "path": path.to_string_lossy(),
+                "statements": statements,
+                "bytes": script.len(),
+            }))
+        }
+        None => Ok(json!({ "statements": statements, "script": script })),
+    }
+}
+
+fn manual_layout(session: &mut crate::Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    let conn = session
+        .conns
+        .get(index)
+        .map(|c| c.cfg.id.clone())
+        .unwrap_or_default();
+    let schema = p.str_opt("schema");
+    let key = layout_key(&conn, schema.as_deref());
+    if p.bool_opt("reset", false) {
+        // Clearing is a write of an empty map, not a delete: the store has no delete, and an empty
+        // map and an absent key mean the same thing to every reader.
+        crate::store::save_ui_state(&key, "{}")?;
+        return Ok(json!({ "conn": conn, "schema": schema, "positions": {}, "reset": true }));
+    }
+    let mut current: std::collections::BTreeMap<String, [f32; 2]> =
+        match crate::store::load_ui_state(&key)? {
+            Some(saved) => serde_json::from_str(&saved).unwrap_or_default(),
+            None => Default::default(),
+        };
+    let positions = p
+        .get("positions")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| Error::config(r#"pass "positions" — {"key":[x,y]} — or "reset": true"#))?;
+    let mut moved = 0;
+    for (k, v) in positions {
+        let pair = v
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .ok_or_else(|| Error::config(format!("'{k}' needs [x, y]")))?;
+        let x = pair[0]
+            .as_f64()
+            .ok_or_else(|| Error::config(format!("'{k}' x is not a number")))?;
+        let y = pair[1]
+            .as_f64()
+            .ok_or_else(|| Error::config(format!("'{k}' y is not a number")))?;
+        current.insert(k.clone(), [x as f32, y as f32]);
+        moved += 1;
+    }
+    let encoded = serde_json::to_string(&current)
+        .map_err(|e| Error::config(format!("encode positions: {e}")))?;
+    crate::store::save_ui_state(&key, &encoded)?;
+    Ok(json!({
+        "conn": conn,
+        "schema": schema,
+        "positions": current.iter().map(|(k, [x, y])| json!({"key": k, "x": x, "y": y}))
+            .collect::<Vec<_>>(),
+        "moved": moved,
+        "total": current.len(),
+    }))
+}
+
+fn model_file(session: &mut crate::Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
+    let action = p.str_opt("action").unwrap_or_else(|| "save".into());
+    match action.as_str() {
+        "save" => {
+            let index = session.resolve_conn(p)?;
+            let schema = p.str_opt("schema");
+            let conn = session
+                .conns
+                .get(index)
+                .map(|c| c.cfg.id.clone())
+                .unwrap_or_default();
+            let mut doc = {
+                let catalog = session.catalog_of(index)?;
+                nook_model::DiagramDocument::from_catalog(&conn, catalog, schema.as_deref())
+            };
+            if let Some(saved) = crate::store::load_ui_state(&layout_key(&conn, schema.as_deref()))? {
+                if let Ok(overrides) =
+                    serde_json::from_str::<std::collections::BTreeMap<String, [f32; 2]>>(&saved)
+                {
+                    for (key, [x, y]) in overrides {
+                        doc.place(&key, x, y);
+                    }
+                }
+            }
+            let text = serde_json::to_string_pretty(&doc)
+                .map_err(|e| Error::config(format!("encode model: {e}")))?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| Error::io(format!("create {}: {e}", parent.display())))?;
+            }
+            std::fs::write(&path, &text)
+                .map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
+            session.log(
+                crate::Level::Success,
+                format!("model written: {}", path.display()),
+            );
+            Ok(json!({
+                "path": path.to_string_lossy(),
+                "bytes": text.len(),
+                "tables": doc.tables.len(),
+                "boxes": doc.boxes.len(),
+            }))
+        }
+        "load" => {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| Error::io(format!("read {}: {e}", path.display())))?;
+            let doc: nook_model::DiagramDocument = serde_json::from_str(&text)
+                .map_err(|e| Error::config(format!("{} is not a model document: {e}", path.display())))?;
+            // Loading restores the positions into the store too, so reopening the diagram shows the
+            // saved layout rather than the deterministic one.
+            let key = layout_key(&doc.conn, doc.schema.as_deref());
+            let encoded = serde_json::to_string(&doc.boxes)
+                .map_err(|e| Error::config(format!("encode positions: {e}")))?;
+            crate::store::save_ui_state(&key, &encoded)?;
+            Ok(json!({
+                "path": path.to_string_lossy(),
+                "version": doc.version,
+                "conn": doc.conn,
+                "schema": doc.schema,
+                "tables": doc.tables.len(),
+                "boxes": doc.boxes.len(),
+                "model": doc,
+            }))
+        }
+        other => Err(Error::config(format!(
+            "unknown action '{other}'; use save or load"
+        ))),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,3 +501,4 @@ mod tests {
         assert!(table_card(&mut session, &crate::Params::none()).is_err());
     }
 }
+

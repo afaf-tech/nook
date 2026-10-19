@@ -142,38 +142,75 @@ fn a_change_sqlite_cannot_make_in_place_names_itself_as_the_reason() {
 
     // SQLite has no ALTER COLUMN. The designer must hear which change is impossible and why, rather
     // than a syntax error the server refused — that is what makes the tab look broken.
-    for (id, params, expected) in [
-        (
-            "schema.changeColumnType",
-            json!({"table": "users", "column": "email", "type": "VARCHAR(64)"}),
-            "cannot change a column type in place",
-        ),
-        (
-            "schema.setNullable",
-            json!({"table": "users", "column": "email", "nullable": false}),
-            "cannot change NOT NULL in place",
-        ),
-        (
-            "schema.setDefault",
-            json!({"table": "users", "column": "email", "default": "'x'"}),
-            "cannot change a default in place",
-        ),
-        (
+    //
+    // Only a foreign key remains in this list: a type, a nullability and a default all route through
+    // `schema.tableRebuild` now, which is the point of that command.
+    let error = f
+        .try_run(
             "schema.addForeignKey",
             json!({"table": "users", "columns": ["id"], "ref_table": "users", "ref_columns": ["id"]}),
-            "cannot add a foreign key to an existing table",
-        ),
-    ] {
-        let error = f.try_run(id, params).expect_err("sqlite refuses this");
-        assert!(
-            error.contains(expected),
-            "{id} should say '{expected}', said: {error}"
-        );
-        assert!(
-            error.contains("SQLite"),
-            "{id} should name the dialect: {error}"
-        );
-    }
+        )
+        .expect_err("sqlite refuses this");
+    assert!(
+        error.contains("cannot add a foreign key to an existing table"),
+        "{error}"
+    );
+    assert!(error.contains("SQLite"), "{error}");
+}
+
+#[test]
+fn sqlite_changes_a_column_type_by_rebuilding_the_table() {
+    let mut f = Fixture::new("retype");
+    f.create_users();
+    f.run(
+        "sql.run",
+        json!({"sql": "INSERT INTO users (email) VALUES ('a@b.c')"}),
+    );
+    // SQLite has no ALTER COLUMN TYPE, but it does have a rebuild — refusing here is what made the
+    // designer unable to edit a field at all.
+    f.run(
+        "schema.changeColumnType",
+        json!({"table": "users", "column": "email", "type": "VARCHAR(64)"}),
+    );
+    let columns = f.run("schema.columns", json!({"table": "users"}));
+    let email = columns["columns"]
+        .as_array()
+        .expect("columns")
+        .iter()
+        .find(|c| c["name"] == "email")
+        .expect("email");
+    assert_eq!(email["type"], "VARCHAR(64)");
+    let rows = f.run("sql.run", json!({"sql": "SELECT COUNT(*) FROM users"}));
+    assert_eq!(rows["data"][0][0], 1, "the row must survive the rebuild");
+}
+
+#[test]
+fn sqlite_changes_nullability_and_default_by_rebuilding_the_table() {
+    let mut f = Fixture::new("nullability");
+    f.create_users();
+    f.run(
+        "sql.run",
+        json!({"sql": "INSERT INTO users (email) VALUES ('a@b.c')"}),
+    );
+    f.run(
+        "schema.setNullable",
+        json!({"table": "users", "column": "email", "nullable": false}),
+    );
+    f.run(
+        "schema.setDefault",
+        json!({"table": "users", "column": "email", "default": "'x'"}),
+    );
+    let columns = f.run("schema.columns", json!({"table": "users"}));
+    let email = columns["columns"]
+        .as_array()
+        .expect("columns")
+        .iter()
+        .find(|c| c["name"] == "email")
+        .expect("email");
+    assert_eq!(email["nullable"], false);
+    assert_eq!(email["default"], "'x'");
+    let rows = f.run("sql.run", json!({"sql": "SELECT COUNT(*) FROM users"}));
+    assert_eq!(rows["data"][0][0], 1, "the row must survive both rebuilds");
 }
 
 #[test]

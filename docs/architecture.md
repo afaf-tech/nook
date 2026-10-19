@@ -435,3 +435,31 @@ process table. This is the pre-existing path for SSH and database passwords too,
   model, on the UI thread — the same ceiling `sql.run` has, recorded under §7 of `docs/gaps.md`. The
   band closes when the draft lands, so the wait is visible as a still window rather than a spinner.
   **Upgrade path**: the job path the same gap note names, which would hand the band a job id to poll.
+- **A table rebuild takes a diff, never a column list.** `schema.tableRebuild` reads the live columns
+  from the catalog and applies `rename` / `retype` / `nullable` / `default` / `drop` / `add` to a
+  clone; the driver then rebuilds from the result. A command that took "the new columns" would invite
+  every caller to reconstruct that list by hand, and the first one that forgot a column would silently
+  drop its data. Columns are paired to their source by **ordinal**, not by name, because a rename keeps
+  its position and a name pair would lose the data it renamed. Three checks run before the commit: a
+  rebuild inside an open transaction refuses (the pragma cannot change inside one), every foreign key
+  pointing at the table must still resolve to a column it has, and `PRAGMA foreign_key_check` scoped to
+  the table must return nothing — a failure rolls back and names the offending rows. **Ceiling**: the
+  rebuild is SQLite-only; Postgres and MySQL alter in place and `schema.tableRebuild` refuses there.
+- **A forward-engineered cycle needs a server that can defer a key.** Tables are emitted in dependency
+  order, and a key that cannot be ordered is lifted out of its `CREATE` and emitted as
+  `ALTER TABLE … ADD CONSTRAINT` afterwards. SQLite has no such statement, so on SQLite a cycle is
+  refused with a sentence naming it rather than emitting a script that dies halfway. **Upgrade path**:
+  emit the cycle as two `CREATE`s plus a table rebuild per side, which is the only arrangement SQLite
+  accepts.
+- **Partitions are read on every engine, written for range-by-date only.** The bounds come from the
+  server's own catalog (`pg_get_expr(relpartbound)` / `information_schema.PARTITIONS`), never from
+  re-parsing a DDL string. `schema.createPartition` validates the bounds as real dates before any SQL
+  runs, so `2026-13-01` is refused in the dialog rather than by the server after it closed. **Ceiling**:
+  no list, hash, default partition, or MySQL `REORGANIZE`.
+- **The diagram is a document, and PNG is not part of it.** `diagram.reverseEngineer` returns the
+  catalog with box positions and the tables themselves, so a saved model reads without a live
+  connection; positions are stored per `conn + schema` in `ui_state`, which is why a drag survives a
+  reopen. `diagram.exportPng` is **dropped**: the only `ColorImage` in the tree is a screenshot of the
+  running window, and rendering a diagram offscreen would need an egui painter into an offscreen
+  buffer — a rasteriser that does not exist. SVG stays the commitment. **Upgrade path**: one
+  offscreen `egui::Painter` into a `ColorImage`, then the `png` encoder already in the tree.

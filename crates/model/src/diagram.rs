@@ -1,6 +1,6 @@
 //! ER diagram layout: deterministic boxes and FK edges, no physics, no randomness.
 
-use crate::Catalog;
+use crate::{Catalog, Table};
 
 const CHAR_W: f32 = 7.0;
 const ROW_H: f32 = 18.0;
@@ -192,4 +192,158 @@ mod tests {
         assert_eq!(e.from_column, "author_id");
         assert_eq!(e.to_column, "id");
     }
+}
+
+// --- The model document ------------------------------------------------------
+
+/// A diagram saved as a *document*: the tables travel with it, so it reads without a live connection.
+///
+/// Positions live beside the tables rather than inside them, because a position is a property of the
+/// picture, not of the schema — two documents of the same database may lay it out differently.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DiagramDocument {
+    pub version: u32,
+    pub conn: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// `key -> [x, y]`. A key with no entry keeps the deterministic layout's position.
+    #[serde(default)]
+    pub boxes: std::collections::BTreeMap<String, [f32; 2]>,
+    pub tables: Vec<Table>,
+}
+
+impl DiagramDocument {
+    pub const VERSION: u32 = 1;
+
+    /// Build a document from a catalog, optionally filtered to one schema.
+    pub fn from_catalog(conn: &str, catalog: &Catalog, schema: Option<&str>) -> Self {
+        let mut boxes = std::collections::BTreeMap::new();
+        let diagram = layout(catalog, schema);
+        for node in &diagram.nodes {
+            boxes.insert(node.key.clone(), [node.x, node.y]);
+        }
+        let tables = catalog
+            .schemas
+            .iter()
+            .filter(|s| schema.map_or(true, |want| s.name == want))
+            .flat_map(|s| s.tables.iter().cloned())
+            .filter(|t| t.kind == crate::TableKind::Table)
+            .collect();
+        DiagramDocument {
+            version: Self::VERSION,
+            conn: conn.to_string(),
+            schema: schema.map(str::to_string),
+            boxes,
+            tables,
+        }
+    }
+
+    /// Override one box position. Stored here so a drag survives a save/load round trip.
+    pub fn place(&mut self, key: &str, x: f32, y: f32) {
+        self.boxes.insert(key.to_string(), [x, y]);
+    }
+}
+
+/// One `CREATE TABLE` per table, ordered so a table is created after everything it references.
+///
+/// A cycle cannot be ordered, so its foreign keys are lifted out of the `CREATE` and emitted as
+/// `ALTER TABLE … ADD CONSTRAINT` after every table exists — the only arrangement that works when
+/// two tables need each other.
+pub fn forward_engineer(
+    doc: &DiagramDocument,
+    dialect: nook_core::Dialect,
+) -> Result<Vec<String>, nook_core::Error> {
+    let mut order: Vec<usize> = Vec::new();
+    let mut state = vec![0u8; doc.tables.len()]; // 0 = unvisited, 1 = in progress, 2 = done
+    // Deferred constraints, by table index.
+    let mut deferred: Vec<(usize, Vec<crate::ForeignKey>)> = Vec::new();
+
+    fn visit(
+        i: usize,
+        doc: &DiagramDocument,
+        state: &mut [u8],
+        order: &mut Vec<usize>,
+        deferred: &mut Vec<(usize, Vec<crate::ForeignKey>)>,
+    ) {
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        let mut cycle_fks = Vec::new();
+        for fk in &doc.tables[i].foreign_keys {
+            let Some(target) = doc
+                .tables
+                .iter()
+                .position(|t| t.name == fk.ref_table)
+            else {
+                continue;
+            };
+            if target == i {
+                // A self-reference is its own cycle: always deferred.
+                cycle_fks.push(fk.clone());
+                continue;
+            }
+            if state[target] == 1 {
+                cycle_fks.push(fk.clone());
+                continue;
+            }
+            visit(target, doc, state, order, deferred);
+        }
+        if !cycle_fks.is_empty() {
+            deferred.push((i, cycle_fks));
+        }
+        state[i] = 2;
+        order.push(i);
+    }
+
+    for i in 0..doc.tables.len() {
+        visit(i, doc, &mut state, &mut order, &mut deferred);
+    }
+
+    let mut statements = Vec::new();
+    for i in &order {
+        let mut table = doc.tables[*i].clone();
+        // The deferred keys are added afterwards, so the CREATE must not carry them.
+        table.foreign_keys.retain(|fk| {
+            !deferred
+                .iter()
+                .any(|(owner, list)| owner == i && list.iter().any(|d| d.name == fk.name))
+        });
+        // Keys ride inside the CREATE: a forward-engineered schema without its foreign keys is not
+        // the schema the document describes, and `ALTER TABLE … ADD CONSTRAINT` per key would fail on
+        // SQLite outright.
+        statements.push(crate::ddl::create_table_with(&table, dialect, true));
+        // Indexes are separate objects in every dialect, and a document that lost them would
+        // forward-engineer into a slower copy of the database it came from.
+        statements.extend(crate::ddl::create_indexes(&table, dialect));
+    }
+    for (owner, list) in &deferred {
+        let table = &doc.tables[*owner];
+        for fk in list {
+            statements.push(crate::ddl::add_foreign_key(
+                table.schema.as_deref(),
+                &table.name,
+                fk,
+                dialect,
+            ));
+        }
+    }
+    if dialect == nook_core::Dialect::Sqlite && !deferred.is_empty() {
+        // SQLite has no `ALTER TABLE … ADD CONSTRAINT`, so a cycle cannot be deferred there. Say so
+        // rather than emit a script the server rejects halfway through.
+        let names: Vec<String> = deferred
+            .iter()
+            .flat_map(|(owner, list)| {
+                list.iter()
+                    .map(|fk| format!("{}.{}", doc.tables[*owner].name, fk.name))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        return Err(nook_core::Error::unsupported(format!(
+            "SQLite cannot add a foreign key after the fact, so a cycle ({}) cannot be forward \
+             engineered there; create the tables without those keys and add them with a table rebuild",
+            names.join(", ")
+        )));
+    }
+    Ok(statements)
 }

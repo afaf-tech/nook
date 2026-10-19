@@ -588,8 +588,14 @@ pub fn diagram(
     }
 
     for node in &nodes {
-        let x = node["x"].as_f64().unwrap_or(0.0) as f32;
-        let y = node["y"].as_f64().unwrap_or(0.0) as f32;
+        let key = node["key"].as_str().unwrap_or_default();
+        let moved = state.diagram_moved.get(key);
+        let x = moved
+            .map(|p| p.x)
+            .unwrap_or_else(|| node["x"].as_f64().unwrap_or(0.0) as f32);
+        let y = moved
+            .map(|p| p.y)
+            .unwrap_or_else(|| node["y"].as_f64().unwrap_or(0.0) as f32);
         let w = node["w"].as_f64().unwrap_or(140.0) as f32;
         let h = node["h"].as_f64().unwrap_or(60.0) as f32;
         let rect =
@@ -693,8 +699,55 @@ pub fn diagram(
         );
     }
 
+    // A drag that starts on a box moves that box; a drag that starts on the canvas pans. The
+    // distinction is made on press, because by the time the pointer has moved the question is
+    // already ambiguous.
+    let hovered_box = response
+        .hover_pos()
+        .and_then(|pos| box_at(pos, &nodes, origin, zoom));
+    if response.drag_started() {
+        state.diagram_drag = hovered_box.clone();
+    }
     if response.dragged() {
-        state.diagram_offset += response.drag_delta();
+        match &state.diagram_drag {
+            Some(key) => {
+                let delta = response.drag_delta() / zoom;
+                if let Some(node) = state.diagram_moved.get_mut(key) {
+                    *node += delta;
+                } else {
+                    let start = nodes
+                        .iter()
+                        .find(|n| n["key"].as_str() == Some(key.as_str()))
+                        .map(|n| {
+                            egui::vec2(
+                                n["x"].as_f64().unwrap_or(0.0) as f32,
+                                n["y"].as_f64().unwrap_or(0.0) as f32,
+                            )
+                        })
+                        .unwrap_or_default();
+                    state.diagram_moved.insert(key.clone(), start + delta);
+                }
+            }
+            None => state.diagram_offset += response.drag_delta(),
+        }
+    }
+    if response.drag_stopped() {
+        if let Some(key) = state.diagram_drag.take() {
+            if let Some(position) = state.diagram_moved.remove(&key) {
+                // Persisted on release, not per frame: one store write per drag, not one per pixel.
+                if let Some(conn) = session.tabs[tab_index].conn {
+                    let mut positions = serde_json::Map::new();
+                    positions.insert(key, serde_json::json!([position.x, position.y]));
+                    let params = serde_json::json!({
+                        "conn": session.conns[conn].cfg.id,
+                        "positions": positions,
+                    });
+                    if let Err(e) = session.run("diagram.manualLayout", params) {
+                        session.log(Level::Error, e.to_string());
+                    }
+                }
+            }
+        }
     }
     let scroll = ui.input(|i| i.smooth_scroll_delta.y);
     if response.hovered() && scroll.abs() > 0.0 {
@@ -2390,6 +2443,27 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
         });
 }
 
+/// The key of the box under `pos`, if any. Topmost wins: a later box is painted over an earlier one,
+/// so the pointer should hit what it can see.
+fn box_at(
+    pos: egui::Pos2,
+    nodes: &[serde_json::Value],
+    origin: egui::Pos2,
+    zoom: f32,
+) -> Option<String> {
+    for node in nodes.iter().rev() {
+        let x = node["x"].as_f64().unwrap_or(0.0) as f32;
+        let y = node["y"].as_f64().unwrap_or(0.0) as f32;
+        let w = node["w"].as_f64().unwrap_or(140.0) as f32;
+        let h = node["h"].as_f64().unwrap_or(60.0) as f32;
+        let rect =
+            egui::Rect::from_min_size(origin + egui::vec2(x, y) * zoom, egui::vec2(w, h) * zoom);
+        if rect.contains(pos) {
+            return node["key"].as_str().map(str::to_string);
+        }
+    }
+    None
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2493,3 +2567,4 @@ mod tests {
         );
     }
 }
+

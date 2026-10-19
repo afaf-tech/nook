@@ -13,14 +13,19 @@ pub mod diagram;
 pub mod diff;
 pub mod edit;
 
-pub use diagram::{layout as layout_diagram, Diagram, DiagramEdge, DiagramNode};
+pub use diagram::{
+    forward_engineer, layout as layout_diagram, Diagram, DiagramDocument, DiagramEdge, DiagramNode,
+};
 pub use diff::{diff as diff_catalogs, Change, ChangeKind};
 pub use edit::{plan as plan_edits, plan_update, EditKind, RowEdit};
 
 use nook_core::{quote_qualified, sql_literal, Dialect, Value};
 use serde::{Deserialize, Serialize};
 
+// `serde(default)` on the struct: a model document is written by hand and by other tools, and a
+// missing `auto_increment` is not a different column — it is the default one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Column {
     pub name: String,
     /// Declared type as the server reports it (`varchar(255)`, `int8`, `TEXT`).
@@ -79,6 +84,7 @@ pub fn format_hint(name: &str) -> Option<(&str, &str)> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Index {
     pub name: String,
     pub columns: Vec<String>,
@@ -88,6 +94,7 @@ pub struct Index {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ForeignKey {
     pub name: String,
     pub columns: Vec<String>,
@@ -120,6 +127,7 @@ impl TableKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Table {
     pub schema: Option<String>,
     pub name: String,

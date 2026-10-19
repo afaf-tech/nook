@@ -364,12 +364,6 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Sequence editor",
         "list/create/drop via \"action\"; PostgreSQL only",
     ),
-    (
-        "Design",
-        "schema.tableRebuild",
-        "Rebuild a table in place",
-        "SQLite DDL that needs it says so instead",
-    ),
     // ---------------------------------------------------------------- Query
     ("Query", "sql.newQuery", "New query", "editor per tab"),
     (
@@ -790,30 +784,6 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Table card",
         "columns, keys, what references it",
     ),
-    (
-        "Modeler",
-        "diagram.reverseEngineer",
-        "Reverse engineer a model",
-        "the diagram is generated from the live catalog",
-    ),
-    (
-        "Modeler",
-        "diagram.forwardEngineer",
-        "Forward engineer a model to DDL",
-        "use schema.createTable or sync.structure",
-    ),
-    (
-        "Modeler",
-        "diagram.manualLayout",
-        "Move boxes by hand",
-        "not implemented; the layout is deterministic",
-    ),
-    (
-        "Modeler",
-        "diagram.modelFile",
-        "Save a model file",
-        "not implemented; the catalog is the source of truth",
-    ),
     // ---------------------------------------------------------------- Tools and platform
     (
         "Tools",
@@ -873,12 +843,6 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "tools.dataProfiling",
         "Data profiling",
         "not implemented; use an aggregate report",
-    ),
-    (
-        "Tools",
-        "tools.dataDictionary",
-        "Data dictionary export",
-        "schema.ddl plus the diagram SVG",
     ),
     (
         "Tools",

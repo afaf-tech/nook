@@ -51,6 +51,17 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("export.stream", "Stream a table or query to a file", "Tools", export_stream)
             .params(r#"{"table":"orders","path":"~/exports/orders.csv","format":"csv","page":5000}"#)
             .help("Pages the rows out without holding the result: csv or jsonl. json is refused."),
+        CommandSpec::new(
+            "tools.dataDictionary",
+            "Data dictionary",
+            "Tools",
+            data_dictionary,
+        )
+        .params(r#"{"schema":"public","format":"markdown","path":"~/dict.md"}"#)
+        .help(
+            "Every table, column, type, key, default and comment, as Markdown or self-contained \
+             HTML; one pass over the cached catalog, no new queries.",
+        ),
         CommandSpec::new("tools.queryBuilder", "Query builder", "Tools", query_builder)
             .params(r#"{"from":[{"table":"users","alias":"u","columns":["id","email"]}],"where":"u.email like '%@example.com'","order_by":"u.id","limit":100}"#)
             .help("Builds a SELECT from a table/column/join description. Returns the SQL."),
@@ -2053,6 +2064,211 @@ fn quick_open_open(session: &mut Session, p: &Params) -> Result<serde_json::Valu
     }
 }
 
+/// The catalog projected as a document: the same facts `schema.ddl` and the diagram use, written for
+/// a reader rather than a server. One pass, no queries — a dictionary that ran one query per table
+/// would take minutes on a real schema.
+fn data_dictionary(session: &mut crate::Session, p: &crate::Params) -> Result<serde_json::Value> {
+    let index = session.resolve_conn(p)?;
+    let schema_filter = p.str_opt("schema");
+    let format = p.str_opt("format").unwrap_or_else(|| "markdown".into());
+    let (body, tables, columns) = {
+        let catalog = session.catalog_of(index)?;
+        let rendered = match format.as_str() {
+            "markdown" => dictionary_markdown(catalog, schema_filter.as_deref()),
+            "html" => dictionary_html(catalog, schema_filter.as_deref()),
+            other => {
+                return Err(Error::config(format!(
+                    "unknown format '{other}'; use markdown or html"
+                )))
+            }
+        };
+        let tables = catalog
+            .schemas
+            .iter()
+            .filter(|s| schema_filter.as_deref().map_or(true, |want| s.name == want))
+            .map(|s| s.tables.len())
+            .sum::<usize>();
+        let columns = catalog
+            .schemas
+            .iter()
+            .filter(|s| schema_filter.as_deref().map_or(true, |want| s.name == want))
+            .flat_map(|s| &s.tables)
+            .map(|t| t.columns.len())
+            .sum::<usize>();
+        (rendered, tables, columns)
+    };
+    if tables == 0 {
+        return Err(Error::not_found(
+            "this connection has no tables to describe",
+        ));
+    }
+    match p.str_opt("path") {
+        Some(path) => {
+            let path = crate::cmd::grid::expand(&path, &session.home);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| Error::io(format!("create {}: {e}", parent.display())))?;
+            }
+            std::fs::write(&path, &body)
+                .map_err(|e| Error::io(format!("write {}: {e}", path.display())))?;
+            session.log(
+                crate::Level::Success,
+                format!("dictionary written: {}", path.display()),
+            );
+            Ok(json!({
+                "path": path.to_string_lossy(),
+                "bytes": body.len(),
+                "tables": tables,
+                "columns": columns,
+                "format": format,
+            }))
+        }
+        None => Ok(json!({
+            "text": body,
+            "tables": tables,
+            "columns": columns,
+            "format": format,
+        })),
+    }
+}
+
+fn dictionary_markdown(catalog: &nook_model::Catalog, schema_filter: Option<&str>) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", catalog.driver));
+    for schema in &catalog.schemas {
+        if schema_filter.is_some_and(|want| schema.name != want) {
+            continue;
+        }
+        out.push_str(&format!("## {}\n\n", schema.name));
+        for table in &schema.tables {
+            out.push_str(&format!("### {}\n\n", table.key()));
+            if !table.comment.is_empty() {
+                out.push_str(&format!("{}\n\n", table.comment));
+            }
+            if let Some(rows) = table.row_estimate {
+                out.push_str(&format!("~{rows} rows\n\n"));
+            }
+            out.push_str("| Column | Type | Null | Key | Default | Comment |\n");
+            out.push_str("|---|---|---|---|---|---|\n");
+            for column in &table.columns {
+                out.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {} |\n",
+                    column.name,
+                    column.type_name,
+                    if column.nullable { "yes" } else { "no" },
+                    if column.primary_key { "PK" } else { "" },
+                    column.default.as_deref().unwrap_or(""),
+                    column.comment,
+                ));
+            }
+            out.push('\n');
+            if !table.indexes.is_empty() {
+                out.push_str("Indexes: ");
+                let names: Vec<String> = table
+                    .indexes
+                    .iter()
+                    .map(|i| {
+                        format!(
+                            "{}({}){}",
+                            i.name,
+                            i.columns.join(", "),
+                            if i.unique { " unique" } else { "" }
+                        )
+                    })
+                    .collect();
+                out.push_str(&names.join("; "));
+                out.push_str("\n\n");
+            }
+            if !table.foreign_keys.is_empty() {
+                out.push_str("Foreign keys: ");
+                let names: Vec<String> = table
+                    .foreign_keys
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "({}) → {}.{}({})",
+                            f.columns.join(", "),
+                            f.ref_table,
+                            "",
+                            f.ref_columns.join(", ")
+                        )
+                    })
+                    .collect();
+                out.push_str(&names.join("; "));
+                out.push_str("\n\n");
+            }
+        }
+    }
+    out
+}
+
+fn dictionary_html(catalog: &nook_model::Catalog, schema_filter: Option<&str>) -> String {
+    let escape = |s: &str| -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let mut out = String::from(
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n\
+         <title>Data dictionary</title>\n\
+         <style>body{font:14px/1.5 system-ui,sans-serif;margin:2rem;max-width:60rem}\
+         table{border-collapse:collapse;width:100%;margin:0 0 1.5rem}\
+         th,td{border:1px solid #ccc;padding:.25rem .5rem;text-align:left;vertical-align:top}\
+         th{background:#f4f4f4}h2{margin-top:2.5rem}</style>\n</head><body>\n",
+    );
+    out.push_str(&format!("<h1>{}</h1>\n", escape(&catalog.driver)));
+    for schema in &catalog.schemas {
+        if schema_filter.is_some_and(|want| schema.name != want) {
+            continue;
+        }
+        out.push_str(&format!("<h2>{}</h2>\n", escape(&schema.name)));
+        for table in &schema.tables {
+            out.push_str(&format!("<h3>{}</h3>\n", escape(&table.key())));
+            if !table.comment.is_empty() {
+                out.push_str(&format!("<p>{}</p>\n", escape(&table.comment)));
+            }
+            out.push_str(
+                "<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Key</th>\
+                 <th>Default</th><th>Comment</th></tr></thead><tbody>\n",
+            );
+            for column in &table.columns {
+                out.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    escape(&column.name),
+                    escape(&column.type_name),
+                    if column.nullable { "yes" } else { "no" },
+                    if column.primary_key { "PK" } else { "" },
+                    escape(column.default.as_deref().unwrap_or("")),
+                    escape(&column.comment),
+                ));
+            }
+            out.push_str("</tbody></table>\n");
+            if !table.indexes.is_empty() || !table.foreign_keys.is_empty() {
+                out.push_str("<ul>\n");
+                for index in &table.indexes {
+                    out.push_str(&format!(
+                        "<li>index {} ({}){}</li>\n",
+                        escape(&index.name),
+                        escape(&index.columns.join(", ")),
+                        if index.unique { " unique" } else { "" }
+                    ));
+                }
+                for fk in &table.foreign_keys {
+                    out.push_str(&format!(
+                        "<li>foreign key ({}) → {}({})</li>\n",
+                        escape(&fk.columns.join(", ")),
+                        escape(&fk.ref_table),
+                        escape(&fk.ref_columns.join(", "))
+                    ));
+                }
+                out.push_str("</ul>\n");
+            }
+        }
+    }
+    out.push_str("</body></html>\n");
+    out
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2258,3 +2474,4 @@ mod tests {
         assert!(out["generators"].as_array().map(Vec::len).unwrap_or(0) > 10);
     }
 }
+

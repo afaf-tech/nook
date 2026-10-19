@@ -441,7 +441,9 @@ impl Driver for Sqlite {
     }
 
     fn in_transaction(&self) -> bool {
-        self.in_tx
+        // The flag only knows about transactions this driver opened; `BEGIN` typed into the editor
+        // starts one too, and rusqlite can always tell.
+        self.in_tx || !self.conn.is_autocommit()
     }
 }
 
@@ -570,12 +572,27 @@ impl Sqlite {
         let tmp = format!("{}_dc_new", table.name);
         let mut rebuilt = table.clone();
         rebuilt.columns = new_columns.to_vec();
-        let shared: Vec<String> = new_columns
+        // The copy list comes from the *live* table, not from `table`: callers hand over a table they
+        // have already edited, so a renamed column would not be found there and the SELECT would
+        // silently copy nothing (or, worse, a bare identifier would read as a string literal).
+        //
+        // Columns are paired by ordinal, which is the mapping an in-place edit preserves: a rename
+        // keeps its position, a retype keeps it, a drop leaves the rest untouched, and an added
+        // column takes a fresh ordinal past every existing one. Pairing by name would lose a rename.
+        let live = self.columns_of(&table.name)?;
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for column in new_columns {
+            if let Some(old) = live.iter().find(|l| l.ordinal == column.ordinal) {
+                pairs.push((column.name.clone(), old.name.clone()));
+            }
+        }
+        let (dest, src): (Vec<String>, Vec<String>) = pairs.into_iter().unzip();
+        let col_list = dest
             .iter()
-            .filter(|c| table.column(&c.name).is_some())
-            .map(|c| c.name.clone())
-            .collect();
-        let col_list = shared
+            .map(|c| quote_ident(c, Dialect::Sqlite))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let src_list = src
             .iter()
             .map(|c| quote_ident(c, Dialect::Sqlite))
             .collect::<Vec<_>>()
@@ -617,7 +634,7 @@ impl Sqlite {
             nook_core::quote_qualified(None, &tmp, Dialect::Sqlite),
         ];
         script[2] = format!(
-            "INSERT INTO {tmp_q} ({col_list}) SELECT {col_list} FROM {orig};",
+            "INSERT INTO {tmp_q} ({col_list}) SELECT {src_list} FROM {orig};",
             tmp_q = script[2],
             orig = quote_ident(&table.name, Dialect::Sqlite)
         );

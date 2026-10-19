@@ -56,6 +56,30 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("schema.emptyDatabase", "Empty database", "Design", empty_database)
             .params(r#"{"confirm":true}"#)
             .help("Drop every user table in the connected database. Asks for confirm:true."),
+        CommandSpec::new("schema.createPartition", "Create partition", "Design", create_partition)
+            .params(r#"{"parent":"events","name":"events_2026_11","from":"2026-11-01","to":"2026-12-01"}"#)
+            .help(
+                "Range-by-date only: Postgres CREATE TABLE … PARTITION OF, MySQL ALTER TABLE … \
+                 ADD PARTITION. The bounds are date literals, never free SQL.",
+            ),
+        CommandSpec::new("schema.dropPartition", "Drop partition", "Design", drop_partition)
+            .params(r#"{"parent":"events","name":"events_2026_11","confirm":true}"#)
+            .help("Drops one partition; the rows it held go with it, so it needs \"confirm\"."),
+        CommandSpec::new("schema.partitions", "Partitions", "Design", partitions)
+            .params(r#"{"table":"events"}"#)
+            .help(
+                "A partitioned table's partitions with their bounds and row estimates; an \
+                 unpartitioned table answers an empty list rather than an error.",
+            ),
+        CommandSpec::new("schema.tableRebuild", "Rebuild a table", "Design", table_rebuild)
+            .params(
+                r#"{"table":"users","changes":{"rename":{"email":"mail"},"drop":["legacy"]},"confirm":true}"#,
+            )
+            .help(
+                "SQLite only: rebuilds the table from a *diff* of its live columns, so a column the \
+                 caller does not name is carried over instead of dropped. Inside an open \
+                 transaction it refuses.",
+            ),
         CommandSpec::new("schema.triggerEditor", "Trigger editor", "Design", trigger_editor)
             .params(r#"{"action":"create","table":"users","name":"audit_email","timing":"AFTER","event":"INSERT","body":"UPDATE users SET email = lower(email);"}"#)
             .help("list/create/drop via \"action\"; create builds the CREATE TRIGGER per dialect."),
@@ -386,6 +410,471 @@ fn set_primary_key(session: &mut Session, p: &Params) -> Result<serde_json::Valu
     execute_ddl(session, index, &[sql])
 }
 
+fn partitions(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let (index, reference, _) = table_from_params(session, p)?;
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .ok_or_else(|| Error::config("the connection is not open"))?;
+    // The bounds are read from the server's own catalog rather than from a parsed DDL string: a
+    // partition bound is an expression (`FOR VALUES FROM ('2026-11-01') TO ('2026-12-01')`), and
+    // re-parsing text to recover what the server already models would be a second implementation.
+    let (sql, kind) = match dialect {
+        Dialect::Postgres => (
+            format!(
+                "SELECT c.relname, pg_get_expr(c.relpartbound, c.oid), \
+                        (SELECT reltuples::bigint FROM pg_class p WHERE p.oid = c.oid) \
+                 FROM pg_class c JOIN pg_inherits i ON i.inhrelid = c.oid \
+                 JOIN pg_class parent ON parent.oid = i.inhparent \
+                 JOIN pg_namespace n ON n.oid = parent.relnamespace \
+                 WHERE parent.relname = {name} AND parent.relkind = 'p' \
+                 ORDER BY c.relname",
+                name = quote_literal(&reference.table)
+            ),
+            "parent is not partitioned",
+        ),
+        Dialect::MySql => (
+            format!(
+                "SELECT PARTITION_NAME, PARTITION_DESCRIPTION, TABLE_ROWS \
+                 FROM information_schema.PARTITIONS \
+                 WHERE TABLE_SCHEMA = COALESCE({schema}, DATABASE()) AND TABLE_NAME = {name} \
+                   AND PARTITION_NAME IS NOT NULL \
+                 ORDER BY PARTITION_ORDINAL_POSITION",
+                schema = reference
+                    .schema
+                    .as_deref()
+                    .map(quote_literal)
+                    .unwrap_or_else(|| "NULL".into()),
+                name = quote_literal(&reference.table)
+            ),
+            "not a partitioned table",
+        ),
+        Dialect::Sqlite => (
+            String::new(),
+            "SQLite has no partitions; a partition is a table of its own",
+        ),
+    };
+    if sql.is_empty() {
+        return Ok(json!({
+            "table": reference.key(),
+            "partitioned": false,
+            "partitions": [],
+            "note": kind,
+        }));
+    }
+    let rs = run_sql(session, index, &sql, Some(1000))?;
+    let items: Vec<serde_json::Value> = rs
+        .rows
+        .iter()
+        .map(|row| {
+            json!({
+                "name": row.first().map(|v| v.as_text()).unwrap_or_default(),
+                "bound": row.get(1).map(|v| v.as_text()),
+                "rows": row.get(2).and_then(|v| match v {
+                    nook_core::Value::Int(n) => Some(*n),
+                    nook_core::Value::UInt(n) => i64::try_from(*n).ok(),
+                    _ => None,
+                }),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "table": reference.key(),
+        "partitioned": !items.is_empty(),
+        "partitions": items,
+        "note": if items.is_empty() { kind } else { "" },
+    }))
+}
+
+fn create_partition(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let parent = p.str_arg("parent")?;
+    let name = p.str_arg("name")?;
+    let from = p.str_arg("from")?;
+    let to = p.str_arg("to")?;
+    // Range partitions only, and the bounds are dates: free SQL in a partition bound would be a
+    // query editor wearing a dialog's clothes.
+    // Shape alone is not a date: `2026-13-01` has the right bytes and no such month, and the server
+    // would reject it after the dialog already closed. The month/day ranges are checked here.
+    let date = |s: &str| -> Result<String> {
+        let bytes = s.as_bytes();
+        let shaped = s.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-';
+        let number = |range: std::ops::Range<usize>| -> Option<u32> {
+            s.get(range).and_then(|part| part.parse().ok())
+        };
+        let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+        let valid = match (shaped, year, month, day) {
+            (true, Some(_), Some(m), Some(d)) => {
+                (1..=12).contains(&m) && (1..=31).contains(&d)
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(Error::config(format!(
+                "'{s}' is not a date; use YYYY-MM-DD with a real month and day"
+            )));
+        }
+        Ok(s.to_string())
+    };
+    let (from, to) = (date(&from)?, date(&to)?);
+    if from >= to {
+        return Err(Error::config(format!(
+            "the range is empty: from '{from}' is not before to '{to}'"
+        )));
+    }
+    let index = session.resolve_conn(p)?;
+    let reference = TableRef::parse(&parent);
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .ok_or_else(|| Error::config("the connection is not open"))?;
+    let parent_q = quote_qualified(reference.schema.as_deref(), &reference.table, dialect);
+    let sql = match dialect {
+        Dialect::Postgres => format!(
+            "CREATE TABLE {child} PARTITION OF {parent_q} FOR VALUES FROM ('{from}') TO ('{to}');",
+            child = quote_qualified(reference.schema.as_deref(), &name, dialect),
+        ),
+        Dialect::MySql => format!(
+            "ALTER TABLE {parent_q} ADD PARTITION (PARTITION {part} VALUES LESS THAN ('{to}'));",
+            part = quote_ident(&name, dialect),
+        ),
+        Dialect::Sqlite => {
+            return Err(Error::unsupported(
+                "SQLite has no partitions; a partition is a table of its own",
+            ))
+        }
+    };
+    let out = execute_ddl(session, index, &[sql])?;
+    Ok(json!({
+        "parent": parent,
+        "name": name,
+        "from": from,
+        "to": to,
+        "statements": out["statements"],
+    }))
+}
+
+fn drop_partition(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    require_confirm(session, p, "drop a partition")?;
+    let parent = p.str_arg("parent")?;
+    let name = p.str_arg("name")?;
+    let index = session.resolve_conn(p)?;
+    let reference = TableRef::parse(&parent);
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .ok_or_else(|| Error::config("the connection is not open"))?;
+    let sql = match dialect {
+        Dialect::Postgres => format!(
+            "DROP TABLE {};",
+            quote_qualified(reference.schema.as_deref(), &name, dialect)
+        ),
+        Dialect::MySql => format!(
+            "ALTER TABLE {} DROP PARTITION {};",
+            quote_qualified(reference.schema.as_deref(), &reference.table, dialect),
+            quote_ident(&name, dialect)
+        ),
+        Dialect::Sqlite => {
+            return Err(Error::unsupported(
+                "SQLite has no partitions; drop the table instead",
+            ))
+        }
+    };
+    let out = execute_ddl(session, index, &[sql])?;
+    Ok(json!({
+        "parent": parent,
+        "name": name,
+        "statements": out["statements"],
+    }))
+}
+
+/// A single-quoted SQL literal. The catalog queries interpolate names, so this is a trust boundary:
+/// a doubled quote is the only escape SQL has.
+fn quote_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn table_rebuild(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let (index, reference, mut table) = table_from_params(session, p)?;
+    let dialect = session
+        .conns
+        .get(index)
+        .and_then(|c| c.driver.as_ref())
+        .map(|d| d.dialect())
+        .ok_or_else(|| Error::config("the connection is not open"))?;
+    if dialect != Dialect::Sqlite {
+        return Err(Error::unsupported(format!(
+            "{} alters in place; a table rebuild is SQLite's workaround for DDL it cannot ALTER",
+            dialect_name(dialect)
+        )));
+    }
+    let changes = p
+        .get("changes")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            Error::config(
+                r#"pass "changes" — a diff, not a column list: a full list is how a column gets dropped by omission"#,
+            )
+        })?;
+    let before: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
+    apply_changes(&mut table, changes)?;
+    if table.columns.is_empty() {
+        return Err(Error::config(
+            "the changes would leave the table with no columns",
+        ));
+    }
+    // The rows have to survive a destructive rebuild, so the count is compared across it. A change
+    // that silently truncates is the failure this command exists to make impossible.
+    let rows_before = count_rows(session, index, reference.schema.as_deref(), &reference.table)?;
+    let outcome = rebuild(session, index, reference.schema.as_deref(), &table)?;
+    let rows_after = count_rows(session, index, reference.schema.as_deref(), &reference.table)?;
+    // The catalog is the proof, not a second implementation: every index, trigger and foreign key
+    // the table had must still be there under the same name. One the plan could not replay is named
+    // rather than silently missing.
+    let after = session.table_of(index, reference.schema.as_deref(), &reference.table)?;
+    let mut lost: Vec<String> = Vec::new();
+    for before in &table.indexes {
+        if !after.indexes.iter().any(|i| i.name == before.name) {
+            lost.push(format!("index {}", before.name));
+        }
+    }
+    for fk in &table.foreign_keys {
+        let same = after
+            .foreign_keys
+            .iter()
+            .any(|a| a.columns == fk.columns && a.ref_table == fk.ref_table);
+        if !same {
+            lost.push(format!("foreign key on {}", fk.columns.join(", ")));
+        }
+    }
+    // Triggers live on the schema in the catalog, not on the table. A rebuild that dropped one is
+    // the loss nobody sees until the audit trail goes quiet, so it is checked by name.
+    let triggers_before: Vec<String> = session
+        .conns
+        .get(index)
+        .and_then(|c| c.catalog.as_ref())
+        .map(|catalog| {
+            catalog
+                .schemas
+                .iter()
+                .flat_map(|s| &s.triggers)
+                .filter(|t| t.table == reference.table)
+                .map(|t| t.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !lost.is_empty() {
+        return Err(Error::config(format!(
+            "the rebuild could not replay {}; the table was rebuilt, so recreate {} now",
+            lost.join(", "),
+            if lost.len() == 1 { "it" } else { "them" }
+        )));
+    }
+    Ok(json!({
+        "table": reference.key(),
+        "before": before,
+        "after": after.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        "rows_before": rows_before,
+        "rows_after": rows_after,
+        "lost": lost,
+        "triggers_seen": triggers_before,
+        "rebuilt": true,
+        "statements": outcome["statements"],
+    }))
+}
+
+/// Apply a `changes` diff to `table` in place: `rename`, `retype`, `nullable`, `default`, `drop`,
+/// `add`. Every key is optional and unknown keys are refused, so a typo cannot silently do nothing.
+fn apply_changes(table: &mut Table, changes: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    for (key, value) in changes {
+        match key.as_str() {
+            "rename" => {
+                let map = value
+                    .as_object()
+                    .ok_or_else(|| Error::config(r#""rename" takes {"old":"new"}"#))?;
+                for (old, new) in map {
+                    let new = new
+                        .as_str()
+                        .ok_or_else(|| Error::config(r#""rename" maps a name to a name"#))?;
+                    let column = table
+                        .column_mut(old)
+                        .ok_or_else(|| Error::not_found(format!("no column '{old}'")))?;
+                    column.name = new.to_string();
+                }
+            }
+            "retype" => {
+                let map = value
+                    .as_object()
+                    .ok_or_else(|| Error::config(r#""retype" takes {"column":"TYPE"}"#))?;
+                for (name, ty) in map {
+                    let ty = ty
+                        .as_str()
+                        .ok_or_else(|| Error::config(r#""retype" maps a name to a type"#))?;
+                    let column = table
+                        .column_mut(name)
+                        .ok_or_else(|| Error::not_found(format!("no column '{name}'")))?;
+                    column.type_name = ty.to_string();
+                }
+            }
+            "nullable" => {
+                let map = value
+                    .as_object()
+                    .ok_or_else(|| Error::config(r#""nullable" takes {"column":true}"#))?;
+                for (name, on) in map {
+                    let on = on
+                        .as_bool()
+                        .ok_or_else(|| Error::config(r#""nullable" maps a name to a bool"#))?;
+                    let column = table
+                        .column_mut(name)
+                        .ok_or_else(|| Error::not_found(format!("no column '{name}'")))?;
+                    column.nullable = on;
+                }
+            }
+            "default" => {
+                let map = value
+                    .as_object()
+                    .ok_or_else(|| Error::config(r#""default" takes {"column":"expr"}"#))?;
+                for (name, expr) in map {
+                    let column = table
+                        .column_mut(name)
+                        .ok_or_else(|| Error::not_found(format!("no column '{name}'")))?;
+                    column.default = match expr {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        other => Some(other.to_string()),
+                    };
+                }
+            }
+            "drop" => {
+                let names = value
+                    .as_array()
+                    .ok_or_else(|| Error::config(r#""drop" takes ["column", …]"#))?;
+                for name in names {
+                    let name = name
+                        .as_str()
+                        .ok_or_else(|| Error::config(r#""drop" takes column names"#))?;
+                    let before = table.columns.len();
+                    table.columns.retain(|c| c.name != name);
+                    if table.columns.len() == before {
+                        return Err(Error::not_found(format!("no column '{name}'")));
+                    }
+                }
+            }
+            "add" => {
+                let list = value
+                    .as_array()
+                    .ok_or_else(|| Error::config(r#""add" takes [{"name":…,"type":…}]"#))?;
+                for entry in list {
+                    let name = entry
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| Error::config(r#"an "add" entry needs "name""#))?;
+                    let ty = entry
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| Error::config(r#"an "add" entry needs "type""#))?;
+                    if table.columns.iter().any(|c| c.name == name) {
+                        return Err(Error::config(format!("column '{name}' already exists")));
+                    }
+                    let mut column = nook_model::Column::new(name, ty);
+                    column.nullable = entry
+                        .get("nullable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    // Past every existing ordinal, not `len + 1`: after a drop, `len + 1` can equal
+                    // a live column's ordinal and the rebuild would copy that column's data into
+                    // the new one.
+                    column.ordinal = table
+                        .columns
+                        .iter()
+                        .map(|c| c.ordinal)
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
+                    table.columns.push(column);
+                }
+            }
+            other => {
+                return Err(Error::config(format!(
+                    "unknown change '{other}'; use rename, retype, nullable, default, drop or add"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every foreign key that points at `table` but names a column `columns` no longer has.
+///
+/// Read from `sqlite_master` and `PRAGMA foreign_key_list`, because the catalog is the server's own
+/// record of the reference: a rebuild that changed a name has to be checked against what the other
+/// tables still say, not against what the caller intended.
+fn dangling_references(
+    session: &mut Session,
+    index: usize,
+    table: &str,
+    columns: &[nook_model::Column],
+) -> Result<Vec<String>> {
+    let children = run_sql(
+        session,
+        index,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        Some(10_000),
+    )?;
+    let mut dangling = Vec::new();
+    for row in &children.rows {
+        let child = row.first().map(|v| v.as_text()).unwrap_or_default();
+        if child.is_empty() || child.eq_ignore_ascii_case(table) {
+            continue;
+        }
+        let fks = run_sql(
+            session,
+            index,
+            &format!("PRAGMA foreign_key_list({})", quote_ident(&child, Dialect::Sqlite)),
+            Some(1000),
+        )?;
+        for fk in &fks.rows {
+            let parent = fk.get(2).map(|v| v.as_text()).unwrap_or_default();
+            if !parent.eq_ignore_ascii_case(table) {
+                continue;
+            }
+            // A null `to` means "the parent's primary key", which this check cannot name; it is left
+            // to `foreign_key_check`, which does resolve it.
+            let to = match fk.get(4) {
+                Some(v) if !v.is_null() => v.as_text(),
+                _ => continue,
+            };
+            if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(&to)) {
+                let from = fk.get(3).map(|v| v.as_text()).unwrap_or_default();
+                dangling.push(format!("{child}.{from} -> {table}.{to}"));
+            }
+        }
+    }
+    Ok(dangling)
+}
+
+/// `COUNT(*)` for a table, so a rebuild can prove it kept its rows.
+fn count_rows(
+    session: &mut Session,
+    index: usize,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<i64> {
+    let qualified = quote_qualified(schema, table, session.driver_for(index)?.dialect());
+    let rs = run_sql(session, index, &format!("SELECT COUNT(*) FROM {qualified}"), Some(1))?;
+    Ok(rs
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .map(|v| v.as_text().parse().unwrap_or(0))
+        .unwrap_or(0))
+}
+
 /// Run a SQLite table rebuild for `table`'s current columns, atomically.
 ///
 /// One implementation for every caller: `set_primary_key` and `schema.tableRebuild` both hand the
@@ -441,6 +930,65 @@ fn rebuild(
                 return Err(e);
             }
         }
+        // A child table that still names a column this rebuild renamed is the loss SQLite will not
+        // report: `foreign_key_check` skips a parent key it cannot resolve, so the database looks
+        // healthy while every insert into the child now fails. Resolving the references here is the
+        // only place that can see it.
+        let dangling = dangling_references(session, index, &table.name, &table.columns)?;
+        if !dangling.is_empty() {
+            let _ = session.driver_for(index)?.rollback();
+            return Err(Error::config(format!(
+                "the rebuild would leave {} dangling ({}); nothing was changed",
+                if dangling.len() == 1 { "a reference" } else { "references" },
+                dangling.join(", ")
+            )));
+        }
+        // Inside the transaction, because the only useful answer to "this rebuild would orphan rows"
+        // is to put the rows back. `foreign_keys` is OFF for the copy, so the check is what proves the
+        // result is still coherent.
+        // Scoped to this table: an unrelated legacy orphan elsewhere in the database is not this
+        // rebuild's business, and refusing every rebuild because of one would make the command
+        // unusable on any database that has ever had a constraint disabled.
+        let check = run_sql(
+            session,
+            index,
+            &format!(
+                "PRAGMA foreign_key_check({})",
+                quote_ident(&table.name, Dialect::Sqlite)
+            ),
+            Some(50),
+        );
+        let orphans = match check {
+            Ok(rs) => rs,
+            Err(e) => {
+                // A mismatch — a child still naming a column this rebuild renamed — surfaces as an
+                // error, not a row, and must also put the table back.
+                let _ = session.driver_for(index)?.rollback();
+                return Err(Error::config(format!(
+                    "the rebuild would leave a reference dangling ({e}); nothing was changed"
+                )));
+            }
+        };
+        if !orphans.rows.is_empty() {
+            let _ = session.driver_for(index)?.rollback();
+            let rows: Vec<String> = orphans
+                .rows
+                .iter()
+                .take(10)
+                .map(|r| {
+                    format!(
+                        "{}.{}",
+                        r.first().map(|v| v.as_text()).unwrap_or_default(),
+                        r.get(1).map(|v| v.as_text()).unwrap_or_default()
+                    )
+                })
+                .collect();
+            return Err(Error::config(format!(
+                "the rebuild would orphan {} row(s) ({}); nothing was changed",
+                orphans.rows.len(),
+                rows.join(", ")
+            )));
+        }
         session.driver_for(index)?.commit()
     })();
     for sql in &post {
@@ -492,7 +1040,7 @@ fn rename_column(session: &mut Session, p: &Params) -> Result<serde_json::Value>
 }
 
 fn change_type(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
-    let (index, reference, _) = table_from_params(session, p)?;
+    let (index, reference, mut table) = table_from_params(session, p)?;
     let column = p.str_arg("column")?;
     let new_type = p.str_arg("type")?;
     let dialect = session
@@ -501,6 +1049,15 @@ fn change_type(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         .and_then(|c| c.driver.as_ref())
         .map(|d| d.dialect())
         .ok_or_else(|| Error::config("the connection is not open"))?;
+    // SQLite has no in-place type change, but it does have a rebuild. Refusing here is what made
+    // the designer unable to edit a field's type at all.
+    if dialect == Dialect::Sqlite {
+        let target = table
+            .column_mut(&column)
+            .ok_or_else(|| Error::not_found(format!("no column '{column}'")))?;
+        target.type_name = new_type;
+        return rebuild(session, index, reference.schema.as_deref(), &table);
+    }
     let sql = ddl::alter_column_type(
         reference.schema.as_deref(),
         &reference.table,
@@ -512,7 +1069,7 @@ fn change_type(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
 }
 
 fn set_nullable(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
-    let (index, reference, table) = table_from_params(session, p)?;
+    let (index, reference, mut table) = table_from_params(session, p)?;
     let column_name = p.str_arg("column")?;
     let nullable = p.bool_opt("nullable", true);
     let column = table
@@ -525,6 +1082,12 @@ fn set_nullable(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
         .and_then(|c| c.driver.as_ref())
         .map(|d| d.dialect())
         .ok_or_else(|| Error::config("the connection is not open"))?;
+    if dialect == Dialect::Sqlite {
+        if let Some(target) = table.column_mut(&column_name) {
+            target.nullable = nullable;
+        }
+        return rebuild(session, index, reference.schema.as_deref(), &table);
+    }
     let sql = ddl::set_nullable(
         reference.schema.as_deref(),
         &reference.table,
@@ -537,7 +1100,7 @@ fn set_nullable(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
 }
 
 fn set_default(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
-    let (index, reference, _) = table_from_params(session, p)?;
+    let (index, reference, mut table) = table_from_params(session, p)?;
     let column = p.str_arg("column")?;
     let default = p.str_opt("default");
     let dialect = session
@@ -546,6 +1109,13 @@ fn set_default(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
         .and_then(|c| c.driver.as_ref())
         .map(|d| d.dialect())
         .ok_or_else(|| Error::config("the connection is not open"))?;
+    if dialect == Dialect::Sqlite {
+        table
+            .column_mut(&column)
+            .ok_or_else(|| Error::not_found(format!("no column '{column}'")))?
+            .default = default;
+        return rebuild(session, index, reference.schema.as_deref(), &table);
+    }
     let sql = ddl::set_default(
         reference.schema.as_deref(),
         &reference.table,
