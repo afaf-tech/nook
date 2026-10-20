@@ -89,30 +89,39 @@ SQL Server, Oracle, MongoDB and Redis are in the catalog with no driver. The `Dr
 seam: a new module plus introspection queries. (`conn.sqlserver`, `conn.oracle`, `conn.mongodb`,
 `conn.redis`)
 
-## 10. Report designer and BI dashboard
+## 10. ~~Report designer and BI dashboard~~ — done
 
-Charts are live views over a query. A saved report with a layout, and a dashboard that shows several
-of them at once, is a different feature. (`report.designer`, `report.biDashboard`)
+`report.designer` saves a report with its chart kind, sql, label and tile layout; `report.biDashboard`
+lays several out on one board and `report.export` writes the board as one self-contained html file.
 
-## 11. Compressed and encrypted backups
+## 11. ~~Compressed and encrypted backups~~ — done
 
-The vendor tools write plain files. `gzip` plus an age or GPG wrapper is the shape. (`backup.compression`,
-`backup.encryption`)
+`backup.compression` pipes the dump through gzip; `backup.encryption` through age. `backup.local` copies
+the finished file to a second location and prunes older copies.
 
 ## 12. Smaller, sharper items
 
-- Copy a view definition when synchronizing structures (`diff` reports views as manual today).
-- Bi-directional and rule-based sync (`sync.bidirectional`, `sync.conflictRules`).
-- Blob editing: text and hex editors for `bytea`/`blob` columns (`grid.blobEditor`).
-- Parameterised queries from the editor (`sql.parameterised`).
-- An HTTP tunnel for locked-down networks (`conn.httpTunnel`). SSH-by-password is built
-  (`conn.sshPassword`); it needs the login keychain, and `docs/architecture.md` records what happens
-  without one.
-- Data profiling and a data dictionary export (`tools.dataProfiling`, `tools.dataDictionary`).
-- Localisation (`platform.i18n`), Windows and Linux builds (`platform.windows`, `platform.linux`).
+Still open:
+
+- An HTTP tunnel for locked-down networks (`conn.httpTunnel`).
+- Windows and Linux builds (`platform.windows`, `platform.linux`). The keychain work in phase 9 gives
+  Linux a `secret-tool` backend, but no build is produced or tested for either platform.
+- A modelled-layout editor: move boxes by hand, save and load a model file (`diagram.manualLayout`).
+  Loading a model exists (`diagram.modelFile`); dragging boxes does not.
 - Cloud and team features: shared query library, synced settings (`cloud.*`).
-- A modelled-layout editor: move boxes by hand, save and load a model file (`diagram.manualLayout`,
-  `diagram.modelFile`).
+
+Shipped since this list was written — struck through rather than deleted, so the record of what was
+planned stays readable:
+
+- ~~Copy a view definition when synchronizing structures~~
+- ~~Bi-directional and rule-based sync (`sync.bidirectional`, `sync.conflictRules`)~~
+- ~~Blob editing (`grid.blobEditor`)~~
+- ~~Parameterised queries from the editor (`sql.parameterised`)~~
+- ~~Data profiling (`tools.dataProfiling`)~~
+- ~~Localisation (`platform.i18n`)~~
+- ~~SSH-by-password (`conn.sshPassword`)~~ — and the "needs the login keychain" note it carried is gone:
+  macOS uses `security`, Linux `secret-tool`, and Windows has no keychain so the profile keeps the
+  password.
 
 ## Known quality ceilings, not gaps
 

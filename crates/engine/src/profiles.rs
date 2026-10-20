@@ -399,7 +399,8 @@ pub fn keychain_store(id: &str, secret: &str) -> Result<()> {
             "Windows can write a credential with cmdkey but cannot read the password back, so it is \
              not used as a keychain; keep the password in the profile file instead"
         } else {
-            "keychain storage is macOS only; keep the password in the profile file (mode 0600) instead"
+            "no keychain here: macOS and linux have one, other systems do not; keep the password in \
+             the profile file (mode 0600) instead"
         }));
     }
     if cfg!(target_os = "linux") {

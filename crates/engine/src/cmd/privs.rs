@@ -107,8 +107,11 @@ fn roles(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
                  ORDER BY r.rolname, m.rolname"
             }
             _ => {
-                "SELECT TO_ROLE AS role, FROM_USER AS member, WITH_ADMIN_OPTION AS admin_option \
-                 FROM mysql.role_edges ORDER BY TO_ROLE, FROM_USER"
+                // `mysql.role_edges` has no `TO_ROLE`: it is (FROM_USER, FROM_HOST) → (TO_USER,
+                 // TO_HOST), so the role is the FROM side and the member is the TO side. Naming the
+                 // columns backwards made MySQL 8.4 answer `Unknown column 'TO_ROLE'`.
+                "SELECT FROM_USER AS role, TO_USER AS member, WITH_ADMIN_OPTION AS admin_option \
+                 FROM mysql.role_edges ORDER BY FROM_USER, TO_USER"
             }
         };
         let result = crate::cmd::run_sql(session, index, sql, None)?;
@@ -201,20 +204,32 @@ fn audit(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             schema.replace('\'', "''")
         ),
         // MySQL 8 has `mysql.role_edges`, so the `via` column is answerable there too. On 5.7 the
-        // table does not exist and the join is empty, which reads as "nothing came through a role" —
-        // true on a server that has no roles.
+        // table does not exist and the union's second arm is empty, which reads as "nothing came
+        // through a role" — true on a server that has no roles.
+        //
+        // `TABLE_PRIVILEGES.GRANTEE` is `'alice'@'%'`, while `role_edges` holds bare names, so the
+        // account has to be unwrapped before it can be matched. A grant made to a *role* is not the
+        // role holder's grant: it has to be re-attributed to every account the role reaches, which is
+        // the union's second arm. Joining on the grantee alone labelled the role's own row as
+        // inherited and hid the holder entirely.
         _ => format!(
-            "SELECT p.TABLE_NAME AS object, p.GRANTEE AS principal, p.PRIVILEGE_TYPE AS privilege, \
-                    CASE \
-                      WHEN p.GRANTEE = 'PUBLIC' THEN 'public' \
-                      WHEN re.TO_ROLE IS NOT NULL THEN CONCAT('role:', re.TO_ROLE) \
-                      ELSE 'direct' \
-                    END AS via \
-             FROM information_schema.TABLE_PRIVILEGES p \
-             LEFT JOIN mysql.role_edges re ON re.FROM_USER = p.GRANTEE \
-             WHERE p.TABLE_SCHEMA = '{}' \
-             ORDER BY p.TABLE_NAME, principal, privilege",
-            schema.replace('\'', "''")
+            "SELECT object, principal, privilege, via FROM ( \
+               SELECT p.TABLE_NAME AS object, \
+                      REPLACE(SUBSTRING_INDEX(p.GRANTEE,'@',1),CHAR(39),'') AS principal, \
+                      p.PRIVILEGE_TYPE AS privilege, 'direct' AS via \
+               FROM information_schema.TABLE_PRIVILEGES p \
+               WHERE p.TABLE_SCHEMA = '{schema}' \
+                 AND REPLACE(SUBSTRING_INDEX(p.GRANTEE,'@',1),CHAR(39),'') NOT IN \
+                     (SELECT FROM_USER FROM mysql.role_edges) \
+               UNION ALL \
+               SELECT p.TABLE_NAME AS object, re.TO_USER AS principal, \
+                      p.PRIVILEGE_TYPE AS privilege, CONCAT('role:', re.FROM_USER) AS via \
+               FROM information_schema.TABLE_PRIVILEGES p \
+               JOIN mysql.role_edges re \
+                 ON re.FROM_USER = REPLACE(SUBSTRING_INDEX(p.GRANTEE,'@',1),CHAR(39),'') \
+               WHERE p.TABLE_SCHEMA = '{schema}' \
+             ) x ORDER BY object, principal, privilege",
+            schema = schema.replace('\'', "''")
         ),
     };
     let result = crate::cmd::run_sql(session, index, &sql, None)?;

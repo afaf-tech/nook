@@ -35,7 +35,7 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("conn.serverInfo", "Server information", "Connection", server_info),
         CommandSpec::new("conn.savePassword", "Save password in the keychain", "Connection", save_password)
             .params(r#"{"password":"…"}"#)
-            .help("Stored in the OS keychain, never in the profile file. Where no keychain answers, the profile keeps it at mode 0600."),
+            .help("Stored in the OS keychain, never in the profile file. Where no keychain answers, the profile keeps it, mode 0600 on unix."),
         CommandSpec::new("conn.forgetPassword", "Remove the saved password", "Connection", forget_password),
         CommandSpec::new("conn.sshPassword", "SSH password in the keychain", "Connection", ssh_password)
             .params(r#"{"password":"…"}"#)
@@ -207,8 +207,17 @@ fn new_conn(session: &mut Session, p: &crate::Params) -> Result<serde_json::Valu
     }
     let id = cfg.id.clone();
     session.profiles.upsert(cfg.clone())?;
-    if session.conn_index(&id).is_err() {
-        session.conns.push(Conn::new(cfg.clone()));
+    // Saving over an existing profile must also replace the in-memory config: otherwise a changed
+    // host or port is written to disk and the open/close path keeps dialling the old one, which
+    // reports a connect failure to a server the profile no longer names.
+    match session.conn_index(&id) {
+        Ok(index) => {
+            let conn = session.conn_mut(index)?;
+            if !conn.is_open() {
+                conn.cfg = cfg.clone();
+            }
+        }
+        Err(_) => session.conns.push(Conn::new(cfg.clone())),
     }
     // Passwords belong in the keychain, never in the profile file.
     if let Some(password) = &cfg.password {
@@ -606,6 +615,34 @@ mod tests {
         assert_eq!(unique_id(&session, "shop-100"), "shop-100-3");
         // A free base is taken as it is.
         assert_eq!(unique_id(&session, "shop-101"), "shop-101");
+    }
+
+    #[test]
+    fn saving_over_a_profile_replaces_the_config_the_connection_holds() {
+        // Saving a profile twice with different hosts is how a user fixes a typo or moves a server.
+        // The second save wrote the file but left `Conn.cfg` at the first host, so `conn.open` then
+        // dialled an address the profile no longer named.
+        let _guard = crate::test_support::scratch_config();
+        let mut session = Session::new();
+        let first = Params::from_json(json!({
+            "name": "moving", "kind": "mysql", "host": "127.0.0.1", "port": 3306,
+            "user": "root", "database": "shop"
+        }))
+        .expect("params");
+        new_conn(&mut session, &first).expect("first save");
+        let second = Params::from_json(json!({
+            "name": "moving", "kind": "mysql", "host": "127.0.0.1", "port": 3311,
+            "user": "root", "database": "shop"
+        }))
+        .expect("params");
+        new_conn(&mut session, &second).expect("second save");
+
+        let index = session.conn_index("moving").expect("one connection");
+        assert_eq!(
+            session.conns[index].cfg.port, 3311,
+            "the in-memory config still dials the old port"
+        );
+        assert_eq!(session.conns.len(), 1, "the second save added a second connection");
     }
 
     #[test]

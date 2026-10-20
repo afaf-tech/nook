@@ -67,8 +67,31 @@ impl JobKind {
             JobKind::Alerts => "alerts",
         }
     }
+    /// The name a caller types in `job.create`. Distinct from `label`, which is prose for the job
+    /// list: `parse` accepts both, but only this spelling is the documented one.
+    pub fn canonical(self) -> &'static str {
+        match self {
+            JobKind::Query => "query",
+            JobKind::Backup => "backup",
+            JobKind::Restore => "restore",
+            JobKind::Transfer => "transfer",
+            JobKind::SyncData => "sync_data",
+            JobKind::SyncStructure => "sync_structure",
+            JobKind::Datagen => "datagen",
+            JobKind::Report => "report",
+            JobKind::Alerts => "alerts",
+        }
+    }
     pub fn parse(s: &str) -> Option<JobKind> {
-        match s.to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
+        // The canonical spelling first, so adding a kind only needs `canonical` and `all`.
+        let normalised = s.to_ascii_lowercase().replace([' ', '-', '_'], "");
+        if let Some(kind) = JobKind::all()
+            .into_iter()
+            .find(|k| k.canonical().replace('_', "") == normalised)
+        {
+            return Some(kind);
+        }
+        match normalised.as_str() {
             "query" | "runquery" | "sql" => Some(JobKind::Query),
             "backup" | "dump" => Some(JobKind::Backup),
             "restore" => Some(JobKind::Restore),
@@ -568,20 +591,8 @@ mod tests {
             .find(|c| c.id == "job.create")
             .expect("job.create is registered")
             .help;
-        // The name a caller types, which is the enum's own snake_case name — not the label, which is
-        // prose ("run query") for the job list.
         for kind in JobKind::all() {
-            let name = match kind {
-                JobKind::Query => "query",
-                JobKind::Backup => "backup",
-                JobKind::Restore => "restore",
-                JobKind::Transfer => "transfer",
-                JobKind::SyncData => "sync_data",
-                JobKind::SyncStructure => "sync_structure",
-                JobKind::Datagen => "datagen",
-                JobKind::Report => "report",
-                JobKind::Alerts => "alerts",
-            };
+            let name = kind.canonical();
             assert!(
                 help.contains(name),
                 "job.create's help does not mention {name:?}: {help}"

@@ -89,7 +89,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Connection",
         "conn.savePassword",
         "Save password",
-        "the OS keychain: security on macOS, secret-tool on linux; windows keeps the profile at 0600",
+        "the OS keychain: security on macOS, secret-tool on linux; windows has none, so the profile keeps it",
     ),
     (
         "Connection",
