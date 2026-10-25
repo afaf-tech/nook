@@ -540,6 +540,7 @@ exit {status}
         drop(guard);
     }
 
+    #[cfg(unix)]
     fn read(dir: &Path, name: &str) -> String {
         std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
     }
