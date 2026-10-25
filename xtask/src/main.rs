@@ -115,8 +115,11 @@ fn parity() -> i32 {
 fn parity_check() -> i32 {
     let markdown = nook_engine::parity::measure().markdown();
     let path = repo_root().join("docs/parity-checklist.md");
+    // Compare line-ending-insensitively: the file is written with `\n`, but a Windows checkout can
+    // hand it back with `\r\n`, and a stale checklist must mean stale content, not a git setting.
+    let normalise = |s: &str| s.replace("\r\n", "\n");
     match std::fs::read_to_string(&path) {
-        Ok(current) if current == markdown => {
+        Ok(current) if normalise(&current) == normalise(&markdown) => {
             println!("parity checklist is up to date");
             0
         }
