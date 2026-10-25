@@ -481,6 +481,7 @@ mod tests {
     /// it was handed, that file's mode and path, and its standard input, then answers `reply` on
     /// stdout and exits `status`. The keychain tests use the same trick — a script where the real
     /// binary would be — because the transport is what carries the key and nothing else can watch it.
+    #[cfg(unix)]
     fn fake_curl(dir: &Path, reply: &str, status: u8) -> PathBuf {
         let script = dir.join("curl");
         let text = format!(
@@ -519,6 +520,7 @@ exit {status}
 
     /// Run `f` with the fake in place of `curl`, and hand it the directory to read. `NOOK_CURL_BIN` is
     /// process-wide, so the lock is held for as long as `f` runs and the tests here do not overlap.
+    #[cfg(unix)]
     fn with_fake_curl(reply: &str, status: u8, f: impl FnOnce(&Path)) {
         static CURL_BIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = CURL_BIN.lock().unwrap_or_else(|e| e.into_inner());
