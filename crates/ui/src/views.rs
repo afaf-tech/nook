@@ -2554,7 +2554,8 @@ fn card(
     height
 }
 
-/// The start page: what this is, what to do first, and the measured feature coverage.
+/// The start page: what this is, what to do first, what this session holds, and what the catalog
+/// still lacks. It does not score the catalog — that number lives in `nook-cli parity`.
 pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
     let report = nook_engine::parity::measure();
     egui::ScrollArea::vertical()
