@@ -247,6 +247,12 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
     ("Data", "grid.formView", "Form view", ""),
     (
         "Data",
+        "grid.columnWidths",
+        "Column widths",
+        "user-dragged widths, persisted per table",
+    ),
+    (
+        "Data",
         "grid.blobEditor",
         "Text and hex editors for blobs",
         "bytes are shown and exported, not edited",

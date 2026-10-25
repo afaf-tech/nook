@@ -64,21 +64,19 @@ impl Change {
 /// `source` is what you want, `target` is what is there. Emitted DDL runs on `target`.
 ///
 /// Schemas are matched by name first. Cross-driver pairs (SQLite's `main` against MySQL's
-/// database name) never agree, so when a catalog has a single schema the lookup falls back to
-/// the bare table name — as a fallback only: a multi-schema catalog must keep matching by
-/// schema, or two same-named tables in different schemas would be compared against each other.
+/// database name) never agree, so the lookup falls back to the bare table name — but only when
+/// that name is unambiguous in the other catalog. Counting schemas instead would have been
+/// simpler and wrong in both directions: a MySQL connection now sees every database it can read,
+/// so `sqlite:app.db` against `mysql://…/alpha` would stop matching at all (spurious add + drop
+/// for every shared table), while two databases that really do both hold a `users` would be
+/// matched against whichever came first.
 pub fn diff(source: &Catalog, target: &Catalog, dialect: Dialect) -> Vec<Change> {
-    let loose = |cat: &Catalog| cat.schemas.len() <= 1;
     let mut out = Vec::new();
     for sc in &source.schemas {
         for table in &sc.tables {
-            let found = target.find_table(Some(&sc.name), &table.name).or_else(|| {
-                if loose(target) {
-                    target.find_table(None, &table.name)
-                } else {
-                    None
-                }
-            });
+            let found = target
+                .find_table(Some(&sc.name), &table.name)
+                .or_else(|| unique_by_name(target, &table.name));
             match found {
                 None if table.kind != crate::TableKind::Table => out.push(Change {
                     kind: ChangeKind::AddTable,
@@ -111,7 +109,7 @@ pub fn diff(source: &Catalog, target: &Catalog, dialect: Dialect) -> Vec<Change>
     for sc in &target.schemas {
         for table in &sc.tables {
             if source.find_table(Some(&sc.name), &table.name).is_none()
-                && !(loose(source) && source.find_table(None, &table.name).is_some())
+                && unique_by_name(source, &table.name).is_none()
             {
                 let is_table = table.kind == crate::TableKind::Table;
                 out.push(Change {
@@ -135,6 +133,27 @@ pub fn diff(source: &Catalog, target: &Catalog, dialect: Dialect) -> Vec<Change>
         }
     }
     out
+}
+
+/// The one table of this name across every schema, or `None` when there is none or more than one.
+///
+/// The cross-driver fallback needs the *name* to identify the table. When two schemas both hold a
+/// `users`, no name-only answer is right — picking the first would compare a table against an
+/// unrelated namesake and report changes that run against the wrong one.
+fn unique_by_name<'a>(cat: &'a Catalog, name: &str) -> Option<&'a Table> {
+    let mut found: Option<&Table> = None;
+    for schema in &cat.schemas {
+        for table in &schema.tables {
+            if table.name != name {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(table);
+        }
+    }
+    found
 }
 
 fn diff_table(table: &Table, existing: &Table, dialect: Dialect, out: &mut Vec<Change>) {
@@ -386,6 +405,66 @@ mod tests {
             t.schema = Some("stage".into());
         }
         assert!(diff(&source, &target, Dialect::MySql).is_empty());
+    }
+
+    #[test]
+    fn cross_driver_match_survives_a_multi_schema_target() {
+        // The MySQL driver exposes every database it can read, so a target catalog routinely has
+        // several schemas. Keying the bare-name fallback on "one schema" would stop matching the
+        // moment the connection sees a second database, and `sqlite:app.db` → `mysql://…/alpha`
+        // would report an add + drop for every table the two actually share.
+        let mut source = cat(vec![table(
+            "shared",
+            &[("id", "int", true), ("name", "text", false)],
+        )]);
+        source.schemas[0].name = "main".into();
+        source.schemas[0].tables[0].schema = Some("main".into());
+
+        let mut target = cat(vec![table(
+            "shared",
+            &[("id", "int", true), ("name", "text", false)],
+        )]);
+        target.schemas[0].name = "alpha".into();
+        target.schemas[0].tables[0].schema = Some("alpha".into());
+        target.schemas.push(Schema {
+            name: "beta".into(),
+            ..Default::default()
+        });
+
+        assert!(diff(&source, &target, Dialect::MySql).is_empty());
+    }
+
+    #[test]
+    fn ambiguous_bare_name_is_not_matched_across_schemas() {
+        // Two target schemas hold a `users`; the source schema name matches neither. Guessing
+        // would diff against an unrelated namesake, so the pair stays unmatched.
+        let mut source = cat(vec![table("users", &[("id", "int", true)])]);
+        source.schemas[0].name = "main".into();
+        source.schemas[0].tables[0].schema = Some("main".into());
+
+        let mut target = cat(vec![table("users", &[("id", "int", true)])]);
+        target.schemas[0].name = "alpha".into();
+        target.schemas[0].tables[0].schema = Some("alpha".into());
+        target.schemas.push(Schema {
+            name: "beta".into(),
+            tables: vec![table("users", &[("id", "int", true)])],
+            ..Default::default()
+        });
+        target.schemas[1].tables[0].schema = Some("beta".into());
+
+        let changes = diff(&source, &target, Dialect::MySql);
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|c| c.kind == ChangeKind::AddTable)
+                .count(),
+            1,
+            "the source table cannot be matched to one namesake: {changes:?}"
+        );
+        assert!(
+            !changes.iter().any(|c| c.destructive()),
+            "ambiguity must never produce a destructive statement: {changes:?}"
+        );
     }
 
     #[test]

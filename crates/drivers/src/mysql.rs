@@ -193,6 +193,37 @@ fn escape_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "''")
 }
 
+/// Schemas MySQL ships with. They show up in `SHOW DATABASES` and in
+/// `information_schema.tables`, but no user asked to see them in the tree unless
+/// they connected straight into one.
+const SYSTEM_DATABASES: &[&str] = &["information_schema", "performance_schema", "mysql", "sys"];
+
+/// The set of schemas the catalog should actually introspect.
+///
+/// The current database is always first — even when it is a system schema,
+/// because connecting to `mysql` means the user wants to see `mysql`. Other
+/// system schemas are dropped, duplicates are collapsed, and the remaining
+/// names keep their order from `all`. An empty `all` still yields `[current]`,
+/// so the `IN (...)` list the caller builds is never empty.
+fn visible_databases(all: &[String], current: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(all.len());
+    out.push(current.to_string());
+    for name in all {
+        if name == current {
+            continue;
+        }
+        if SYSTEM_DATABASES.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        if out.iter().any(|existing| existing == name) {
+            continue;
+        }
+        out.push(name.clone());
+    }
+    out
+}
+
+
 impl Driver for MySql {
     fn kind(&self) -> DriverKind {
         if self.cfg.kind == DriverKind::MariaDb {
@@ -368,109 +399,131 @@ impl Driver for MySql {
     fn catalog(&mut self) -> Result<Catalog> {
         let started = Instant::now();
         let db = self.database.clone();
-        let db_lit = escape_string(&db);
+        let all = self.databases().unwrap_or_default();
+        let names = visible_databases(&all, &db);
+        // `visible_databases` always returns at least `current`, so the IN list
+        // is never empty — but guard anyway, because `IN ()` is a syntax error.
+        let in_list = if names.is_empty() {
+            format!("'{}'", escape_string(&db))
+        } else {
+            names
+                .iter()
+                .map(|n| format!("'{}'", escape_string(n)))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         let mut catalog = Catalog {
             driver: self
                 .server_info()
                 .map(|i| i.version)
                 .unwrap_or_else(|_| "MySQL".into()),
             database: Some(db.clone()),
-            databases: self.databases().unwrap_or_default(),
-            schemas: vec![Schema {
-                name: db.clone(),
-                tables: vec![],
-                ..Default::default()
-            }],
+            databases: all,
+            schemas: names
+                .iter()
+                .map(|n| Schema {
+                    name: n.clone(),
+                    tables: vec![],
+                    ..Default::default()
+                })
+                .collect(),
             fetched_ms: 0,
         };
 
+        // table_schema is the first column so every row carries its own routing
+        // key; the old single-schema filter is replaced by IN (...) over the
+        // visible set.
         let tables = self.string_rows(&format!(
-            "SELECT table_name, table_type, COALESCE(engine, ''), COALESCE(table_rows, 0), \
-             COALESCE(table_comment, ''), COALESCE(data_length + index_length, 0) \
-             FROM information_schema.tables WHERE table_schema = '{db_lit}' ORDER BY table_name"
+            "SELECT table_schema, table_name, table_type, COALESCE(engine, ''), \
+             COALESCE(table_rows, 0), COALESCE(table_comment, ''), \
+             COALESCE(data_length + index_length, 0) \
+             FROM information_schema.tables WHERE table_schema IN ({in_list}) \
+             ORDER BY table_schema, table_name"
         ))?;
         for r in &tables {
-            if r.len() < 6 {
+            if r.len() < 7 {
                 continue;
             }
-            let kind = match r[1].as_str() {
+            let Some(schema) = catalog.schemas.iter_mut().find(|s| s.name == r[0]) else {
+                continue;
+            };
+            let kind = match r[2].as_str() {
                 "VIEW" => TableKind::View,
                 "SYSTEM VIEW" => TableKind::System,
                 _ => TableKind::Table,
             };
-            catalog.schemas[0].tables.push(Table {
-                schema: Some(db.clone()),
-                name: r[0].clone(),
+            schema.tables.push(Table {
+                schema: Some(r[0].clone()),
+                name: r[1].clone(),
                 kind,
-                row_estimate: r[3].parse::<i64>().ok(),
-                comment: r[4].clone(),
-                size_bytes: r[5].parse::<i64>().ok(),
+                row_estimate: r[4].parse::<i64>().ok(),
+                comment: r[5].clone(),
+                size_bytes: r[6].parse::<i64>().ok(),
                 ..Table::default()
             });
         }
 
         let columns = self.string_rows(&format!(
-            "SELECT table_name, column_name, ordinal_position, COALESCE(column_default, ''), \
-             is_nullable, column_type, column_key, extra, COALESCE(column_comment, ''), \
-             COALESCE(character_maximum_length, 0), COALESCE(numeric_precision, 0), \
-             COALESCE(numeric_scale, 0) \
-             FROM information_schema.columns WHERE table_schema = '{db_lit}' \
-             ORDER BY table_name, ordinal_position"
+            "SELECT table_schema, table_name, column_name, ordinal_position, \
+             COALESCE(column_default, ''), is_nullable, column_type, column_key, extra, \
+             COALESCE(column_comment, ''), COALESCE(character_maximum_length, 0), \
+             COALESCE(numeric_precision, 0), COALESCE(numeric_scale, 0) \
+             FROM information_schema.columns WHERE table_schema IN ({in_list}) \
+             ORDER BY table_schema, table_name, ordinal_position"
         ))?;
         for r in &columns {
-            if r.len() < 12 {
+            if r.len() < 13 {
                 continue;
             }
-            let Some(t) = catalog.schemas[0]
-                .tables
-                .iter_mut()
-                .find(|t| t.name == r[0])
-            else {
+            let Some(schema) = catalog.schemas.iter_mut().find(|s| s.name == r[0]) else {
+                continue;
+            };
+            let Some(t) = schema.tables.iter_mut().find(|t| t.name == r[1]) else {
                 continue;
             };
             t.columns.push(Column {
-                name: r[1].clone(),
-                type_name: r[5].clone(),
-                nullable: r[4].eq_ignore_ascii_case("YES"),
-                primary_key: r[6] == "PRI",
-                auto_increment: r[7].contains("auto_increment"),
-                default: if r[3].is_empty() {
+                name: r[2].clone(),
+                type_name: r[6].clone(),
+                nullable: r[5].eq_ignore_ascii_case("YES"),
+                primary_key: r[7] == "PRI",
+                auto_increment: r[8].contains("auto_increment"),
+                default: if r[4].is_empty() {
                     None
                 } else {
-                    Some(r[3].clone())
+                    Some(r[4].clone())
                 },
-                comment: r[8].clone(),
-                ordinal: r[2].parse().unwrap_or(0),
-                max_len: r[9].parse().ok(),
-                numeric_precision: r[10].parse().ok(),
-                numeric_scale: r[11].parse().ok(),
-                enum_values: enum_values(&r[5]),
+                comment: r[9].clone(),
+                ordinal: r[3].parse().unwrap_or(0),
+                max_len: r[10].parse().ok(),
+                numeric_precision: r[11].parse().ok(),
+                numeric_scale: r[12].parse().ok(),
+                enum_values: enum_values(&r[6]),
             });
         }
 
         let indexes = self.string_rows(&format!(
-            "SELECT table_name, index_name, seq_in_index, column_name, non_unique, index_type \
-             FROM information_schema.statistics WHERE table_schema = '{db_lit}' \
-             ORDER BY table_name, index_name, seq_in_index"
+            "SELECT table_schema, table_name, index_name, seq_in_index, column_name, \
+             non_unique, index_type \
+             FROM information_schema.statistics WHERE table_schema IN ({in_list}) \
+             ORDER BY table_schema, table_name, index_name, seq_in_index"
         ))?;
         for r in &indexes {
-            if r.len() < 6 {
+            if r.len() < 7 {
                 continue;
             }
-            let Some(t) = catalog.schemas[0]
-                .tables
-                .iter_mut()
-                .find(|t| t.name == r[0])
-            else {
+            let Some(schema) = catalog.schemas.iter_mut().find(|s| s.name == r[0]) else {
                 continue;
             };
-            let unique = r[4] == "0";
-            let primary = r[1] == "PRIMARY";
-            match t.indexes.iter_mut().find(|i| i.name == r[1]) {
-                Some(idx) => idx.columns.push(r[3].clone()),
+            let Some(t) = schema.tables.iter_mut().find(|t| t.name == r[1]) else {
+                continue;
+            };
+            let unique = r[5] == "0";
+            let primary = r[2] == "PRIMARY";
+            match t.indexes.iter_mut().find(|i| i.name == r[2]) {
+                Some(idx) => idx.columns.push(r[4].clone()),
                 None => t.indexes.push(Index {
-                    name: r[1].clone(),
-                    columns: vec![r[3].clone()],
+                    name: r[2].clone(),
+                    columns: vec![r[4].clone()],
                     unique,
                     primary,
                     kind: if primary {
@@ -478,92 +531,97 @@ impl Driver for MySql {
                     } else if unique {
                         "unique".into()
                     } else {
-                        r[5].to_ascii_lowercase()
+                        r[6].to_ascii_lowercase()
                     },
                 }),
             }
         }
 
         let fks = self.string_rows(&format!(
-            "SELECT k.constraint_name, k.table_name, k.column_name, k.referenced_table_schema, \
-             k.referenced_table_name, k.referenced_column_name, \
+            "SELECT k.table_schema, k.constraint_name, k.table_name, k.column_name, \
+             k.referenced_table_schema, k.referenced_table_name, k.referenced_column_name, \
              COALESCE(r.delete_rule, ''), COALESCE(r.update_rule, '') \
              FROM information_schema.key_column_usage k \
              LEFT JOIN information_schema.referential_constraints r \
                ON r.constraint_name = k.constraint_name AND r.constraint_schema = k.table_schema \
-             WHERE k.table_schema = '{db_lit}' AND k.referenced_table_name IS NOT NULL \
-             ORDER BY k.constraint_name, k.ordinal_position"
+             WHERE k.table_schema IN ({in_list}) AND k.referenced_table_name IS NOT NULL \
+             ORDER BY k.table_schema, k.constraint_name, k.ordinal_position"
         ))?;
         for r in &fks {
-            if r.len() < 8 {
+            if r.len() < 9 {
                 continue;
             }
-            let Some(t) = catalog.schemas[0]
-                .tables
-                .iter_mut()
-                .find(|t| t.name == r[1])
-            else {
+            let Some(schema) = catalog.schemas.iter_mut().find(|s| s.name == r[0]) else {
                 continue;
             };
-            match t.foreign_keys.iter_mut().find(|f| f.name == r[0]) {
+            let Some(t) = schema.tables.iter_mut().find(|t| t.name == r[2]) else {
+                continue;
+            };
+            match t.foreign_keys.iter_mut().find(|f| f.name == r[1]) {
                 Some(fk) => {
-                    fk.columns.push(r[2].clone());
-                    fk.ref_columns.push(r[5].clone());
+                    fk.columns.push(r[3].clone());
+                    fk.ref_columns.push(r[6].clone());
                 }
                 None => t.foreign_keys.push(ForeignKey {
-                    name: r[0].clone(),
-                    columns: vec![r[2].clone()],
-                    ref_schema: Some(r[3].clone()),
-                    ref_table: r[4].clone(),
-                    ref_columns: vec![r[5].clone()],
-                    on_delete: r[6].clone(),
-                    on_update: r[7].clone(),
+                    name: r[1].clone(),
+                    columns: vec![r[3].clone()],
+                    ref_schema: Some(r[4].clone()),
+                    ref_table: r[5].clone(),
+                    ref_columns: vec![r[6].clone()],
+                    on_delete: r[7].clone(),
+                    on_update: r[8].clone(),
                 }),
             }
         }
 
         let trigger_rows = self.string_rows(&format!(
-            "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, \
-             COALESCE(ACTION_STATEMENT, '') \
-             FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '{db_lit}' \
-             ORDER BY TRIGGER_NAME"
+            "SELECT TRIGGER_SCHEMA, TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, \
+             EVENT_MANIPULATION, COALESCE(ACTION_STATEMENT, '') \
+             FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA IN ({in_list}) \
+             ORDER BY TRIGGER_SCHEMA, TRIGGER_NAME"
         ))?;
         for r in &trigger_rows {
-            if r.len() < 5 {
+            if r.len() < 6 {
                 continue;
             }
+            let Some(schema) = catalog.schemas.iter_mut().find(|s| s.name == r[0]) else {
+                continue;
+            };
             // The action statement is the body, not the whole definition; the
             // timing/event columns carry the structured parts.
-            catalog.schemas[0].triggers.push(Trigger {
-                schema: Some(db.clone()),
-                name: r[0].clone(),
-                table: r[1].clone(),
-                timing: r[2].clone(),
-                events: r[3].clone(),
+            schema.triggers.push(Trigger {
+                schema: Some(r[0].clone()),
+                name: r[1].clone(),
+                table: r[2].clone(),
+                timing: r[3].clone(),
+                events: r[4].clone(),
                 ddl: format!(
                     "CREATE TRIGGER {} {} {} ON {} FOR EACH ROW {}",
-                    r[0], r[2], r[3], r[1], r[4]
+                    r[1], r[3], r[4], r[2], r[5]
                 ),
                 ..Default::default()
             });
         }
 
         let routine_rows = self.string_rows(&format!(
-            "SELECT ROUTINE_NAME, ROUTINE_TYPE, COALESCE(DTD_IDENTIFIER, ''), \
+            "SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE, COALESCE(DTD_IDENTIFIER, ''), \
              COALESCE(ROUTINE_COMMENT, '') \
-             FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '{db_lit}' \
-             ORDER BY ROUTINE_NAME"
+             FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA IN ({in_list}) \
+             ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME"
         ))?;
         for r in &routine_rows {
-            if r.len() < 4 {
+            if r.len() < 5 {
                 continue;
             }
-            catalog.schemas[0].routines.push(Routine {
-                schema: Some(db.clone()),
-                name: r[0].clone(),
-                kind: r[1].to_ascii_lowercase(),
-                returns: r[2].clone(),
-                comment: r[3].clone(),
+            let Some(schema) = catalog.schemas.iter_mut().find(|s| s.name == r[0]) else {
+                continue;
+            };
+            schema.routines.push(Routine {
+                schema: Some(r[0].clone()),
+                name: r[1].clone(),
+                kind: r[2].to_ascii_lowercase(),
+                returns: r[3].clone(),
+                comment: r[4].clone(),
                 // SHOW CREATE needs one round trip per routine; left empty rather
                 // than fanning out at catalog time.
                 ddl: String::new(),
@@ -795,4 +853,39 @@ mod tests {
         let e = MySql::open(&cfg);
         assert!(e.is_err());
     }
+
+    #[test]
+    fn visible_databases_keeps_current_drops_system_dedups() {
+        // Current first even when it is a system schema.
+        let all = vec!["mysql".into(), "alpha".into(), "beta".into()];
+        assert_eq!(
+            visible_databases(&all, "mysql"),
+            vec!["mysql", "alpha", "beta"]
+        );
+
+        // System schemas other than current are dropped.
+        let all = vec![
+            "information_schema".into(),
+            "mysql".into(),
+            "performance_schema".into(),
+            "sys".into(),
+            "alpha".into(),
+            "beta".into(),
+        ];
+        assert_eq!(
+            visible_databases(&all, "alpha"),
+            vec!["alpha", "beta"]
+        );
+
+        // Duplicates collapse; order follows the first occurrence in `all`.
+        let all = vec!["beta".into(), "alpha".into(), "beta".into(), "gamma".into()];
+        assert_eq!(
+            visible_databases(&all, "alpha"),
+            vec!["alpha", "beta", "gamma"]
+        );
+
+        // Empty `all` still yields [current].
+        assert_eq!(visible_databases(&[], "alpha"), vec!["alpha"]);
+    }
+
 }

@@ -893,6 +893,7 @@ fn grid(
         row_h,
         empty_text: "no rows",
         row_menu: None,
+        widths: &[],
     };
     let before = ui.cursor();
     match table::show(ui, tokens, &mut view, table, id) {

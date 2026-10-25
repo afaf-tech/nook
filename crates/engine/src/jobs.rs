@@ -564,8 +564,6 @@ mod tests {
         assert!(store.remove("missing").is_err());
     }
 
-    use super::*;
-
     #[test]
     fn every_kind_maps_to_a_command_that_exists() {
         // A job kind whose command id is not registered is a scheduler that cannot run it, which is

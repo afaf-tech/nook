@@ -76,6 +76,10 @@ pub fn show(
     // copy/export read the page — hiding is a display concern. The list is a cached field, not a
     // command: the paint path must not touch the store every frame.
     let hidden: Vec<String> = tab.grid.hidden.clone();
+    // Width overrides from a user drag, cached in the grid state so the paint path reads a field
+    // rather than the store. The list is a view concern: the query and `grid.fetchPage` still
+    // return every column.
+    let width_overrides: Vec<(String, f32)> = tab.grid.widths.clone();
     let rows = tab.grid.result.rows.clone();
     let types = tab.grid.result.column_types.clone();
     let primary_key = tab.grid.primary_key.clone();
@@ -739,6 +743,7 @@ pub fn show(
         row_h: design::row_h(session.settings.density),
         empty_text: fallback.as_str(),
         row_menu: None,
+        widths: &width_overrides,
     };
     ui.add_space(2.0);
     let event = crate::table::show(
@@ -841,6 +846,26 @@ pub fn show(
         }
         TableEvent::ShowAllColumns => {
             command = Some(("grid.hideColumns", serde_json::json!({ "hidden": [] })));
+        }
+        TableEvent::ResizeColumn(name, width) => {
+            // Apply the width immediately so the next frame's layout reflects the drag. The
+            // caller's local copy is what the widget reads, so updating it here keeps the drag
+            // smooth without waiting for a round trip.
+            if let Some(tab) = session.tabs.get_mut(tab_index) {
+                if let Some((_, w)) = tab.grid.widths.iter_mut().find(|(n, _)| n == &name) {
+                    *w = width;
+                } else {
+                    tab.grid.widths.push((name, width));
+                }
+            }
+        }
+        TableEvent::ResizeEnd => {
+            // The drag is over: persist the whole widths map so the store holds the final state.
+            let widths_map: serde_json::Map<String, serde_json::Value> = width_overrides
+                .iter()
+                .map(|(name, w)| (name.clone(), serde_json::json!(w)))
+                .collect();
+            command = Some(("grid.columnWidths", serde_json::json!({ "widths": widths_map })));
         }
         TableEvent::None => {}
     }
@@ -2168,6 +2193,7 @@ mod tests {
                         row_h: design::row_h(nook_engine::Density::Compact),
                         empty_text: "head-only",
                         row_menu: None,
+                        widths: &[],
                     };
                     let mut state = crate::table::TableState::default();
                     let before = ui.cursor().top();

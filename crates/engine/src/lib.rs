@@ -410,6 +410,10 @@ pub struct GridState {
     /// rewritten by `grid.hideColumns`. Cached here because the grid paints every frame and a
     /// store read per frame would open `nook.db` sixty times a second.
     pub hidden: Vec<String>,
+    /// Column width overrides from a user drag, read from the store when the tab binds its table
+    /// and rewritten by `grid.columnWidths`. Cached here because the grid paints every frame and
+    /// a store read per frame would open `nook.db` sixty times a second.
+    pub widths: Vec<(String, f32)>,
     pub total_rows: Option<u64>,
     pub error: Option<String>,
     pub elapsed_ms: f64,
@@ -430,6 +434,7 @@ impl GridState {
         self.cursor = None;
         self.anchor = None;
         self.hidden.clear();
+        self.widths.clear();
         self.total_rows = None;
         self.error = None;
         self.elapsed_ms = 0.0;

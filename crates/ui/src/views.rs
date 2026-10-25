@@ -84,6 +84,7 @@ pub(crate) fn list(
         row_h: design::ROW_H,
         empty_text: spec.empty,
         row_menu: spec.row_menu,
+        widths: &[],
     };
     table::show(ui, tokens, &mut view, state, spec.id)
 }

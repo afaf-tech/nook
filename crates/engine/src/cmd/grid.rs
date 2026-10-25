@@ -95,6 +95,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("grid.hideColumns", "Hide columns of this table", "Data", hide_columns)
             .params(r#"{"hidden":["password_hash"]}"#)
             .help("Hiding is a view concern: the query and `grid.fetchPage` still return every column. The list persists per connection and table, and an empty list clears it."),
+        CommandSpec::new("grid.columnWidths", "Column widths of this table", "Data", column_widths_cmd)
+            .params(r#"{"widths":{"email":300,"name":200}}"#)
+            .help("Width overrides are a view concern: the query and `grid.fetchPage` still return every column. The map persists per connection and table, and an empty map clears it."),
         CommandSpec::new("grid.hints", "Display hints from column names", "Data", hints)
             .help("Reads the `__format__` marker in a column name: money, check or link. The header shows the name without the marker, and the query is untouched — a hint is a view concern."),
         CommandSpec::new("grid.blobEditor", "Edit a BLOB from hex", "Data", blob_editor)
@@ -1721,6 +1724,90 @@ fn hide_columns(session: &mut Session, p: &Params) -> Result<serde_json::Value> 
     Ok(json!({ "hidden": current }))
 }
 
+/// Column width overrides, persisted per `conn + table` through the store's `ui_state` — one
+/// writer per fact. Widths never touch the query: `grid.fetchPage` keeps returning every column,
+/// and the UI decides how wide to paint each one. Without params, the current map reads back.
+fn column_widths_cmd(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let index = active_grid_tab(session)?;
+    let tab = &session.tabs[index];
+    let table = tab
+        .grid
+        .table
+        .clone()
+        .ok_or_else(|| Error::config("this data tab is not bound to a table"))?;
+    let conn_id = tab
+        .conn
+        .and_then(|i| session.conns.get(i))
+        .map(|c| c.cfg.id.clone())
+        .unwrap_or_default();
+    let key = format!("widths:{}:{}", conn_id, table.key());
+    let current: Vec<(String, f32)> = tab.grid.widths.clone();
+
+    if let Some(raw) = p.raw().get("widths") {
+        // `widths` must be an object mapping column names to numbers; anything else is junk.
+        let widths_obj = match raw {
+            serde_json::Value::Object(obj) => obj,
+            other => {
+                return Err(Error::config(format!(
+                    "parameter 'widths' must be an object mapping column names to numbers, got {}",
+                    crate::json_kind(other)
+                )))
+            }
+        };
+        // Every width must be a finite number > 0 and <= 4000; every name must be a column of
+        // the table the grid shows. A typo would silently set nothing, and the caller has no
+        // other way to learn the real names.
+        let mut validated: Vec<(String, f32)> = Vec::new();
+        for (name, value) in widths_obj {
+            if !tab.grid.result.columns.iter().any(|c| c == name) {
+                return Err(Error::not_found(format!(
+                    "no column '{name}': this table holds {}",
+                    tab.grid.result.columns.join(", ")
+                )));
+            }
+            let w = value.as_f64().ok_or_else(|| {
+                Error::config(format!(
+                    "width for column '{name}' must be a number, got {}",
+                    crate::json_kind(value)
+                ))
+            })?;
+            if !w.is_finite() || w <= 0.0 || w > 4000.0 {
+                return Err(Error::config(format!(
+                    "width for column '{name}' must be a finite number > 0 and <= 4000, got {w}"
+                )));
+            }
+            validated.push((name.clone(), w as f32));
+        }
+        // Stored as the bare `{name: width}` object, the same shape `hidden` uses (a bare array)
+        // and the shape `column_widths` parses. A `{"widths": {...}}` wrapper here would read back
+        // as one entry named "widths" whose value is an object — dropped, so every width would
+        // silently vanish on reopen.
+        let value = serde_json::to_string(
+            &validated
+                .iter()
+                .map(|(n, w)| (n.clone(), serde_json::json!(w)))
+                .collect::<serde_json::Map<_, _>>(),
+        )
+        .map_err(|e| Error::internal(e.to_string()))?;
+        crate::store::save_ui_state(&key, &value)?;
+        // The cache and the store move together: the paint path reads the cache, and a stale one
+        // would keep painting columns the store already says are a different width.
+        if let Some(tab) = session.tabs.get_mut(index) {
+            tab.grid.widths = validated.clone();
+        }
+        let map: serde_json::Map<String, serde_json::Value> = validated
+            .into_iter()
+            .map(|(n, w)| (n, serde_json::json!(w)))
+            .collect();
+        return Ok(json!({ "widths": map }));
+    }
+    let map: serde_json::Map<String, serde_json::Value> = current
+        .into_iter()
+        .map(|(n, w)| (n, serde_json::json!(w)))
+        .collect();
+    Ok(json!({ "widths": map }))
+}
+
 /// Display hints read from the column names: `name__format__money` renders as money, and the
 /// header shows `name`. A hint is a view concern — the query still returns every column — so this
 /// reads the page the grid already holds and never touches the SQL.
@@ -2479,5 +2566,72 @@ mod tests {
         let (mut session, _) = grid_tab();
         let e = count_rows(&mut session, &Params::none());
         assert!(e.is_err());
+    }
+
+    /// A saved width must come back when the table is bound again — the whole point of persisting
+    /// it. The store keeps a bare `{name: width}` object; a wrapper key would read back as one entry
+    /// named after the wrapper and every width would silently vanish on reopen.
+    #[test]
+    fn column_widths_survive_a_store_round_trip() {
+        let _guard = crate::test_support::scratch_config();
+        let (mut session, index) = grid_tab();
+        let table = TableRef {
+            schema: None,
+            table: "users".into(),
+        };
+        crate::cmd::bind_grid_table(&mut session, index, table.clone()).expect("bind");
+        session.active_tab = Some(index);
+
+        let p = Params::from_json(json!({"widths": {"email": 320.0, "id": 90.0}}))
+            .expect("params");
+        let out = column_widths_cmd(&mut session, &p).expect("save widths");
+        assert_eq!(out["widths"]["email"], 320.0);
+        assert_eq!(out["widths"]["id"], 90.0);
+
+        // The cache the paint path reads moved with the store.
+        let cached = &session.tabs[index].grid.widths;
+        assert_eq!(cached.len(), 2, "both widths cached: {cached:?}");
+
+        // A fresh read through the same key the bind uses — this is what a reopened tab sees.
+        let conn_id = session.conns[0].cfg.id.clone();
+        let stored = crate::cmd::column_widths(&conn_id, &table).expect("read widths");
+        assert_eq!(
+            stored.len(),
+            2,
+            "the stored object must parse as a bare name→width map, got {stored:?}"
+        );
+        assert!(stored.iter().any(|(n, w)| n == "email" && *w == 320.0));
+
+        // And the whole path end to end: rebinding the table restores them into the cache.
+        session.tabs[index].grid.widths.clear();
+        crate::cmd::bind_grid_table(&mut session, index, table).expect("rebind");
+        assert_eq!(session.tabs[index].grid.widths.len(), 2);
+    }
+
+    /// A width stored for a column the table no longer has must not survive the bind: the UI
+    /// re-sends the whole cache on every drag, and this command refuses an unknown name, so one
+    /// stale entry would make every later resize fail to save.
+    #[test]
+    fn a_width_for_a_dropped_column_is_not_rebound() {
+        let _guard = crate::test_support::scratch_config();
+        let (mut session, index) = grid_tab();
+        let table = TableRef {
+            schema: None,
+            table: "users".into(),
+        };
+        // Written straight to the store: the command itself would refuse the name.
+        crate::store::save_ui_state(
+            &format!("widths:{}:{}", session.conns[0].cfg.id, table.key()),
+            r#"{"email":320.0,"gone":200.0}"#,
+        )
+        .expect("seed");
+
+        crate::cmd::bind_grid_table(&mut session, index, table).expect("bind");
+        let cached = &session.tabs[index].grid.widths;
+        assert_eq!(
+            cached.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["email"],
+            "only the column the table still has survives: {cached:?}"
+        );
     }
 }

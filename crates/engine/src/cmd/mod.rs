@@ -503,6 +503,15 @@ pub fn bind_grid_table(session: &mut Session, tab_index: usize, table: TableRef)
         .map(|c| c.cfg.id.clone())
         .unwrap_or_default();
     tab.grid.hidden = hidden_columns(&conn_id, &table).unwrap_or_default();
+    // Widths are re-sent whole on every `ResizeEnd`, and `grid.columnWidths` rejects a name the
+    // table does not have. A column dropped since the width was stored would therefore poison the
+    // cache and make every later drag fail to save, so stale names are filtered out here — once,
+    // at the only place the cache is filled.
+    tab.grid.widths = column_widths(&conn_id, &table)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(name, _)| info.as_ref().is_some_and(|t| t.column(name).is_some()))
+        .collect();
     tab.payload
         .insert("dialect".into(), serde_json::json!(dialect_name(dialect)));
     match info {
@@ -527,6 +536,22 @@ pub fn hidden_columns(conn_id: &str, table: &TableRef) -> Result<Vec<String>> {
     let stored = crate::store::load_ui_state(&key)?;
     Ok(stored
         .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default())
+}
+
+/// The column width overrides this table's view applies, as stored under `widths:<conn>:<table>`.
+/// One reader, so the key is built in exactly one place.
+pub fn column_widths(conn_id: &str, table: &TableRef) -> Result<Vec<(String, f32)>> {
+    let key = format!("widths:{conn_id}:{}", table.key());
+    let stored = crate::store::load_ui_state(&key)?;
+    Ok(stored
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            obj.into_iter()
+                .filter_map(|(k, v)| v.as_f64().map(|w| (k, w as f32)))
+                .collect()
+        })
         .unwrap_or_default())
 }
 

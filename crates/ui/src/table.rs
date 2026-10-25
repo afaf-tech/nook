@@ -14,6 +14,7 @@ const GUTTER_W: f32 = 54.0;
 const CELL_PAD: f32 = 9.0;
 const MIN_COL_W: f32 = 76.0;
 const MAX_COL_W: f32 = 280.0;
+const MAX_DRAG_W: f32 = 2000.0;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TableColumn {
@@ -103,6 +104,10 @@ pub enum TableEvent {
     ShowAllColumns,
     /// Follow the foreign key in this cell: (row, column).
     FollowForeignKey(usize, usize),
+    /// The user dragged a column's right edge to a new width.
+    ResizeColumn(String, f32),
+    /// The user released the drag; the caller should persist the width.
+    ResizeEnd,
 }
 
 /// Right-click handler for one table row: the row index in, menu items out.
@@ -143,6 +148,9 @@ pub struct TableView<'a> {
     /// Right-click menu for a row, as `Some(callback)` — called with the row index. `None` for the
     /// default of no menu; the design tab's column list uses it to open the per-column editors.
     pub row_menu: Option<RowMenu<'a>>,
+    /// Width overrides from a user drag, as `(column_name, width)`. The widget honours these over
+    /// content measurement and the numeric cap, so a drag is the authority.
+    pub widths: &'a [(String, f32)],
 }
 
 fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
@@ -277,6 +285,11 @@ fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
                 // Hidden keeps the slot but not the space: width zero, nothing painted.
                 return 0.0;
             }
+            // A width override from a user drag wins over content measurement and the numeric cap:
+            // the user's drag is the authority, not the longest value in the column.
+            if let Some((_, override_w)) = view.widths.iter().find(|(name, _)| name == &column.name) {
+                return override_w.clamp(MIN_COL_W, MAX_DRAG_W);
+            }
             let mut width =
                 text_width(ui, &column.label, header_font.clone()) + CELL_PAD * 2.0 + 18.0;
             if column.primary_key {
@@ -361,6 +374,7 @@ pub fn show(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             event = head(ui, tokens, view, &widths, viewport_w, total_w, id);
+
 
             egui::ScrollArea::vertical()
                 .id_salt(id.with("v"))
@@ -821,8 +835,35 @@ fn head(
             cell.top()..=cell.bottom(),
             Stroke::new(1.0, tokens.grid_line),
         );
+        // The sort click is decided first so the resize strip below can overwrite it: a release
+        // that ends a drag must persist the width, and losing that to a same-frame Sort would drop
+        // the whole width map silently.
         if response.clicked() && view.sortable {
             event = TableEvent::Sort(column.name.clone());
+        }
+        // The resize strip: a 6px-wide drag handle on the right edge of each visible column.
+        // Only offered when the caller allows sorting — the data grid — so read-only previews
+        // keep their fixed layout.
+        if view.sortable {
+            let strip = Rect::from_min_size(
+                egui::pos2(cell.right() - 3.0, cell.top()),
+                Vec2::new(6.0, HEAD_H),
+            );
+            let drag = ui.interact(strip, id.with(("resize", index)), Sense::drag());
+            if drag.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if drag.dragged() {
+                // Clamped here, not only where the override is applied: this value is what the
+                // caller stores and re-sends whole on `ResizeEnd`, and the engine refuses a width
+                // above 4000 — so an unclamped drag past the limit would make the save fail
+                // silently and lose every width in the map, not just this one.
+                let new_width = (widths[index] + drag.drag_delta().x).clamp(MIN_COL_W, MAX_DRAG_W);
+                event = TableEvent::ResizeColumn(column.name.clone(), new_width);
+            }
+            if drag.drag_stopped() {
+                event = TableEvent::ResizeEnd;
+            }
         }
         x += widths[index];
     }
@@ -889,6 +930,7 @@ mod tests {
             row_h: design::row_h(nook_engine::Density::Compact),
             empty_text: "no rows",
             row_menu: None,
+            widths: &[],
         }
     }
 
@@ -1322,5 +1364,325 @@ mod tests {
         );
         assert_eq!(openable_url(&Value::Text("ftp://x.test".into())), None);
         assert_eq!(openable_url(&Value::Null), None);
+    }
+
+    /// Dragging the right edge of a header must emit `ResizeColumn` with the new width, and
+    /// releasing must emit `ResizeEnd` so the caller can persist it.
+    #[test]
+    fn dragging_a_header_edge_emits_resize_events() {
+        let columns = [
+            TableColumn::new("id", "INTEGER").pk(true),
+            TableColumn::new("email", "TEXT"),
+        ];
+        let rows = vec![vec![Value::Int(1), Value::text("a@b.c")]];
+        let id = egui::Id::new("resize-drag");
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut state = TableState::default();
+        let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+            let mut view = view(&columns, &rows, true, 120.0);
+            let _ = show(ui, &tokens, &mut view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        let head = ctx
+            .read_response(id.with(("head", 0)))
+            .expect("the first header registered its rect")
+            .rect;
+        let _resize = ctx
+            .read_response(id.with(("resize", 0)))
+            .expect("the resize strip registered its rect")
+            .rect;
+        // The drag strip sits on the right edge of the header cell.
+        let start = egui::pos2(head.right() - 3.0, head.center().y);
+        let end = egui::pos2(head.right() + 40.0, head.center().y);
+        // First, just check that the strip is hovered when the pointer is over it.
+        let events = vec![egui::Event::PointerMoved(start)];
+        let mut out = ctx.run_ui(screen(events), |ui| {
+            let mut view = view(&columns, &rows, true, 120.0);
+            let _ = show(ui, &tokens, &mut view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        let resize_response = ctx.read_response(id.with(("resize", 0))).unwrap();
+        assert!(resize_response.hovered(), "the resize strip should be hovered");
+        // Now try the drag, split across multiple frames so egui can recognize it.
+        // Frame 1: press the button.
+        let events = vec![press(start, true)];
+        let mut out = ctx.run_ui(screen(events), |ui| {
+            let mut view = view(&columns, &rows, true, 120.0);
+            let _ = show(ui, &tokens, &mut view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        // Frame 2: move the pointer while pressed.
+        let events = vec![egui::Event::PointerMoved(end)];
+        let mut event = TableEvent::None;
+        let mut out = ctx.run_ui(screen(events), |ui| {
+            let mut view = view(&columns, &rows, true, 120.0);
+            event = show(ui, &tokens, &mut view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        assert!(
+            matches!(event, TableEvent::ResizeColumn(_, _)),
+            "dragging the header edge must emit ResizeColumn, got {event:?}"
+        );
+    }
+
+    /// A width override must win over the content measurement and the numeric cap: the user's
+    /// drag is the authority, not the longest value in the column.
+    #[test]
+    fn a_width_override_wins_over_content_and_numeric_cap() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let columns = [
+            TableColumn::new("id", "INTEGER"),
+            TableColumn::new("email", "TEXT"),
+        ];
+        let rows = vec![vec![Value::Int(1), Value::text("a@b.c")]];
+        let widths = [(String::from("id"), 400.0)];
+        let mut state = TableState::default();
+        let mut measured = 0.0;
+        let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+            let mut view = TableView {
+                columns: &columns,
+                hidden: &[],
+                foreign_keys: &[],
+                rows: &rows,
+                pending: Vec::new(),
+                inserted: Vec::new(),
+                selected: None,
+                anchor: None,
+                sort: None,
+                editable: true,
+                sortable: true,
+                gutter: true,
+                height: 120.0,
+                row_h: design::row_h(nook_engine::Density::Compact),
+                empty_text: "no rows",
+                row_menu: None,
+                widths: &widths,
+            };
+            let _ = show(ui, &tokens, &mut view, &mut state, egui::Id::new("override"));
+            measured = column_widths(ui, &tokens, &view)[0];
+        });
+        out.textures_delta.clear();
+        assert!(
+            (measured - 400.0).abs() < 0.5,
+            "the override must win, got {measured}"
+        );
+    }
+
+    /// A width below the minimum is clamped up: a 10px column is unreadable, so the floor holds.
+    #[test]
+    fn a_width_below_the_minimum_is_clamped_up() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let columns = [TableColumn::new("id", "INTEGER")];
+        let rows = vec![vec![Value::Int(1)]];
+        let widths = [(String::from("id"), 10.0)];
+        let mut state = TableState::default();
+        let mut measured = 0.0;
+        let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+            let mut view = TableView {
+                columns: &columns,
+                hidden: &[],
+                foreign_keys: &[],
+                rows: &rows,
+                pending: Vec::new(),
+                inserted: Vec::new(),
+                selected: None,
+                anchor: None,
+                sort: None,
+                editable: true,
+                sortable: true,
+                gutter: true,
+                height: 120.0,
+                row_h: design::row_h(nook_engine::Density::Compact),
+                empty_text: "no rows",
+                row_menu: None,
+                widths: &widths,
+            };
+            let _ = show(ui, &tokens, &mut view, &mut state, egui::Id::new("clamp"));
+            measured = column_widths(ui, &tokens, &view)[0];
+        });
+        out.textures_delta.clear();
+        assert!(
+            measured >= MIN_COL_W,
+            "the width must be clamped to the minimum, got {measured}"
+        );
+    }
+    /// Drive a multi-frame drag on one header's resize strip and return the last event the frame
+    /// reported. Each step is its own frame, which is what egui needs to recognise a drag.
+    fn drag_header(
+        ctx: &egui::Context,
+        tokens: &Tokens,
+        id: egui::Id,
+        start: egui::Pos2,
+        steps: &[f32],
+        columns: &[TableColumn],
+        rows: &[Vec<Value>],
+        widths: &[(String, f32)],
+    ) -> TableEvent {
+        // The eight-argument shape is a test fixture, not an API: splitting it into a struct would
+        // be more lines than the two call sites it serves.
+        #![allow(clippy::too_many_arguments)]
+        let mut state = TableState::default();
+        let mut out = ctx.run_ui(screen(vec![press(start, true)]), |ui| {
+            let mut view = view(columns, rows, true, 200.0);
+            view.widths = widths;
+            let _ = show(ui, tokens, &mut view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        let mut last = TableEvent::None;
+        let mut tip = start;
+        for dx in steps {
+            tip = egui::pos2(start.x + dx, start.y);
+            let mut event = TableEvent::None;
+            let mut out = ctx.run_ui(screen(vec![egui::Event::PointerMoved(tip)]), |ui| {
+                let mut view = view(columns, rows, true, 200.0);
+                view.widths = widths;
+                event = show(ui, tokens, &mut view, &mut state, id);
+            });
+            out.textures_delta.clear();
+            last = event;
+        }
+        // Release, or the next drag in the same context never starts: egui sees a button that is
+        // already down and does not open a new gesture.
+        let mut out = ctx.run_ui(screen(vec![press(tip, false)]), |ui| {
+            let mut view = view(columns, rows, true, 200.0);
+            view.widths = widths;
+            let _ = show(ui, tokens, &mut view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        last
+    }
+
+    /// The resize strip must win over the horizontal scroll area's drag-to-scroll: dragging a header
+    /// edge resizes the column and must not pan the view. The table here is wider than the viewport
+    /// (54px gutter + 12 columns at 80px = 1014px against 819px), so the area's drag handling is
+    /// live and would claim the gesture if the strip did not win the hit test.
+    #[test]
+    fn a_resize_drag_does_not_pan_the_horizontal_scroll_area() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let columns: Vec<TableColumn> = (0..12)
+            .map(|i| TableColumn::new(format!("col_{i}"), "TEXT"))
+            .collect();
+        let rows = vec![vec![Value::text("x"); 12]];
+        let widths: Vec<(String, f32)> = (0..12).map(|i| (format!("col_{i}"), 80.0)).collect();
+        let id = egui::Id::new("wide-resize");
+        let mut state = TableState::default();
+        let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+            let mut view = view(&columns, &rows, true, 200.0);
+            view.widths = &widths;
+            let _ = show(ui, &tokens, &mut view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        let head_before = ctx
+            .read_response(id.with(("head", 0)))
+            .expect("the first header registered its rect")
+            .rect;
+        let cell_before = ctx
+            .read_response(id.with(("cell", 0, 0)))
+            .expect("the first body cell registered its rect")
+            .rect;
+        let start = egui::pos2(head_before.right() - 3.0, head_before.center().y);
+
+        let mut out = ctx.run_ui(screen(vec![press(start, true)]), |ui| {
+            let mut view = view(&columns, &rows, true, 200.0);
+            view.widths = &widths;
+            let _ = show(ui, &tokens, &mut view, &mut state, id);
+        });
+        out.textures_delta.clear();
+        let mut last = TableEvent::None;
+        for step in 1..=3 {
+            let pos = egui::pos2(start.x + 20.0 * step as f32, start.y);
+            let mut event = TableEvent::None;
+            let mut out = ctx.run_ui(screen(vec![egui::Event::PointerMoved(pos)]), |ui| {
+                let mut view = view(&columns, &rows, true, 200.0);
+                view.widths = &widths;
+                event = show(ui, &tokens, &mut view, &mut state, id);
+            });
+            out.textures_delta.clear();
+            last = event;
+            // The body must not have moved: a pan would take the header with it.
+            let cell_during = ctx
+                .read_response(id.with(("cell", 0, 0)))
+                .expect("the body cell still registered its rect")
+                .rect;
+            assert!(
+                (cell_during.left() - cell_before.left()).abs() < 0.5,
+                "step {step}: the body shifted from {} to {}, the scroll area claimed the drag",
+                cell_before.left(),
+                cell_during.left()
+            );
+        }
+        assert!(
+            matches!(last, TableEvent::ResizeColumn(_, _)),
+            "the drag must emit ResizeColumn, got {last:?}"
+        );
+    }
+
+    /// A drag past either end stops at the bound and emits the bounded value. The clamp has to be at
+    /// the emit site, not only where the override is applied: the caller stores this number and
+    /// re-sends the whole map on release, and the engine refuses a width above 4000 — so an
+    /// unclamped value would fail the save and lose every width in the map, not just this one.
+    ///
+    /// Both drags start from a column narrow enough that its right edge is on screen: at
+    /// `MAX_DRAG_W` the strip sits past the viewport, so the gesture would never begin there.
+    #[test]
+    fn a_resize_drag_emits_a_clamped_width() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let columns = [TableColumn::new("id", "INTEGER")];
+        let rows = vec![vec![Value::Int(1)]];
+
+        for (id, steps, check) in [
+            (
+                egui::Id::new("clamp-min"),
+                [-100.0, -400.0, -900.0],
+                (MIN_COL_W, true),
+            ),
+            (
+                egui::Id::new("clamp-max"),
+                [500.0, 2_000.0, 5_000.0],
+                (MAX_DRAG_W, false),
+            ),
+        ] {
+            let widths = [(String::from("id"), 120.0)];
+            let mut state = TableState::default();
+            let mut out = ctx.run_ui(screen(Vec::new()), |ui| {
+                let mut view = view(&columns, &rows, true, 200.0);
+                view.widths = &widths;
+                let _ = show(ui, &tokens, &mut view, &mut state, id);
+            });
+            out.textures_delta.clear();
+            let head = ctx
+                .read_response(id.with(("head", 0)))
+                .expect("the header registered its rect")
+                .rect;
+            let start = egui::pos2(head.right() - 3.0, head.center().y);
+            match drag_header(&ctx, &tokens, id, start, &steps, &columns, &rows, &widths) {
+                TableEvent::ResizeColumn(_, w) => {
+                    if check.1 {
+                        assert!(
+                            w >= check.0,
+                            "a leftward drag must stop at MIN_COL_W={}, emitted {w}",
+                            check.0
+                        );
+                    } else {
+                        assert!(
+                            w <= check.0,
+                            "a rightward drag must stop at MAX_DRAG_W={}, emitted {w}",
+                            check.0
+                        );
+                    }
+                }
+                other => panic!("expected ResizeColumn for {id:?}, got {other:?}"),
+            }
+        }
     }
 }
