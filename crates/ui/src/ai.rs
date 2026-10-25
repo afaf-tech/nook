@@ -1485,6 +1485,10 @@ mod tests {
     ///
     /// Serialized on a process-wide lock: it mutates the process-wide `NOOK_CURL_BIN` and one
     /// shared stub file, neither of which parallel test threads may race on.
+    ///
+    /// The stub is a `#!/bin/sh` script, so it is unix-only; the flow it covers is the drain, which
+    /// has no platform in it.
+    #[cfg(unix)]
     #[test]
     fn a_spawned_request_survives_empty_polls_and_opens_the_tab() {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

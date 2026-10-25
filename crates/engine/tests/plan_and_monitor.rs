@@ -212,6 +212,10 @@ fn alerts_without_rules_refuse_and_name_the_shape() {
 
 /// A tripped alert reaches the endpoint a failed job reaches, in that job's shape. The fake curl
 /// records the body it was handed, so the assertion is on what was actually posted.
+///
+/// The fake is a `#!/bin/sh` script, so this only runs where a shell can exec it; a `.cmd` fake is
+/// what would cover the webhook on Windows.
+#[cfg(unix)]
 #[test]
 fn a_tripped_alert_posts_the_same_shape_a_failed_job_does() {
     let mut f = Fixture::new("alert-webhook");
