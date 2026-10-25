@@ -191,6 +191,9 @@ fn restrict(path: &std::path::Path) {
             let _ = std::fs::set_permissions(path, perms);
         }
     }
+    // Windows has no mode bits; the file inherits the directory's ACLs instead.
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// 32 hex characters from the system clock and a counter: enough to keep the port from being open

@@ -280,7 +280,13 @@ pub fn keychain_available() -> bool {
         return true;
     }
     if cfg!(target_os = "linux") {
-        return on_path(&secret_tool_bin());
+        let binary = secret_tool_bin();
+        // An explicit override is an absolute path, which `on_path` can never match by design; if it
+        // names an existing file, that file is the backend.
+        if binary.contains('/') {
+            return std::path::Path::new(&binary).is_file();
+        }
+        return on_path(&binary);
     }
     false
 }

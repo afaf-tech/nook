@@ -1395,12 +1395,25 @@ pub(crate) mod test_support {
             log.display(),
         );
         let _ = std::fs::write(&script, body);
+        // Linux reaches its keychain through `secret-tool`, so the same fake is installed there too:
+        // the tests assert keychain behaviour, not the backend, and CI runs them on every host.
+        // `store` reads the secret from stdin, `lookup` answers for this account only — the same
+        // account scoping the macOS fake has, so a test asserting an unset key still sees nothing.
+        let linux = dir.join("secret-tool");
+        let linux_body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{log}\"\ncase \"$1\" in\n  lookup) case \"$*\" in *account*{account}*) printf '%s\\n' '{secret}' ;; esac ;;\n  store) cat >> \"{log}\"; printf '\\n' >> \"{log}\" ;;\nesac\nexit 0\n",
+            log = log.display(),
+        );
+        let _ = std::fs::write(&linux, linux_body);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+            for file in [&script, &linux] {
+                let _ = std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755));
+            }
         }
         std::env::set_var("NOOK_SECURITY_BIN", &script);
+        std::env::set_var("NOOK_SECRET_TOOL_BIN", &linux);
         (guard, log)
     }
 

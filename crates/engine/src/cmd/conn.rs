@@ -753,11 +753,16 @@ mod tests {
             return;
         }
         // The database password's account and the SSH one, or a deleted profile leaks a password.
-        assert!(calls.lines().any(|l| l.ends_with("-a doomed")), "{calls}");
-        assert!(
-            calls.lines().any(|l| l.ends_with("-a doomed#ssh")),
-            "{calls}"
-        );
+        let account_call = |name: &str| {
+            calls.lines().any(|line| {
+                line.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|w| (w[0] == "-a" || w[0] == "account") && w[1] == name)
+            })
+        };
+        assert!(account_call("doomed"), "{calls}");
+        assert!(account_call("doomed#ssh"), "{calls}");
     }
 
     #[test]
@@ -789,18 +794,33 @@ mod tests {
             .expect("store");
         assert_eq!(stored["account"], "doomed#ssh");
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
-        assert!(calls.contains("-a doomed#ssh"), "{calls}");
-        // `security` takes the password as `-w`'s value: the store's recorded ceiling, because a bare
-        // `-w` reads it from the terminal when the app has one and hangs there.
+        // The account is a token pair in both CLIs — `-a NAME` or `account NAME` — and macOS appends
+        // `-w`'s value after it, so the pair is matched wherever it sits on the line.
+        let account_call = |name: &str| {
+            calls.lines().any(|line| {
+                line.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|w| (w[0] == "-a" || w[0] == "account") && w[1] == name)
+            })
+        };
+        assert!(account_call("doomed#ssh"), "{calls}");
+        // The secret must reach the child, not the command line the app was started with. macOS
+        // carries it as `security`'s `-w` value; `secret-tool` reads it from stdin on `store`, which
+        // the fake records by copying stdin, so on Linux it shows up as its own line.
         let with_secret: Vec<&str> = calls
             .lines()
             .filter(|line| line.contains("hunter2"))
             .collect();
         assert_eq!(with_secret.len(), 1, "{calls}");
-        assert!(
-            with_secret[0].ends_with("-a doomed#ssh -w hunter2"),
-            "the secret reached the child by something other than `-w`'s value: {calls}"
-        );
+        if cfg!(target_os = "macos") {
+            assert!(
+                with_secret[0].ends_with("-a doomed#ssh -w hunter2"),
+                "the secret reached the child by something other than `-w`'s value: {calls}"
+            );
+        } else {
+            assert_eq!(with_secret[0], "hunter2", "{calls}");
+        }
         assert_eq!(
             crate::profiles::keychain_lookup("doomed#ssh")
                 .expect("lookup")
