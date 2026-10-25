@@ -602,8 +602,9 @@ fn raw_mode_refuses_a_statement_it_cannot_map_and_leaves_the_list_alone() {
     assert_eq!(before, after, "a refused statement must change nothing");
 }
 
-/// A fake `security` on `NOOK_SECURITY_BIN`: it answers any lookup with `secret` and succeeds on a
-/// store. One test owns it, because the override is process-wide and two tests setting it would race.
+/// A fake `security` on `NOOK_SECURITY_BIN` and a fake `secret-tool` on `NOOK_SECRET_TOOL_BIN`: the
+/// two backends answer lookups with `secret` and succeed on a store. One test owns it, because the
+/// overrides are process-wide and two tests setting them would race.
 fn fake_security(secret: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("nook-phase4-security");
     let _ = std::fs::create_dir_all(&dir);
@@ -612,12 +613,22 @@ fn fake_security(secret: &str) -> std::path::PathBuf {
         "#!/bin/sh\ncase \"$*\" in\n  *find-generic-password*) printf '%s\\n' '{secret}' ;;\nesac\nexit 0\n"
     );
     let _ = std::fs::write(&script, body);
+    // Linux reaches its keychain through `secret-tool`, and without a fake here the real one runs and
+    // fails on the missing session bus — the test is about safe mode, not about which CLI is present.
+    let linux = dir.join("secret-tool");
+    let linux_body = format!(
+        "#!/bin/sh\ncase \"$1\" in\n  lookup) printf '%s\\n' '{secret}' ;;\n  store) cat > /dev/null ;;\nesac\nexit 0\n"
+    );
+    let _ = std::fs::write(&linux, linux_body);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+        for file in [&script, &linux] {
+            let _ = std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755));
+        }
     }
     std::env::set_var("NOOK_SECURITY_BIN", &script);
+    std::env::set_var("NOOK_SECRET_TOOL_BIN", &linux);
     script
 }
 

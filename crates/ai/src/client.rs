@@ -542,6 +542,9 @@ exit {status}
         std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
     }
 
+    // `fake_curl` is a `#!/bin/sh` script, which Windows refuses to exec (`os error 193`). The
+    // transport itself is portable — only the fake is not; a `.cmd` fake is the way to cover it there.
+    #[cfg(unix)]
     #[test]
     fn the_transport_puts_the_body_on_stdin_and_the_key_in_a_file_only_its_owner_can_read() {
         let reply = r#"{"choices":[{"message":{"content":"SELECT 42;"}}]}"#;
@@ -578,6 +581,7 @@ exit {status}
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failing_curl_is_an_error_and_still_takes_the_file_with_the_key_with_it() {
         with_fake_curl("", 7, |dir| {
