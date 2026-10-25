@@ -753,16 +753,14 @@ mod tests {
             return;
         }
         // The database password's account and the SSH one, or a deleted profile leaks a password.
-        let account_call = |name: &str| {
-            calls.lines().any(|line| {
-                line.split_whitespace()
-                    .collect::<Vec<_>>()
-                    .windows(2)
-                    .any(|w| (w[0] == "-a" || w[0] == "account") && w[1] == name)
-            })
-        };
-        assert!(account_call("doomed"), "{calls}");
-        assert!(account_call("doomed#ssh"), "{calls}");
+        assert!(
+            crate::test_support::logged_account(&calls, "doomed"),
+            "{calls}"
+        );
+        assert!(
+            crate::test_support::logged_account(&calls, "doomed#ssh"),
+            "{calls}"
+        );
     }
 
     #[test]
@@ -796,15 +794,10 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         // The account is a token pair in both CLIs — `-a NAME` or `account NAME` — and macOS appends
         // `-w`'s value after it, so the pair is matched wherever it sits on the line.
-        let account_call = |name: &str| {
-            calls.lines().any(|line| {
-                line.split_whitespace()
-                    .collect::<Vec<_>>()
-                    .windows(2)
-                    .any(|w| (w[0] == "-a" || w[0] == "account") && w[1] == name)
-            })
-        };
-        assert!(account_call("doomed#ssh"), "{calls}");
+        assert!(
+            crate::test_support::logged_account(&calls, "doomed#ssh"),
+            "{calls}"
+        );
         // The secret must reach the child, not the command line the app was started with. macOS
         // carries it as `security`'s `-w` value; `secret-tool` reads it from stdin on `store`, which
         // the fake records by copying stdin, so on Linux it shows up as its own line.

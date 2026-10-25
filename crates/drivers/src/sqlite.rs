@@ -34,23 +34,37 @@ impl Sqlite {
             .map_err(|e| Error::connect(format!("open {path}: {e}")))?;
         conn.busy_timeout(Duration::from_secs(cfg.connect_timeout_s.clamp(1, 300)))
             .map_err(|e| Error::connect(e.to_string()))?;
-        Ok(Sqlite {
+        let sqlite = Sqlite {
             conn,
             path,
             read_only: cfg.read_only,
             in_tx: false,
-        })
+        };
+        sqlite.enforce_foreign_keys_like_system_sqlite()?;
+        Ok(sqlite)
     }
 
     /// In-memory session, used by the tests and by `--sqlite :memory:`.
     pub fn memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(|e| Error::connect(e.to_string()))?;
-        Ok(Sqlite {
+        let sqlite = Sqlite {
             conn,
             path: ":memory:".into(),
             read_only: false,
             in_tx: false,
-        })
+        };
+        sqlite.enforce_foreign_keys_like_system_sqlite()?;
+        Ok(sqlite)
+    }
+
+    /// Bundled SQLite is compiled with `SQLITE_DEFAULT_FOREIGN_KEYS=1`, so a fresh connection
+    /// enforces foreign keys; every system SQLite starts with them off. The product has always been
+    /// the latter — a session turns enforcement on when it wants it — so the default is restored
+    /// here rather than letting the linked-in build silently change what a query means.
+    fn enforce_foreign_keys_like_system_sqlite(&self) -> Result<()> {
+        self.conn
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .map_err(|e| Error::connect(format!("PRAGMA foreign_keys: {e}")))
     }
 
     pub fn path(&self) -> &str {
@@ -996,6 +1010,24 @@ mod tests {
             .filter(|t| t.table == "posts")
             .collect();
         assert_eq!(triggers.len(), 1, "the trigger must survive the rebuild");
+    }
+
+    /// A fresh connection enforces foreign keys only when the session asks it to. Bundled SQLite is
+    /// compiled with `SQLITE_DEFAULT_FOREIGN_KEYS=1`, so this is the flag the driver has to undo: with
+    /// it left alone, an `INSERT` into a child table starts failing on connections that never enabled
+    /// enforcement.
+    #[test]
+    fn a_fresh_connection_does_not_enforce_foreign_keys() {
+        let path = std::env::temp_dir().join("nook_fk_default_test.db");
+        let _ = std::fs::remove_file(&path);
+        for mut db in [
+            Sqlite::memory().expect("memory"),
+            Sqlite::open(&ConnectionConfig::sqlite(path.to_string_lossy())).expect("file"),
+        ] {
+            let state = db.pragma_rows("PRAGMA foreign_keys").expect("read pragma")[0][0].clone();
+            assert_eq!(state, Value::Int(0), "the documented default is off");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The plan must restore the connection's foreign_keys pragma to what it was, not force it

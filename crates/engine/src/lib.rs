@@ -1357,15 +1357,19 @@ pub(crate) mod test_support {
 
     /// Point the config directory at a scratch path and hold the lock that keeps the job-store tests
     /// from writing over each other. The guard has to stay alive for the whole test.
+    ///
+    /// The directory is unique per call rather than one shared `/tmp/nook-test-config`: deleting the
+    /// database out from under a connection another test still holds makes SQLite answer
+    /// "disk I/O error", and a shared path did exactly that as soon as a test kept its connection
+    /// alive past its own guard. A fresh directory per test cannot collide, so nothing has to be
+    /// deleted at all.
     pub fn scratch_config() -> MutexGuard<'static, ()> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let guard = super::test_lock();
-        let dir = std::env::temp_dir().join("nook-test-config");
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nook-test-config-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
-        // Start from an empty store every time: a leftover jobs.json or nook.db from a previous run
-        // would change what the test sees.
-        for file in ["jobs.json", "profiles.json", "nook.db"] {
-            let _ = std::fs::remove_file(dir.join(file));
-        }
         std::env::set_var("NOOK_CONFIG_DIR", dir);
         guard
     }
@@ -1415,6 +1419,23 @@ pub(crate) mod test_support {
         std::env::set_var("NOOK_SECURITY_BIN", &script);
         std::env::set_var("NOOK_SECRET_TOOL_BIN", &linux);
         (guard, log)
+    }
+
+    /// Does the recorded keychain log name this account? macOS spells it `-a NAME`, `secret-tool`
+    /// spells it `account NAME`, and macOS appends `-w`'s value afterwards, so the pair is matched as
+    /// tokens rather than as a line ending. The tests assert keychain behaviour, not the CLI.
+    pub fn logged_account(calls: &str, name: &str) -> bool {
+        calls.lines().any(|line| {
+            line.split_whitespace()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|w| (w[0] == "-a" || w[0] == "account") && w[1] == name)
+        })
+    }
+
+    /// Did the log record this keychain operation? The two backends use different verbs.
+    pub fn logged_verb(calls: &str, macos: &str, linux: &str) -> bool {
+        calls.contains(macos) || calls.contains(linux)
     }
 
     /// A fake `curl` on `NOOK_CURL_BIN`: it records the whole command line plus the stdin body

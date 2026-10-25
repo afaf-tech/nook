@@ -645,11 +645,10 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         // macOS stores through `security add-generic-password`; Linux through `secret-tool store`.
         // The claim is that the key reached the keychain, not which CLI carried it.
-        if cfg!(target_os = "macos") {
-            assert!(calls.contains("add-generic-password"), "{calls}");
-        } else {
-            assert!(calls.contains("store"), "{calls}");
-        }
+        assert!(
+            crate::test_support::logged_verb(&calls, "add-generic-password", "store"),
+            "{calls}"
+        );
         assert!(calls.contains("ai.openai"), "{calls}");
         // The store file the app owns holds no secret.
         let profile = std::fs::read_to_string(crate::profiles::profiles_path()).unwrap_or_default();

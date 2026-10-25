@@ -673,7 +673,7 @@ mod tests {
         keychain_store(&ssh_account("local"), "hunter2").expect("store");
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(
-            calls.contains("-a local#ssh"),
+            crate::test_support::logged_account(&calls, "local#ssh"),
             "the store's account: {calls}"
         );
         // The two accounts differ: the one the database password uses holds nothing.
@@ -687,8 +687,10 @@ mod tests {
         // The one line the askpass helper prints is the account's secret.
         assert_eq!(ssh_askpass_line("local").expect("askpass"), "hunter2");
         keychain_delete(&ssh_account("local")).expect("delete");
-        assert!(std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .contains("delete-generic-password"));
+        let after = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            crate::test_support::logged_verb(&after, "delete-generic-password", "clear"),
+            "the delete reached the keychain: {after}"
+        );
     }
 }
