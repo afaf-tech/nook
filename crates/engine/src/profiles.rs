@@ -612,31 +612,45 @@ mod tests {
 
     #[test]
     fn a_dial_finds_the_password_the_keychain_holds() {
-        // The state `conn.new` leaves behind: the profile has no password, the login keychain holds it.
         let (_guard, log) = crate::test_support::fake_security("local", "hunter2");
         let mut cfg = ConnectionConfig::new("local", nook_core::DriverKind::Postgres);
+
+        // A profile that carries its own password needs no keychain call at all — true on any host.
+        cfg.password = Some("from-the-profile".into());
+        assert_eq!(
+            db_password(&cfg).expect("resolve").as_deref(),
+            Some("from-the-profile")
+        );
+        let calls = |log: &std::path::Path| {
+            std::fs::read_to_string(log)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        assert_eq!(calls(&log), 0, "no lookup for a profile that has its own");
+
+        if !keychain_available() {
+            // Nowhere to look: a profile with no password simply has none. Windows is this case.
+            cfg.password = None;
+            assert_eq!(db_password(&cfg).expect("resolve"), None);
+            return;
+        }
+
+        // The state `conn.new` leaves behind: the profile has no password, the login keychain holds it.
         cfg.password = None;
         assert_eq!(
             db_password(&cfg).expect("resolve").as_deref(),
             Some("hunter2"),
             "the keychain's copy stands in for a profile that has none"
         );
-
-        // A profile that carries its own password needs no keychain call at all.
-        let before = std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .count();
+        let after_lookup = calls(&log);
+        assert_eq!(after_lookup, 1, "one lookup, for the profile that had none");
         cfg.password = Some("from-the-profile".into());
         assert_eq!(
             db_password(&cfg).expect("resolve").as_deref(),
             Some("from-the-profile")
         );
-        let after = std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .count();
-        assert_eq!(after, before, "no lookup for a profile that has its own");
+        assert_eq!(calls(&log), after_lookup, "no second lookup");
     }
 
     #[test]

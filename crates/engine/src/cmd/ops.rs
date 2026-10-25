@@ -1566,6 +1566,9 @@ mod tests {
         assert!(restore(&mut session, &p).is_err());
     }
 
+    // The fake `curl` is a `#!/bin/sh` script: Windows cannot exec it. A `.cmd` fake is the way to
+    // cover the webhook there; the transport itself is portable.
+    #[cfg(unix)]
     #[test]
     fn failing_job_posts_its_status_to_the_webhook() {
         let (_guard, log) = crate::test_support::fake_curl();

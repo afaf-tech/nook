@@ -599,7 +599,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} is listed"))
                 .clone()
         };
-        assert_eq!(find("openai")["key_set"], true);
+        // A key is "set" only where there is a keychain to hold it: Windows has none, and the fake
+        // installed above is inert there, so the honest expectation is the availability itself.
+        assert_eq!(
+            find("openai")["key_set"],
+            serde_json::json!(crate::profiles::keychain_available())
+        );
         assert_eq!(find("openai")["active"], true);
         assert_eq!(find("openai")["needs_key"], true);
         assert_eq!(find("ollama")["key_set"], false);
