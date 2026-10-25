@@ -956,15 +956,17 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Platform",
         "platform.windows",
         "Windows build",
-        "the CI matrix in .github/workflows/ci.yml builds and tests it; not yet run green, so the \
-         claim stays a gap until it has",
+        "the CI matrix builds, lints and tests it, and has run green since 2026-10-25; the gap is \
+         that no command reports which platforms this build supports, so the claim has nowhere to \
+         be read from",
     ),
     (
         "Platform",
         "platform.linux",
         "Linux build",
-        "the CI matrix in .github/workflows/ci.yml builds and tests it, and profiles.rs has a \
-         secret-tool backend; not yet run green, so the claim stays a gap until it has",
+        "the CI matrix builds, lints and tests it and has run green since 2026-10-25, and \
+         profiles.rs has a secret-tool backend; the gap is that no command reports which platforms \
+         this build supports",
     ),
     (
         "Platform",
