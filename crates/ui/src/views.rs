@@ -2592,71 +2592,8 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
             });
 
             ui.add_space(20.0);
-            card_row(ui, "coverage", |coverage, start, floor| {
-                let left = card(coverage, tokens, floor, |ui| {
-                    ui.label(
-                        RichText::new("Navicat feature coverage")
-                            .size(12.0)
-                            .color(tokens.text_faint),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{}/{}",
-                                report.covered.len(),
-                                report.total()
-                            ))
-                            .size(24.0)
-                            .color(tokens.accent),
-                        );
-                        ui.vertical(|ui| {
-                            ui.add_space(4.0);
-                            design::meter(
-                                ui,
-                                tokens,
-                                (report.percent() / 100.0) as f32,
-                                ui.available_width().max(80.0),
-                                tokens.accent,
-                            );
-                            ui.label(
-                                RichText::new(format!("{:.1}% measured", report.percent()))
-                                    .size(11.0)
-                                    .color(tokens.text_dim),
-                            );
-                        });
-                    });
-                    ui.add_space(6.0);
-                    for area in report.by_area.iter().take(5) {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("{:<14}", table::clip(&area.area, 14)))
-                                    .size(11.0)
-                                    .monospace()
-                                    .color(tokens.text_dim),
-                            );
-                            let count = format!("{}/{}", area.covered, area.total);
-                            // The bar takes what the two labels leave, so a narrow column shrinks
-                            // the meter instead of pushing the count out of the card.
-                            let room = ui.available_width()
-                                - design::text_width(ui, tokens.font(10.5), &count)
-                                - 2.0 * f32::from(design::S4);
-                            design::meter(
-                                ui,
-                                tokens,
-                                (area.percent() / 100.0) as f32,
-                                room.max(40.0),
-                                tokens.info,
-                            );
-                            ui.label(
-                                RichText::new(count)
-                                    .size(10.5)
-                                    .color(tokens.text_faint),
-                            );
-                        });
-                    }
-                });
-
-                let right = card(start, tokens, floor, |ui| {
+            card_row(ui, "start", |start, counters, floor| {
+                let left = card(start, tokens, floor, |ui| {
                     ui.label(RichText::new("Start here").size(12.5).color(tokens.text));
                     ui.add_space(4.0);
                     if design::primary_button(ui, tokens, "Add a connection", true).clicked() {
@@ -2690,43 +2627,6 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                         });
                     }
                 });
-                (left, right)
-            });
-
-            ui.add_space(16.0);
-            card_row(ui, "gaps", |missing, counters, floor| {
-                let left = card(missing, tokens, floor, |ui| {
-                    ui.label(RichText::new("Still missing").size(12.5).color(tokens.text));
-                    ui.add_space(2.0);
-                    for (area, ids) in report.missing_by_area().into_iter().take(6) {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(area).size(11.5).color(tokens.text_dim));
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        RichText::new(format!("{} gaps", ids.len()))
-                                            .size(11.0)
-                                            .color(tokens.text_faint),
-                                    );
-                                },
-                            );
-                        });
-                        // The ids get their own line, elided by pixel width: the old single line cut
-                        // the joined list at 44 characters, which landed mid-identifier.
-                        ui.label(
-                            RichText::new(table::ellipsize(
-                                ui,
-                                &ids.join(", "),
-                                tokens.mono(10.5),
-                                ui.available_width(),
-                            ))
-                            .monospace()
-                            .size(10.5)
-                            .color(tokens.text_faint),
-                        );
-                    }
-                });
 
                 let right = card(counters, tokens, floor, |ui| {
                     ui.label(RichText::new("This session").size(12.5).color(tokens.text));
@@ -2749,6 +2649,37 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                     }
                 });
                 (left, right)
+            });
+
+            ui.add_space(16.0);
+            card(ui, tokens, 0.0, |ui| {
+                ui.label(RichText::new("Still missing").size(12.5).color(tokens.text));
+                ui.add_space(2.0);
+                for (area, ids) in report.missing_by_area().into_iter().take(6) {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(area).size(11.5).color(tokens.text_dim));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{} gaps", ids.len()))
+                                    .size(11.0)
+                                    .color(tokens.text_faint),
+                            );
+                        });
+                    });
+                    // The ids get their own line, elided by pixel width: the old single line cut
+                    // the joined list at 44 characters, which landed mid-identifier.
+                    ui.label(
+                        RichText::new(table::ellipsize(
+                            ui,
+                            &ids.join(", "),
+                            tokens.mono(10.5),
+                            ui.available_width(),
+                        ))
+                        .monospace()
+                        .size(10.5)
+                        .color(tokens.text_faint),
+                    );
+                }
             });
             ui.add_space(20.0);
         });
@@ -2822,6 +2753,64 @@ mod tests {
         // The tab's own copy is the stale one this fix steps over.
         let stale = session.tabs[tab].table.clone().expect("a snapshot");
         assert!(!names(&stale).contains(&"loyalty_tier".to_string()));
+    }
+
+    /// The start page carries the actions, the session's counters and the gap list — and nothing that
+    /// scores the catalog. The coverage card was a self-assessment on the first screen; it belongs in
+    /// `docs/parity-checklist.md`, not in the product.
+    #[test]
+    fn the_start_page_does_not_score_its_own_catalog() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        tokens.apply(&ctx);
+        let mut session = nook_engine::Session::new();
+        let mut state = crate::app::UiState::default();
+        // The context has no fonts until it has run a frame.
+        let mut warm = ctx.run_ui(egui::RawInput::default(), |_| {});
+        warm.textures_delta.clear();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(776.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default_margins().show(ui, |ui| {
+                    welcome(ui, &mut session, &mut state, &tokens);
+                });
+            },
+        );
+        let mut painted: Vec<String> = Vec::new();
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped in &out.shapes {
+            walk(&clipped.shape, &mut painted);
+        }
+        // The headless context never applies the frame's texture delta.
+        out.textures_delta.clear();
+        let shows = |needle: &str| painted.iter().any(|text| text.contains(needle));
+
+        assert!(
+            !shows("Navicat feature coverage"),
+            "the start page must not score the catalog: {painted:#?}"
+        );
+        assert!(!shows("measured"), "no coverage percentage: {painted:#?}");
+        for expected in ["Start here", "This session", "Still missing"] {
+            assert!(shows(expected), "{expected} is painted: {painted:#?}");
+        }
+        assert!(shows("Add a connection"));
+        assert!(shows("commands run"));
     }
 
     /// A connection of this test's own, holding `users`: the demo session's database is one file at
