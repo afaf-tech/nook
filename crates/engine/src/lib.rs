@@ -1440,6 +1440,10 @@ pub(crate) mod test_support {
 
     /// A fake `curl` on `NOOK_CURL_BIN`: it records the whole command line plus the stdin body
     /// to a log and exits 0. Same lock discipline as `fake_security` — one process-wide override.
+    ///
+    /// The fake is a `#!/bin/sh` script, so it is only usable where a shell can exec it; its callers
+    /// are gated the same way, and gating it too keeps it from being dead code on Windows.
+    #[cfg(unix)]
     pub fn fake_curl() -> (MutexGuard<'static, ()>, std::path::PathBuf) {
         let guard = scratch_config();
         let dir = std::env::temp_dir().join("nook-test-curl");
