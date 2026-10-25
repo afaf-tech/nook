@@ -169,6 +169,42 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Cloud database connections",
         "not implemented; connect over a tunnel instead",
     ),
+    (
+        "Connection",
+        "conn.pamAuth",
+        "PAM authentication",
+        "not implemented; the drivers offer password auth only",
+    ),
+    (
+        "Connection",
+        "conn.ldapAuth",
+        "LDAP authentication",
+        "not implemented; the drivers offer password auth only",
+    ),
+    (
+        "Connection",
+        "conn.kerberosAuth",
+        "Kerberos authentication",
+        "not implemented; the drivers offer password auth only",
+    ),
+    (
+        "Connection",
+        "conn.settingsFile",
+        "Export and import connection settings",
+        "not implemented; profiles.json is copied by hand. Job profiles already export and import",
+    ),
+    (
+        "Connection",
+        "conn.pubsub",
+        "Pub/Sub",
+        "not implemented; needs a Redis or MongoDB driver first",
+    ),
+    (
+        "Connection",
+        "conn.setColor",
+        "Customize connection colourings",
+        "a colour per profile, painted in the tree",
+    ),
     // ---------------------------------------------------------------- Data grid
     ("Data", "grid.open", "Open table data", ""),
     (
@@ -502,7 +538,7 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "Import/Export",
         "tools.importDbf",
         "Import DBF",
-        "not implemented",
+        "dBASE III/IV fixed-width records; deleted rows skipped and counted",
     ),
     (
         "Import/Export",
@@ -966,6 +1002,114 @@ const ENTRIES: &[(&str, &str, &str, &str)] = &[
         "ai.tables",
         "Tables for the prompt",
         "the candidates an @ mention resolves against, from the live catalog",
+    ),
+    // -------------------------------------------- Navicat features the 2026-10-25 audit found
+    // missing from this catalog. None has a command yet, so each one lowers the measured
+    // percentage — which is the point: the number now counts them instead of ignoring them.
+    (
+        "Data",
+        "data.masking",
+        "Data masking",
+        "not implemented; the generator can fake a column, not mask an existing one",
+    ),
+    (
+        "Data",
+        "data.typeColors",
+        "Customize data type colourings",
+        "not implemented; the grid paints one colour for every type",
+    ),
+
+    (
+        "Query",
+        "sql.refactor",
+        "Refactoring",
+        "not implemented; rename and drop are on the design toolbar, not in the editor",
+    ),
+    (
+        "Query",
+        "sql.findBuilder",
+        "Find builder",
+        "not implemented; the grid filter takes a WHERE clause by hand",
+    ),
+    (
+        "Query",
+        "sql.aggregateBuilder",
+        "Aggregate builder",
+        "not implemented; report.aggregate and report.pivot are the closest surface",
+    ),
+    (
+        "Query",
+        "sql.console",
+        "Console",
+        "the message log (app.log) and the control channel; no REPL pane",
+    ),
+    (
+        "Query",
+        "sql.pinnedResult",
+        "Pin query result",
+        "not implemented; a result lives in its tab until the tab closes",
+    ),
+    (
+        "Import/Export",
+        "tools.importParquet",
+        "Import Parquet",
+        "not implemented; needs a Parquet reader crate",
+    ),
+    (
+        "Import/Export",
+        "tools.exportParquet",
+        "Export to Parquet",
+        "not implemented; needs a Parquet writer crate",
+    ),
+    (
+        "Import/Export",
+        "tools.importOdbc",
+        "Import from ODBC",
+        "not implemented; the drivers speak their own wire protocols, not ODBC",
+    ),
+    (
+        "Import/Export",
+        "tools.importAccess",
+        "Import from MS Access",
+        "not implemented; .accdb is not a format any current driver reads",
+    ),
+    (
+        "Import/Export",
+        "tools.exportAccess",
+        "Export to MS Access",
+        "not implemented; .accdb is not a format any current driver writes",
+    ),
+    (
+        "Import/Export",
+        "tools.exportDbf",
+        "Export to DBF",
+        "not implemented; the reader landed, the writer has not",
+    ),
+
+    (
+        "Monitor",
+        "monitor.commandLog",
+        "Command monitor",
+        "monitor.processes lists live statements; there is no server-side history view",
+    ),
+    (
+        "Modeler",
+        "diagram.exportPdf",
+        "Print a diagram to PDF",
+        "not implemented; the export writes SVG only",
+    ),
+    (
+        "Tools",
+        "tools.schemaAnalysis",
+        "Schema analysis",
+        "not implemented; the structure diff is the closest surface",
+    ),
+
+    (
+        "Tools",
+        "sql.zen",
+        "Focus mode",
+        "the command exists (editor.safeMode's neighbour) but the catalog never listed it",
     ),
 ];
 

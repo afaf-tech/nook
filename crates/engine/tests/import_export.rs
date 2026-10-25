@@ -794,3 +794,124 @@ fn a_jsonl_file_streams_line_by_line() {
     assert_eq!(out["inserted"], json!(2), "{out}");
     assert_eq!(f.count("people"), 2);
 }
+
+// ---------------------------------------------------------------- dbf
+
+/// A dBASE III file, built here so the bytes the parser depends on are visible in the test.
+fn dbf(fields: &[(&str, u8, usize)], records: &[&[&str]]) -> Vec<u8> {
+    let record_length: usize = 1 + fields.iter().map(|f| f.2).sum::<usize>();
+    let header_length = 32 + fields.len() * 32 + 1;
+    let mut out = vec![0x03, 126, 1, 1];
+    out.extend_from_slice(&(records.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(header_length as u16).to_le_bytes());
+    out.extend_from_slice(&(record_length as u16).to_le_bytes());
+    out.extend_from_slice(&[0u8; 20]);
+    for (name, kind, length) in fields {
+        let mut slot = [0u8; 32];
+        slot[..name.len()].copy_from_slice(name.as_bytes());
+        slot[11] = *kind;
+        slot[16] = *length as u8;
+        out.extend_from_slice(&slot);
+    }
+    out.push(0x0D);
+    for values in records {
+        out.push(0x20);
+        for ((_, kind, length), value) in fields.iter().zip(values.iter()) {
+            let bytes = value.as_bytes();
+            let take = bytes.len().min(*length);
+            let at = if matches!(kind, b'N' | b'F') && take < *length {
+                *length - take
+            } else {
+                0
+            };
+            let mut cell = vec![b' '; *length];
+            cell[at..at + take].copy_from_slice(&bytes[..take]);
+            out.extend_from_slice(&cell);
+        }
+    }
+    out.push(0x1A);
+    out
+}
+
+#[test]
+fn a_dbf_file_imports_its_fixed_width_records() {
+    let mut f = Fixture::new("dbf");
+    let bytes = dbf(
+        &[("NAME", b'C', 10), ("AMOUNT", b'N', 8), ("BORN", b'D', 8)],
+        &[&["Ada", "42", "18151210"], &["Grace", "-7", "19060809"]],
+    );
+    let path = f.dir.join("people.dbf");
+    std::fs::write(&path, bytes).expect("write dbf");
+    let out = f.run(
+        "tools.importDbf",
+        json!({"conn": f.conn.clone(), "path": path.to_string_lossy(), "table": "people"}),
+    );
+    assert_eq!(out["format"], json!("dbf"), "{out}");
+    assert_eq!(out["inserted"], json!(2), "{out}");
+    let rows =
+        f.sql("SELECT NAME AS name, AMOUNT AS amount, BORN AS born FROM people ORDER BY NAME");
+    assert_eq!(rows["objects"][0]["name"], json!("Ada"));
+    assert_eq!(rows["objects"][0]["amount"], json!("42"));
+    assert_eq!(rows["objects"][0]["born"], json!("1815-12-10"));
+    assert_eq!(rows["objects"][1]["amount"], json!("-7"));
+}
+
+#[test]
+fn a_deleted_dbf_record_is_skipped_and_reported() {
+    let mut f = Fixture::new("dbf-deleted");
+    let mut bytes = dbf(&[("NAME", b'C', 5)], &[&["keep"], &["gone"], &["also"]]);
+    // The second record's deletion flag: header is 32 + 32 + 1 bytes, each record is 6.
+    bytes[65 + 6] = 0x2A;
+    let path = f.dir.join("gone.dbf");
+    std::fs::write(&path, bytes).expect("write dbf");
+    let out = f.run(
+        "tools.importDbf",
+        json!({"conn": f.conn.clone(), "path": path.to_string_lossy(), "table": "people"}),
+    );
+    assert_eq!(out["inserted"], json!(2), "{out}");
+    assert_eq!(out["deleted"], json!(1), "{out}");
+    assert_eq!(f.count("people"), 2);
+}
+
+#[test]
+fn a_visual_foxpro_table_is_refused_before_the_table_is_touched() {
+    let mut f = Fixture::new("dbf-fox");
+    let mut bytes = dbf(&[("NAME", b'C', 5)], &[&["x"]]);
+    bytes[0] = 0x30;
+    let path = f.dir.join("fox.dbf");
+    std::fs::write(&path, bytes).expect("write dbf");
+    let err = f
+        .try_run(
+            "tools.importDbf",
+            json!({"conn": f.conn.clone(), "path": path.to_string_lossy(), "table": "people"}),
+        )
+        .expect_err("foxpro is refused");
+    assert!(err.message().contains("Visual FoxPro"), "{err}");
+    // No table was created: a refused file must not leave a half-built table behind.
+    let objects = f.run("schema.tables", json!({"conn": f.conn.clone()}));
+    let names = objects["objects"].to_string();
+    assert!(!names.contains("people"), "no table was created: {names}");
+}
+
+#[test]
+fn the_import_wizard_previews_a_dbf_without_writing() {
+    let mut f = Fixture::new("dbf-wizard");
+    let bytes = dbf(
+        &[("NAME", b'C', 6), ("AMOUNT", b'N', 5)],
+        &[&["Ada", "42"], &["Grace", "7"]],
+    );
+    let path = f.dir.join("preview.dbf");
+    std::fs::write(&path, bytes).expect("write dbf");
+    let out = f.run(
+        "tools.importWizard",
+        json!({"conn": f.conn.clone(), "path": path.to_string_lossy(), "table": "people"}),
+    );
+    assert_eq!(out["columns"][0]["source"], json!("NAME"), "{out}");
+    assert_eq!(out["preview"][1][0], json!("Grace"), "{out}");
+    // Nothing was written, so the table must not exist at all.
+    let objects = f.run("schema.tables", json!({"conn": f.conn.clone()}));
+    assert!(
+        !objects["objects"].to_string().contains("people"),
+        "the wizard writes nothing: {objects}"
+    );
+}

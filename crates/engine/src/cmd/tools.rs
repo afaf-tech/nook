@@ -45,6 +45,9 @@ pub fn commands() -> Vec<CommandSpec> {
         CommandSpec::new("tools.importXml", "Import XML", "Tools", import_xml)
             .params(r#"{"path":"~/data/users.xml","table":"users","row":"record"}"#)
             .help("Flat XML: one element per row, one child per column. Nested XML is refused by name."),
+        CommandSpec::new("tools.importDbf", "Import DBF", "Tools", import_dbf)
+            .params(r#"{"path":"~/data/people.dbf","table":"people","create_table":true}"#)
+            .help("dBASE III/IV: the header names the columns and their widths. Deleted records are skipped and counted; dBASE II and Visual FoxPro are refused by name."),
         CommandSpec::new("tools.textImporter", "Import fixed-width text", "Tools", text_importer)
             .params(r#"{"path":"~/data/codes.txt","table":"codes","widths":[3,12,8],"header":false}"#)
             .help("A delimiter-less file split on explicit column widths."),
@@ -1137,6 +1140,37 @@ fn import_wizard(session: &mut Session, p: &Params) -> Result<serde_json::Value>
                 )],
             )
         }
+        "dbf" => {
+            let mut rows = crate::dbf::open(&path)?;
+            let columns = rows.columns();
+            let mut samples = Vec::new();
+            let mut preview = Vec::new();
+            for row in rows.by_ref().take(sample_limit + preview_rows) {
+                let row = row?;
+                if preview.len() < preview_rows {
+                    preview.push(row.clone());
+                }
+                samples.push(row);
+            }
+            let mut notes = vec![
+                "dBASE III/IV: the header declares the columns and their widths, so there is no \
+                 header or delimiter to choose"
+                    .to_string(),
+            ];
+            if rows.deleted() > 0 {
+                notes.push(format!(
+                    "{} deleted record(s) in the sample will be skipped",
+                    rows.deleted()
+                ));
+            }
+            (
+                columns,
+                samples,
+                preview,
+                "utf-8, latin-1 per field".to_string(),
+                notes,
+            )
+        }
         _ => {
             let latin1 = p
                 .str_opt("encoding")
@@ -1357,6 +1391,31 @@ fn import_xml(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
     let mut out = import_stream(session, index, &reference, plan, rows.into_iter())?;
     out["path"] = json!(path.to_string_lossy());
     out["format"] = json!("xml");
+    Ok(out)
+}
+
+/// dBASE III/IV. The header names the columns and their widths, so no `header` or `widths`
+/// parameter: unlike a text file, the shape is declared in the file itself.
+fn import_dbf(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
+    let path = crate::cmd::grid::expand(&p.str_arg("path")?, &session.home);
+    let index = session.resolve_conn(p)?;
+    let reference = TableRef::parse(&p.str_arg("table")?);
+    let create_table = p.bool_opt("create_table", true);
+    // Opened before the plan: a Visual FoxPro table is refused here, so `truncate` cannot run on a
+    // file that was never going to import.
+    let mut rows = crate::dbf::open(&path)?;
+    let file_columns = rows.columns();
+    let plan = prepare_import(session, index, &reference, file_columns, p, create_table)?;
+    let mut out = import_stream(session, index, &reference, plan, &mut rows)?;
+    out["path"] = json!(path.to_string_lossy());
+    out["format"] = json!("dbf");
+    out["deleted"] = json!(rows.deleted());
+    if rows.deleted() > 0 {
+        out["notes"] = json!([format!(
+            "{} record(s) carried the deletion flag and were skipped",
+            rows.deleted()
+        )]);
+    }
     Ok(out)
 }
 

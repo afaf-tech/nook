@@ -1722,6 +1722,8 @@ fn import_wizard_dialog(
             let lower = next.path.to_ascii_lowercase();
             let command = if lower.ends_with(".xml") {
                 "tools.importXml"
+            } else if lower.ends_with(".dbf") {
+                "tools.importDbf"
             } else if lower.ends_with(".txt") || lower.ends_with(".text") {
                 "tools.textImporter"
             } else if lower.ends_with(".json") || lower.ends_with(".jsonl") {

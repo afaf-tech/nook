@@ -910,6 +910,8 @@ fn import(args: &[String]) -> CliResult {
         "tools.importJson"
     } else if file.to_ascii_lowercase().ends_with(".xlsx") {
         "tools.importExcel"
+    } else if file.to_ascii_lowercase().ends_with(".dbf") {
+        "tools.importDbf"
     } else {
         "tools.importCsv"
     };

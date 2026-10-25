@@ -69,8 +69,13 @@ impl ParityReport {
     }
 
     /// The rising floor used by the test suite: coverage may never drop below this.
+    ///
+    /// It fell from 92.6% to 84.4% on 2026-10-25 without a single command being removed: the
+    /// catalog was missing ~20 Navicat features outright (data masking, Parquet, ODBC, Access,
+    /// PAM/LDAP/Kerberos, command monitor, Pub/Sub, schema analysis, PDF diagram export), so the
+    /// old number measured a denominator that had quietly left them out.
     pub fn floor_percent() -> f64 {
-        55.0
+        84.0
     }
 
     pub fn markdown(&self) -> String {

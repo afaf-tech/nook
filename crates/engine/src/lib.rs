@@ -13,6 +13,7 @@ pub mod catalog;
 pub mod cmd;
 pub mod csv;
 pub mod datagen;
+pub mod dbf;
 pub mod filter;
 pub mod infer;
 pub mod jobs;
