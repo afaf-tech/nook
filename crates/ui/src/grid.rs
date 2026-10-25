@@ -865,7 +865,10 @@ pub fn show(
                 .iter()
                 .map(|(name, w)| (name.clone(), serde_json::json!(w)))
                 .collect();
-            command = Some(("grid.columnWidths", serde_json::json!({ "widths": widths_map })));
+            command = Some((
+                "grid.columnWidths",
+                serde_json::json!({ "widths": widths_map }),
+            ));
         }
         TableEvent::None => {}
     }

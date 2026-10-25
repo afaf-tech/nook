@@ -1852,11 +1852,14 @@ pub fn statement_band(
         }
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = f32::from(S1);
-            ui.label(RichText::new(title).size(T_MD).color(tokens.text));
-            ui.label(
-                RichText::new(message)
-                    .font(tokens.mono(T_XS))
-                    .color(tokens.text_dim),
+            ui.add(egui::Label::new(RichText::new(title).size(T_MD).color(tokens.text)).truncate());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(message)
+                        .font(tokens.mono(T_XS))
+                        .color(tokens.text_dim),
+                )
+                .truncate(),
             );
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -1934,11 +1937,16 @@ pub fn register_error_band(
                 tokens.mono(T_XS),
                 tokens.error,
             );
-            ui.label(RichText::new(message).size(T_SM).color(tokens.text));
-            ui.label(
-                RichText::new(statement)
-                    .font(tokens.mono(T_XS))
-                    .color(tokens.text_dim),
+            ui.add(
+                egui::Label::new(RichText::new(message).size(T_SM).color(tokens.text)).truncate(),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(statement)
+                        .font(tokens.mono(T_XS))
+                        .color(tokens.text_dim),
+                )
+                .truncate(),
             );
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {

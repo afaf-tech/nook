@@ -706,7 +706,10 @@ fn status_bar(
         egui::Align::Center,
         |ui| {
             ui.spacing_mut().item_spacing.x = f32::from(design::S5);
-            ui.label(RichText::new(stat_text(run)).size(design::T_SM).color(ink));
+            ui.add(
+                egui::Label::new(RichText::new(stat_text(run)).size(design::T_SM).color(ink))
+                    .truncate(),
+            );
             // A background run's own sentence wins: the note describes what the result *is*, and
             // while a run is in flight the honest answer is the count so far, not a total that is
             // still moving.

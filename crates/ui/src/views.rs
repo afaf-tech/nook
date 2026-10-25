@@ -2502,6 +2502,58 @@ pub fn users(
     }
 }
 
+/// Two cards side by side: equal width from `columns`, equal height from what the pair measured last
+/// frame. A fixed `set_min_height` is not enough — a card whose contents outgrow it keeps its own
+/// height and the row ends ragged — so the taller of the two is remembered in egui's temp data and
+/// the frame is discarded once when it changes, which re-lays both cards at that height.
+fn card_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    add: impl FnOnce(&mut egui::Ui, &mut egui::Ui, f32) -> (f32, f32),
+) {
+    // The floor is remembered per width: a resize re-measures, so a row narrowed or widened does not
+    // inherit a height that only fitted the old column.
+    let width = ui.available_width().round() as i32;
+    let key = egui::Id::new(("welcome-card-row", id, width));
+    let settled: f32 = ui.data(|data| data.get_temp(key)).unwrap_or(0.0);
+    let mut tallest = settled;
+    ui.horizontal(|ui| {
+        ui.add_space(24.0);
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.x = f32::from(design::S5);
+            ui.columns(2, |cols| {
+                let (left, right) = cols.split_at_mut(1);
+                let (a, b) = add(&mut left[0], &mut right[0], settled);
+                tallest = tallest.max(a).max(b);
+            });
+        });
+    });
+    if tallest > settled + 0.5 {
+        ui.data_mut(|data| data.insert_temp(key, tallest));
+        ui.ctx()
+            .request_discard("welcome cards settle to one height");
+    }
+}
+
+/// One welcome card: the frame filled to its column and at least `min_height` tall. Returns the height
+/// it ended up with, which [`card_row`] feeds back as the row's floor.
+fn card(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    min_height: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) -> f32 {
+    let mut height = 0.0;
+    design::card_frame(tokens).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.set_min_height(min_height);
+        add(ui);
+        height = ui.min_rect().height();
+    });
+    height
+}
+
 /// The start page: what this is, what to do first, and the measured feature coverage.
 pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
     let report = nook_engine::parity::measure();
@@ -2524,20 +2576,24 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                 ui.add_space(14.0);
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Nook").size(26.0).color(tokens.text));
+                    // One line: the paragraph used to wrap to the pane's full width and push the
+                    // cards down unevenly.
                     ui.label(
-                        RichText::new("Database administration for SQLite, PostgreSQL and MySQL — native, one command registry behind the UI, the CLI, the control channel and MCP.")
-                            .size(12.5)
-                            .color(tokens.text_dim),
+                        RichText::new(table::ellipsize(
+                            ui,
+                            "Database administration for SQLite, PostgreSQL and MySQL — native, one command registry behind the UI, the CLI, the control channel and MCP.",
+                            tokens.font(12.5),
+                            ui.available_width(),
+                        ))
+                        .size(12.5)
+                        .color(tokens.text_dim),
                     );
                 });
             });
 
             ui.add_space(20.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.add_space(24.0);
-                design::card_frame(tokens).show(ui, |ui| {
-                    ui.set_min_width(430.0);
-                    ui.vertical(|ui| {
+            card_row(ui, "coverage", |coverage, start, floor| {
+                let left = card(coverage, tokens, floor, |ui| {
                     ui.label(
                         RichText::new("Navicat feature coverage")
                             .size(12.0)
@@ -2559,7 +2615,7 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                                 ui,
                                 tokens,
                                 (report.percent() / 100.0) as f32,
-                                240.0,
+                                ui.available_width().max(80.0),
                                 tokens.accent,
                             );
                             ui.label(
@@ -2578,26 +2634,29 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                                     .monospace()
                                     .color(tokens.text_dim),
                             );
+                            let count = format!("{}/{}", area.covered, area.total);
+                            // The bar takes what the two labels leave, so a narrow column shrinks
+                            // the meter instead of pushing the count out of the card.
+                            let room = ui.available_width()
+                                - design::text_width(ui, tokens.font(10.5), &count)
+                                - 2.0 * f32::from(design::S4);
                             design::meter(
                                 ui,
                                 tokens,
                                 (area.percent() / 100.0) as f32,
-                                130.0,
+                                room.max(40.0),
                                 tokens.info,
                             );
                             ui.label(
-                                RichText::new(format!("{}/{}", area.covered, area.total))
+                                RichText::new(count)
                                     .size(10.5)
                                     .color(tokens.text_faint),
                             );
                         });
                     }
-                    });
                 });
 
-                design::card_frame(tokens).show(ui, |ui| {
-                    ui.set_min_width(320.0);
-                    ui.vertical(|ui| {
+                let right = card(start, tokens, floor, |ui| {
                     ui.label(RichText::new("Start here").size(12.5).color(tokens.text));
                     ui.add_space(4.0);
                     if design::primary_button(ui, tokens, "Add a connection", true).clicked() {
@@ -2607,8 +2666,7 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                         state.want_demo = true;
                     }
                     if design::ghost_button(ui, tokens, "New query tab", true).clicked() {
-                        let index =
-                            session.add_tab(TabKind::Query, "Query", session.active_conn);
+                        let index = session.add_tab(TabKind::Query, "Query", session.active_conn);
                         state.active_tab_override = Some(index);
                     }
                     if design::ghost_button(ui, tokens, "Jobs and automation", true).clicked() {
@@ -2631,30 +2689,46 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                             ui.label(RichText::new(what).size(11.5).color(tokens.text_dim));
                         });
                     }
-                    });
                 });
+                (left, right)
             });
 
             ui.add_space(16.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.add_space(24.0);
-                design::card_frame(tokens).show(ui, |ui| {
-                    ui.set_min_width(470.0);
-                    ui.vertical(|ui| {
+            card_row(ui, "gaps", |missing, counters, floor| {
+                let left = card(missing, tokens, floor, |ui| {
                     ui.label(RichText::new("Still missing").size(12.5).color(tokens.text));
                     ui.add_space(2.0);
                     for (area, ids) in report.missing_by_area().into_iter().take(6) {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(area).size(11.5).color(tokens.text_dim));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(format!("{} gaps", ids.len()))
+                                            .size(11.0)
+                                            .color(tokens.text_faint),
+                                    );
+                                },
+                            );
+                        });
+                        // The ids get their own line, elided by pixel width: the old single line cut
+                        // the joined list at 44 characters, which landed mid-identifier.
                         ui.label(
-                            RichText::new(format!("{area}: {} gaps — {}", ids.len(), table::clip(&ids.join(", "), 44)))
-                                .size(11.0)
-                                .color(tokens.text_dim),
+                            RichText::new(table::ellipsize(
+                                ui,
+                                &ids.join(", "),
+                                tokens.mono(10.5),
+                                ui.available_width(),
+                            ))
+                            .monospace()
+                            .size(10.5)
+                            .color(tokens.text_faint),
                         );
                     }
-                    });
                 });
-                design::card_frame(tokens).show(ui, |ui| {
-                    ui.set_min_width(280.0);
-                    ui.vertical(|ui| {
+
+                let right = card(counters, tokens, floor, |ui| {
                     ui.label(RichText::new("This session").size(12.5).color(tokens.text));
                     for (label, value) in [
                         ("connections", session.conns.len().to_string()),
@@ -2668,15 +2742,13 @@ pub fn welcome(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, to
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.label(
-                                        RichText::new(value).size(11.5).color(tokens.text),
-                                    );
+                                    ui.label(RichText::new(value).size(11.5).color(tokens.text));
                                 },
                             );
                         });
                     }
-                    });
                 });
+                (left, right)
             });
             ui.add_space(20.0);
         });

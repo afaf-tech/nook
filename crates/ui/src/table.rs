@@ -287,7 +287,8 @@ fn column_widths(ui: &Ui, tokens: &Tokens, view: &TableView<'_>) -> Vec<f32> {
             }
             // A width override from a user drag wins over content measurement and the numeric cap:
             // the user's drag is the authority, not the longest value in the column.
-            if let Some((_, override_w)) = view.widths.iter().find(|(name, _)| name == &column.name) {
+            if let Some((_, override_w)) = view.widths.iter().find(|(name, _)| name == &column.name)
+            {
                 return override_w.clamp(MIN_COL_W, MAX_DRAG_W);
             }
             let mut width =
@@ -374,7 +375,6 @@ pub fn show(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             event = head(ui, tokens, view, &widths, viewport_w, total_w, id);
-
 
             egui::ScrollArea::vertical()
                 .id_salt(id.with("v"))
@@ -1404,7 +1404,10 @@ mod tests {
         });
         out.textures_delta.clear();
         let resize_response = ctx.read_response(id.with(("resize", 0))).unwrap();
-        assert!(resize_response.hovered(), "the resize strip should be hovered");
+        assert!(
+            resize_response.hovered(),
+            "the resize strip should be hovered"
+        );
         // Now try the drag, split across multiple frames so egui can recognize it.
         // Frame 1: press the button.
         let events = vec![press(start, true)];
@@ -1462,7 +1465,13 @@ mod tests {
                 row_menu: None,
                 widths: &widths,
             };
-            let _ = show(ui, &tokens, &mut view, &mut state, egui::Id::new("override"));
+            let _ = show(
+                ui,
+                &tokens,
+                &mut view,
+                &mut state,
+                egui::Id::new("override"),
+            );
             measured = column_widths(ui, &tokens, &view)[0];
         });
         out.textures_delta.clear();

@@ -1048,10 +1048,13 @@ fn strip(
             }
             if row.fact {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(fact)
-                            .font(tokens.mono(design::T_XS))
-                            .color(tokens.text_dim),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(fact)
+                                .font(tokens.mono(design::T_XS))
+                                .color(tokens.text_dim),
+                        )
+                        .truncate(),
                     );
                 });
             }

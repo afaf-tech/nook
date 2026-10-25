@@ -633,7 +633,7 @@ pub fn show(
                                     ui.painter().text(
                                         egui::pos2(rect.right() - 12.0, rect.center().y),
                                         Align2::RIGHT_CENTER,
-                                        format!("~{rows}"),
+                                        format!("{rows}"),
                                         tokens.font(10.0),
                                         tokens.text_faint,
                                     );
