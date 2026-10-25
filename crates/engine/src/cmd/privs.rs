@@ -108,8 +108,8 @@ fn roles(session: &mut Session, p: &Params) -> Result<serde_json::Value> {
             }
             _ => {
                 // `mysql.role_edges` has no `TO_ROLE`: it is (FROM_USER, FROM_HOST) → (TO_USER,
-                 // TO_HOST), so the role is the FROM side and the member is the TO side. Naming the
-                 // columns backwards made MySQL 8.4 answer `Unknown column 'TO_ROLE'`.
+                // TO_HOST), so the role is the FROM side and the member is the TO side. Naming the
+                // columns backwards made MySQL 8.4 answer `Unknown column 'TO_ROLE'`.
                 "SELECT FROM_USER AS role, TO_USER AS member, WITH_ADMIN_OPTION AS admin_option \
                  FROM mysql.role_edges ORDER BY FROM_USER, TO_USER"
             }

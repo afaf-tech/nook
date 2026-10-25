@@ -642,7 +642,11 @@ mod tests {
             session.conns[index].cfg.port, 3311,
             "the in-memory config still dials the old port"
         );
-        assert_eq!(session.conns.len(), 1, "the second save added a second connection");
+        assert_eq!(
+            session.conns.len(),
+            1,
+            "the second save added a second connection"
+        );
     }
 
     #[test]

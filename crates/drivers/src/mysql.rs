@@ -212,7 +212,10 @@ fn visible_databases(all: &[String], current: &str) -> Vec<String> {
         if name == current {
             continue;
         }
-        if SYSTEM_DATABASES.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+        if SYSTEM_DATABASES
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(name))
+        {
             continue;
         }
         if out.iter().any(|existing| existing == name) {
@@ -222,7 +225,6 @@ fn visible_databases(all: &[String], current: &str) -> Vec<String> {
     }
     out
 }
-
 
 impl Driver for MySql {
     fn kind(&self) -> DriverKind {
@@ -872,10 +874,7 @@ mod tests {
             "alpha".into(),
             "beta".into(),
         ];
-        assert_eq!(
-            visible_databases(&all, "alpha"),
-            vec!["alpha", "beta"]
-        );
+        assert_eq!(visible_databases(&all, "alpha"), vec!["alpha", "beta"]);
 
         // Duplicates collapse; order follows the first occurrence in `all`.
         let all = vec!["beta".into(), "alpha".into(), "beta".into(), "gamma".into()];
@@ -887,5 +886,4 @@ mod tests {
         // Empty `all` still yields [current].
         assert_eq!(visible_databases(&[], "alpha"), vec!["alpha"]);
     }
-
 }

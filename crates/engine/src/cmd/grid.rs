@@ -2582,8 +2582,7 @@ mod tests {
         crate::cmd::bind_grid_table(&mut session, index, table.clone()).expect("bind");
         session.active_tab = Some(index);
 
-        let p = Params::from_json(json!({"widths": {"email": 320.0, "id": 90.0}}))
-            .expect("params");
+        let p = Params::from_json(json!({"widths": {"email": 320.0, "id": 90.0}})).expect("params");
         let out = column_widths_cmd(&mut session, &p).expect("save widths");
         assert_eq!(out["widths"]["email"], 320.0);
         assert_eq!(out["widths"]["id"], 90.0);
