@@ -21,9 +21,14 @@ jobs:
 
       # The keychain has three backends, and only one of them is compiled on each host, so the
       # suite runs everywhere rather than on macOS alone.
+      #
+      # The GUI crates are part of the workspace, so a Linux build also needs the windowing
+      # headers: winit's wayland backend links libwayland-client and libxkbcommon at build time.
       - name: apt packages (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsecret-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-tools libwayland-dev libxkbcommon-dev pkg-config
 
       - name: fmt
         run: cargo fmt --all --check

@@ -32,7 +32,9 @@ serde_json = "1"
 rusqlite = "0.40"
 postgres = "0.19"
 mysql = "28"
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+# default-features = false is deliberate (no wgpu, glow instead), but that also drops winit's
+# x11/wayland backends, which winit turns into a compile_error on Linux. Name them explicitly.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 egui = "0.36"
 egui_kittest = { version = "0.36", features = ["snapshot", "wgpu"] }
 rfd = "0.15"

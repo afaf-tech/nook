@@ -173,6 +173,9 @@ pub(crate) fn restrict_permissions(path: &std::path::Path) {
             let _ = std::fs::set_permissions(path, perms);
         }
     }
+    // Windows has no mode bits; ACLs are inherited from the parent directory instead.
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 // ------------------------------------------------------------------ keychain
