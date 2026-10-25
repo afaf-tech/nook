@@ -712,6 +712,19 @@ fn safe_mode_gates_the_commit_on_a_token_only_a_connection_test_hands_out() {
         .expect_err("wrong token on a drop");
     assert!(err.message().contains("safe mode"), "{err}");
 
+    if !nook_engine::profiles::keychain_available() {
+        // A token is minted into a keychain; with none, enabling safe mode can never hand one out,
+        // so the gate stays closed for every token. Windows is this case.
+        let err = nook_engine::profiles::safe_token(&f.conn).expect_err("no keychain");
+        assert!(err.message().contains("cmdkey"), "{err}");
+        let err = f
+            .session
+            .run("grid.apply", json!({"safe_token": "anything"}))
+            .expect_err("still closed");
+        assert!(err.message().contains("safe mode"), "{err}");
+        return;
+    }
+
     // The right token applies it.
     let token = nook_engine::profiles::safe_token(&f.conn).expect("a token");
     let out = f
