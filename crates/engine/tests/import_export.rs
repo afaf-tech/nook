@@ -445,12 +445,24 @@ fn a_compressed_backup_is_a_real_gzip_file() {
     f.sql("CREATE TABLE t (id INTEGER PRIMARY KEY)");
     f.sql("INSERT INTO t (id) VALUES (1)");
     let path = f.dir.join("dump.sql");
-    let out = f.run(
+    let out = f.try_run(
         "backup.compression",
         json!({
             "conn": f.conn.clone(), "path": path.to_string_lossy(), "compress": true,
         }),
     );
+    let Ok(out) = out else {
+        // Compression shells out to `gzip`, and the refusal happens before any rename: the plain dump
+        // is written, nothing claims the compressed name, and the error names the missing tool.
+        let err = out.unwrap_err();
+        assert!(err.message().contains("gzip"), "{err}");
+        assert!(
+            path.exists(),
+            "the uncompressed dump survives a refused filter"
+        );
+        assert!(!path.with_file_name("dump.sql.gz").exists(), "no empty .gz");
+        return;
+    };
     let written = out["path"].as_str().expect("path");
     assert!(written.ends_with(".gz"), "{out}");
     let bytes = std::fs::read(written).expect("the .gz exists");
