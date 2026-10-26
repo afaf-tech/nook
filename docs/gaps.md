@@ -61,7 +61,7 @@ Shipped: `tools.importExcel` reads the first sheet of an `.xlsx` (calamine) thro
 `tools.exportExcel` writes a query result as a plain one-sheet workbook. Still open: styles,
 multi-sheet output and `.xls` (legacy binary) input.
 
-## 7. ~~Cancelling a running statement~~ — engine done, UI wiring open
+## 7. ~~Cancelling a running statement, and painting it~~ — done
 
 Shipped: `sql.runAsync` starts a run on a worker and reports pages as they land; `sql.stop` /
 `sql.cancel` cancel it. The worker dials its own connection and records the backend pid, so a cancel
@@ -69,9 +69,12 @@ dials a sibling connection from the same profile and issues `pg_cancel_backend` 
 `KILL QUERY` (MySQL). SQLite has no server-side cancel: it stops between pages and the command's
 answer says exactly that. A cancelled run's state is `cancelled`, never `failed`.
 
-Still open: the editor's Run button still calls blocking `sql.run`, so the design's `Executing…` pill
-and `.prog` hairline are still not painted. Converting the remaining call sites to `sql.runAsync` and
-polling `sql.jobStatus` per frame is the wiring, not the mechanism.
+Shipped: a single statement now runs in the background — `dispatch` routes the editor's Run to
+`sql.runAsync` — and the editor paints the running state the design specifies while it is in flight: a
+`.prog` hairline, an `Executing…` pill, and a live `Stop`. `pump_runner` advances the worker each
+frame. Still open: a script of more than one statement, which still calls the blocking `sql.run`
+because the runner streams one statement; making a whole script async (so its running state paints)
+is the mechanism left.
 
 ## 8. ~~Visual explain plans and a profiler~~ — done
 

@@ -180,11 +180,15 @@ process table. This is the pre-existing path for SSH and database passwords too,
 
 ## Known design choices and their ceilings
 
-- **`sql.runAsync` is opt-in; `sql.run` still blocks.** The async path exists and is what `Stop`
-  cancels, but the editor's Run button still calls `sql.run`: converting the remaining blocking call
-  sites is named in `docs/gaps.md` §7 as the open work. The pane paints no spinner of its own — it
-  paints the run's live row count, which is the same number the register's note shows, because two
-  places describing one run differently is the failure this avoids.
+- **A single statement runs in the background; a script blocks.** `dispatch` routes a one-statement
+  `sql.run` to `sql.runAsync`, so the frame keeps drawing, rows land as they are read, and `Stop` has
+  a running job to cancel — the editor paints that state (a `.prog` hairline, an `Executing…` pill, a
+  live `Stop`) from `runner.running_for_tab`. A script of more than one statement still calls the
+  blocking `sql.run`, because the runner streams one statement and pretending otherwise would drop the
+  rest; there is no running state to paint and `Stop` sits disabled. Making a whole script async is
+  the open work named in `docs/gaps.md` §7. The pane never paints a spinner of its own: it shows the
+  run's live row count, the same number the register's note shows, because two places describing one
+  run differently is the failure this avoids.
 - **Cancel needs a second connection.** A server cannot be asked to cancel the statement the only
   connection is busy executing, so `Runner::cancel` dials a sibling from the same profile (password
   included, via `dial_config`) and issues `pg_cancel_backend` / `KILL QUERY`. SQLite has no such call:

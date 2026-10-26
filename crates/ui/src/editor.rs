@@ -3,11 +3,12 @@
 //! under them, the results register [`crate::register`] paints.
 //!
 //! Everything here reads the tab's own `SqlState`: the script it holds, the runs the engine recorded
-//! and the error the failed one carries. The design's running state (a `.prog` hairline, an
-//! `Executing…` pill, a live `Stop`) is deliberately absent — a run is synchronous on the UI thread
-//! and `sql.stop` answers `unsupported`, so no frame of this app can show it (see `docs/gaps.md` §7
-//! and the ceiling in `docs/architecture.md`). `Stop` is painted disabled with the engine's own
-//! sentence as its hover text instead.
+//! and the error the failed one carries. A single statement runs in the background — `dispatch`
+//! routes it to `sql.runAsync` and the frame keeps drawing while `pump_runner` advances it — so while
+//! one is in flight the editor paints the design's running state from `runner.running_for_tab`: a
+//! `.prog` hairline, an `Executing…` pill, and a live `Stop` that cancels the job. A multi-statement
+//! script stays blocking on the UI thread (the runner streams one statement), so there is no running
+//! state to show and the `Stop` is painted disabled with the engine's own sentence as its hover text.
 
 use egui::text::LayoutJob;
 use egui::{
@@ -214,6 +215,18 @@ pub fn show(
     // cover the editor it exists to fill.
     crate::ai::band(ui, session, state, tokens);
     layout.popup = sql_area(ui, session, tab_index, state, tokens, &mut layout);
+    // `.prog`: a 2px accent rule along the editor's top edge while a single statement runs in the
+    // background. Gated on the tab's own running job — the same one `toolbar` reads to enable Stop —
+    // so a blocking script or a settled run paints none.
+    if running_job.is_some() {
+        if let Some(sql) = layout.sql {
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(sql.min, egui::vec2(sql.width(), 2.0)),
+                0.0,
+                tokens.accent,
+            );
+        }
+    }
     // The toolbar's and the editor's own controls have recorded what they want by now. Running them
     // before the outcome surfaces are measured is what makes a click on Run paint its own result —
     // the strips, the band, the register — in the frame that asked for it.
@@ -704,6 +717,10 @@ fn toolbar(
             .clicked()
             {
                 actions.command = Some(("sql.runStatement", serde_json::json!({"index": index})));
+            }
+            // A single statement is running in the background: say so beside the Stop that ends it.
+            if running_job.is_some() {
+                design::chip(ui, tokens, "Executing…", tokens.text_faint);
             }
             // Enabled exactly when there is a background run to stop: the button's own state is the
             // answer to "can I stop this", and it carries the registry's help when it cannot.
@@ -1728,30 +1745,64 @@ mod tests {
         time: f64,
         rect: Rect,
     ) -> Frame {
-        let (session, state, tokens) = pane_state;
-        tokens.apply(ctx);
+        // A one-statement run goes to the background, so a test frame has to pump the way the app's
+        // frame does: take whatever the worker sent, and wait for a run that is still going so a
+        // frame after a click paints the result the click asked for.
+        let input = {
+            let (session, _, _) = pane_state;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                session.pump();
+                if !session.runner.jobs().any(|j| j.state.is_running())
+                    || std::time::Instant::now() > deadline
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    pos2(0.0, 0.0),
+                    egui::vec2(1440.0, 900.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            }
+        };
+        paint_run(ctx, pane_state, input, rect)
+    }
+
+    /// One frame with no wait-for-done pump: for asserting a run's *running* state, which by
+    /// definition has not settled. [`frame`] drains the worker's messages before painting, which
+    /// would flip the job to `Done`; here the background run a click just started is still `Running`
+    /// — nothing has drained it — so the hairline and the `Executing…` pill are on screen. No engine
+    /// seam: the job's state only changes in `drain`, so not calling it is what keeps it running.
+    fn paint(
+        ctx: &egui::Context,
+        pane_state: &mut (Session, UiState, Tokens),
+        events: Vec<egui::Event>,
+        time: f64,
+    ) -> Frame {
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(
-                pos2(0.0, 0.0),
-                egui::vec2(1440.0, 900.0),
-            )),
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1440.0, 900.0))),
             time: Some(time),
             events,
             ..Default::default()
         };
-        // A one-statement run goes to the background, so a test frame has to pump the way the app's
-        // frame does: take whatever the worker sent, and wait for a run that is still going so a
-        // frame after a click paints the result the click asked for.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            session.pump();
-            if !session.runner.jobs().any(|j| j.state.is_running())
-                || std::time::Instant::now() > deadline
-            {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
+        paint_run(ctx, pane_state, input, pane())
+    }
+
+    /// Apply the tokens, run one UI frame at `rect`, and collect what it painted. Shared by
+    /// [`frame_in`] (after its pump) and [`paint`] (with none), so the two render paths never drift.
+    fn paint_run(
+        ctx: &egui::Context,
+        pane_state: &mut (Session, UiState, Tokens),
+        input: egui::RawInput,
+        rect: Rect,
+    ) -> Frame {
+        let (session, state, tokens) = pane_state;
+        tokens.apply(ctx);
         let mut layout = Layout::default();
         let mut out = ctx.run_ui(input, |ui| {
             let mut child = ui.new_child(
@@ -2078,8 +2129,11 @@ mod tests {
         assert!(!mark(row(1)), "the statement above carries no marker");
     }
 
+    /// A multi-statement script runs blocking on the UI thread (the runner streams one statement),
+    /// so it never creates a background job and the running state stays off — the contrast to
+    /// [`a_background_run_paints_the_running_state`].
     #[test]
-    fn no_frame_shows_the_running_state() {
+    fn a_blocking_script_shows_no_running_state() {
         let ctx = egui::Context::default();
         let tokens = Tokens::of("dark");
         let mut world = world(
@@ -2109,6 +2163,40 @@ mod tests {
                 && rect.top() > toolbar.top() - 1.0
                 && rect.bottom() < toolbar.bottom() + 1.0),
             "the toolbar is painted as a failure"
+        );
+    }
+
+    /// A single statement goes to the background, so while it is in flight the editor paints the
+    /// design's running state: the `.prog` hairline, the `Executing…` pill, and a Stop that can end
+    /// the run. Deterministic without any engine seam — the click starts the job, and because this
+    /// paint does not pump, `drain` never flips it to `Done`, so `running_for_tab` stays `Some`.
+    #[test]
+    fn a_background_run_paints_the_running_state() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::of("dark");
+        let mut world = world("bg", "select 1 as a;");
+        // Start the background run: the click routes the single statement to sql.runAsync, which
+        // creates a Running job on the calling thread.
+        let run = click_hit(&ctx, &mut world, "Run", 1.0);
+        let _ = frame(&ctx, &mut world, run, 1.1);
+        // Paint one frame without pumping, so the job is still running.
+        let f = paint(&ctx, &mut world, Vec::new(), 1.2);
+        // The `.prog` hairline: a wide, 2px accent rule along the editor's top edge.
+        let sql = f.layout.sql.unwrap();
+        assert!(
+            f.fills.iter().any(|(rect, fill)| *fill == tokens.accent
+                && rect.height() <= 2.0
+                && rect.width() > 100.0
+                && rect.top() < sql.top() + 3.0),
+            "the editor paints a progress hairline while a run is in flight"
+        );
+        // The `Executing…` pill, and a Stop that is enabled to end the run.
+        assert!(f.shows("Executing"), "the editor shows an Executing… pill");
+        let stop = f.label("Stop");
+        assert!(
+            f.fills.iter().any(|(rect, fill)| *fill == tokens.panel_high
+                && rect.contains(stop.center())),
+            "Stop is enabled (filled) while a job runs"
         );
     }
 
