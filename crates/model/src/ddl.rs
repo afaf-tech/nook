@@ -49,7 +49,7 @@ pub fn column_ddl(col: &Column, dialect: Dialect, inline_pk: bool) -> String {
     } else if col.auto_increment && dialect == Dialect::MySql {
         out.push_str(" AUTO_INCREMENT");
     }
-    if !col.nullable && !(inline_pk && dialect == Dialect::Sqlite) {
+    if !(col.nullable || inline_pk && dialect == Dialect::Sqlite) {
         out.push_str(" NOT NULL");
     }
     if let Some(d) = &col.default {
