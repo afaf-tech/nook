@@ -116,6 +116,8 @@ the command id that implements it. [`docs/parity-checklist.md`](docs/parity-chec
 generated coverage report, and a test keeps it above a floor that only rises. `cargo xtask parity`
 (or `nook-cli parity` from an install) prints the same numbers, area by area, with the gaps named.
 
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup and how to send a change.
+
 ## Architecture
 
 | Layer | Crate | Job |
@@ -137,7 +139,7 @@ See [`ROADMAP.md`](ROADMAP.md) for status and [`docs/gaps.md`](docs/gaps.md) for
 
 ## License
 
-MIT OR Apache-2.0. Nook is an independent, clean-room project: no Navicat code, resources, icons, or
+Dual-licensed under [`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE). Nook is an independent, clean-room project: no Navicat code, resources, icons, or
 wording were copied. Navicat is a trademark of PremiumSoft Cybertech Ltd; PostgreSQL, MySQL, and SQLite
 belong to their respective owners. Architecture conventions follow the
 [WordCraft](https://github.com/storytold/wordcraft) project as a model.
