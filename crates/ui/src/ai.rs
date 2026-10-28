@@ -15,6 +15,7 @@ use nook_ai::Provider;
 use nook_engine::Session;
 
 use crate::app::AiForm;
+use crate::icons::Glyph;
 use crate::strings::tr;
 use crate::theme::{self as design, Emphasis, Mark, Tokens};
 
@@ -633,7 +634,7 @@ fn steps(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
             if form.provider.models().is_empty() {
                 "this server serves what it was started with"
             } else {
-                "the ids the provider ships"
+                "type any id — the shipped list is a shortcut"
             },
             |ui| {
                 model_control(ui, tokens, form, control_w);
@@ -643,25 +644,41 @@ fn steps(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm) {
     });
 }
 
-/// The model: a dropdown of the provider's own list, with a free-text field only where the provider
-/// names no models.
+/// The model: an editable field for every provider — the vendors ship ids faster than this app can
+/// follow, so the provider's own list is a shortcut beside the field, never a fence around it. The
+/// engine sends the typed id verbatim, and an empty field keeps the engine's rule: the provider's
+/// own default, named by the hint.
 ///
-/// The dropdown is the control the user picks from; the vendors ship ids faster than this app can
-/// follow, so a provider that serves what it was started with (vLLM ad hoc, a custom gateway) keeps
-/// the field instead — there the list would be empty and the field is the only way to name a model.
+/// ponytail: a typed id survives only as the active provider's model (a provider switch clears it,
+/// the switch's own rule). Persisting a per-provider history means a list in `AiConfig` and a store
+/// migration — add when someone loses a typed id to the switch and minds.
 fn model_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width: f32) {
     let models = form.provider.models();
-    if models.is_empty() {
-        ui.allocate_ui_with_layout(
-            Vec2::new(width, 0.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.spacing_mut().item_spacing.y = f32::from(design::S2);
-                design::input(ui, tokens, width, false, true, |ui| {
+    let hint = if models.is_empty() {
+        "name the model the server serves".to_owned()
+    } else {
+        format!("empty = {}", form.provider.default_model())
+    };
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.spacing_mut().item_spacing.y = f32::from(design::S2);
+            ui.horizontal(|ui| {
+                // List-less: the field keeps the whole column; otherwise it yields the shortcut's
+                // width and the gap between them.
+                let field_w = if models.is_empty() {
+                    width
+                } else {
+                    width
+                        - design::icon_button_width(ui, tokens, "", true)
+                        - ui.spacing().item_spacing.x
+                };
+                design::input(ui, tokens, field_w, false, true, |ui| {
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut form.model)
                             .desired_width(f32::INFINITY)
-                            .hint_text("name the model the server serves")
+                            .hint_text(hint)
                             .font(tokens.mono(design::T_SM))
                             .frame(egui::Frame::NONE)
                             .margin(egui::Margin::ZERO)
@@ -672,29 +689,31 @@ fn model_control(ui: &mut egui::Ui, tokens: &Tokens, form: &mut AiForm, width: f
                     }
                     response
                 });
-            },
-        );
-        return;
-    }
-    // `width` rather than the default: a combo sizes itself to its selected text, and a long name
-    // would widen the column past the pane — the text elides in the button instead.
-    egui::ComboBox::from_id_salt("ai-model")
-        .width(width)
-        .selected_text(RichText::new(form.effective_model()).font(tokens.mono(design::T_XS)))
-        .show_ui(ui, |ui| {
-            for model in models {
-                // Against `effective_model()`, not the raw field: an empty field means the
-                // provider's own default, and the combo shows that name — it has to be the one
-                // marked, or the list contradicts the button it hangs from.
-                if ui
-                    .selectable_label(form.effective_model() == *model, *model)
-                    .clicked()
-                {
-                    form.model = (*model).to_string();
-                    form.dirty = true;
+                if models.is_empty() {
+                    return;
                 }
-            }
-        });
+                let shortcut = design::icon_button(ui, tokens, "", Some(Glyph::Chevron), true);
+                egui::Popup::menu(&shortcut).show(|ui| {
+                    ui.set_min_width(width);
+                    for model in models {
+                        // Against `effective_model()`, not the raw field: an empty field means the
+                        // provider's own default, and the hint names it — the list marks the one a
+                        // request would send.
+                        if ui
+                            .selectable_label(
+                                form.effective_model() == *model,
+                                RichText::new(*model).font(tokens.mono(design::T_XS)),
+                            )
+                            .clicked()
+                        {
+                            form.model = (*model).to_string();
+                            form.dirty = true;
+                        }
+                    }
+                });
+            });
+        },
+    );
 }
 
 /// One numbered step as its own nested grid: the number+name column on the left, the control on the

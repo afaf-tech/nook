@@ -2911,12 +2911,12 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_with_a_model_list_picks_from_a_dropdown() {
-        // The model step is a picker whenever the provider ships ids: the combo's button shows the
-        // effective model (the provider's own default while the field is empty), and no free-text
-        // field sits beside it to hold a second, disagreeing value.
+    fn a_provider_with_a_list_gets_an_editable_field_and_a_shortcut() {
+        // The vendors ship model ids faster than this app can follow, so the model step is the
+        // editable field for every provider — the hint names the default an empty field sends —
+        // and the provider's own list is a shortcut beside it, never a fence around it.
         let ctx = egui::Context::default();
-        let mut world = world("ai-model-picker", "select 1;\n");
+        let mut world = world("ai-model-editable", "select 1;\n");
         world.1.ai_band = true;
         world.1.ai_form = crate::app::AiForm {
             provider: nook_ai::Provider::OpenAi,
@@ -2928,29 +2928,28 @@ mod tests {
             "the model step is painted: {:#?}",
             f.strings
         );
-        // The closed combo shows the provider's default, because the field is empty and that is
-        // what a request would send.
         assert!(
-            f.shows("gpt-4o-mini"),
-            "the combo shows the effective model: {:#?}",
+            f.shows("empty = gpt-4o-mini"),
+            "the field's hint names the default an empty field sends: {:#?}",
             f.strings
         );
         assert!(
-            f.shows("where the request goes"),
-            "the provider's description line is painted: {:#?}",
+            f.shows("type any id — the shipped list is a shortcut"),
+            "the description says the field is editable: {:#?}",
             f.strings
         );
         assert!(
             !f.shows("this server serves what it was started with"),
-            "the model description belongs to list-less providers' cells only: {:#?}",
+            "the list-less note belongs to vLLM's cell only: {:#?}",
             f.strings
         );
     }
 
     #[test]
     fn a_provider_without_a_model_list_keeps_the_free_text_field() {
-        // vLLM ships no ids — it serves what it was started with — so the picker would be an empty
-        // dropdown and the field is the only way to name a model.
+        // vLLM ships no ids — it serves what it was started with — so the shortcut would be an
+        // empty dropdown and the field is the only way to name a model: same editable field, no
+        // list note about defaults there is none to name.
         let ctx = egui::Context::default();
         let mut world = world("ai-model-fallback", "select 1;\n");
         world.1.ai_band = true;
@@ -2962,6 +2961,16 @@ mod tests {
         assert!(
             f.shows("this server serves what it was started with"),
             "the list-less note is painted: {:#?}",
+            f.strings
+        );
+        assert!(
+            f.shows("name the model the server serves"),
+            "the field's hint asks for the id the server serves: {:#?}",
+            f.strings
+        );
+        assert!(
+            !f.shows("empty ="),
+            "no default hint where the provider names none: {:#?}",
             f.strings
         );
     }
