@@ -516,10 +516,8 @@ impl Driver for Postgres {
         let mut truncated = false;
         for m in messages {
             match m {
-                SimpleQueryMessage::RowDescription(desc) => {
-                    if names.is_empty() {
-                        names = desc.iter().map(|c| c.name().to_string()).collect();
-                    }
+                SimpleQueryMessage::RowDescription(desc) if names.is_empty() => {
+                    names = desc.iter().map(|c| c.name().to_string()).collect();
                 }
                 SimpleQueryMessage::Row(row) => {
                     if rs.rows.len() >= limit {
