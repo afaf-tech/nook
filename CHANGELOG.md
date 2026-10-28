@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Release builds now publish `checksums.txt` plus a rendered Homebrew formula (`nook.rb`) and
+  Scoop manifest (`nook.json`) as release assets; see `packaging/README.md` for tap/bucket setup.
+
 ## [0.1.0] - 2026-10-28
 
 First public release. Nook is a Navicat-style database workbench for SQLite, PostgreSQL, and MySQL, shipped as a desktop app (`nook`), a CLI (`nook-cli`), and an MCP server for agents.

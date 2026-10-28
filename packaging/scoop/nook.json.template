@@ -1,0 +1,30 @@
+{
+    "version": "@VERSION@",
+    "description": "Database workbench for SQLite, PostgreSQL, and MySQL — desktop app, CLI, and MCP server",
+    "homepage": "@URL_BASE@",
+    "license": "MIT OR Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "@URL_BASE@/releases/download/v@VERSION@/nook-v@VERSION@-x86_64-pc-windows-msvc.zip",
+            "hash": "@SHA256_WINDOWS@",
+            "extract_dir": "nook-v@VERSION@-x86_64-pc-windows-msvc"
+        }
+    },
+    "bin": [
+        "nook.exe",
+        "nook-cli.exe"
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "@URL_BASE@/releases/download/v$version/nook-v$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "nook-v$version-x86_64-pc-windows-msvc"
+            }
+        },
+        "hash": {
+            "url": "@URL_BASE@/releases/download/v$version/checksums.txt",
+            "regex": "^$sha256\\s+\\*?nook-v$version-x86_64-pc-windows-msvc\\.zip$"
+        }
+    }
+}
