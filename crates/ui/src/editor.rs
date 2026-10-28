@@ -1785,7 +1785,10 @@ mod tests {
         time: f64,
     ) -> Frame {
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1440.0, 900.0))),
+            screen_rect: Some(Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
             time: Some(time),
             events,
             ..Default::default()
@@ -2194,8 +2197,9 @@ mod tests {
         assert!(f.shows("Executing"), "the editor shows an Executing… pill");
         let stop = f.label("Stop");
         assert!(
-            f.fills.iter().any(|(rect, fill)| *fill == tokens.panel_high
-                && rect.contains(stop.center())),
+            f.fills
+                .iter()
+                .any(|(rect, fill)| *fill == tokens.panel_high && rect.contains(stop.center())),
             "Stop is enabled (filled) while a job runs"
         );
     }
